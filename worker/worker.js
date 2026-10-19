@@ -220,20 +220,71 @@ const dur = (sec) => esc(duration(sec));
 const MARK = { done: '✅', min: '◐', moved: '↷', skipped: '✕' };
 const short = (s) => (s.length > 16 ? `${s.slice(0, 15)}…` : s);
 
-/** Рядок справи у повідомленні вікна: стан, тема, таймер чи підсумок. */
-function itemLine(it, a, tz, now) {
+// Емодзі за іконкою заняття в застосунку — у Telegram SVG-іконок немає
+const ACT_EMOJI = {
+  book: '📘', globe: '🌍', code: '💻', pen: '✍️', bulb: '💡', calc: '🧮', chart: '📊',
+  music: '🎵', headphones: '🎧', piano: '🎹', mic: '🎤', brush: '🖌', palette: '🎨', camera: '📷',
+  run: '🏃', dumbbell: '🏋️', bike: '🚴', swim: '🏊', ball: '⚽', mountain: '⛰', target: '🎯', shield: '🛡',
+  film: '🎬', game: '🎮', chess: '♟', dice: '🎲', cook: '🍳', coffee: '☕', plant: '🌱', paw: '🐾',
+  tool: '🔧', car: '🚗', map: '🗺', tent: '⛺', star: '⭐', heart: '❤️',
+};
+const SLOT_EMOJI = { m: '🌅', n: '☀️', e: '🌙' };
+const actEmoji = (a) => ACT_EMOJI[a?.icon] ?? '▫️';
+
+const DAYS = ['Неділя', 'Понеділок', 'Вівторок', 'Середа', 'Четвер', "П'ятниця", 'Субота'];
+const MONTHS = ['січня', 'лютого', 'березня', 'квітня', 'травня', 'червня', 'липня', 'серпня', 'вересня', 'жовтня', 'листопада', 'грудня'];
+
+function plural(n, one, few, many) {
+  const m10 = n % 10;
+  const m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
+  return many;
+}
+
+/** «Понеділок, 19 жовтня». */
+function dayTitle(date) {
+  const [y, m, d] = date.split('-').map(Number);
+  return `${DAYS[new Date(Date.UTC(y, m - 1, d)).getUTCDay()]}, ${d} ${MONTHS[m - 1]}`;
+}
+
+/** Заголовок вікна: «🌅 Ранок · 07:00–09:00». */
+const slotHead = (slot) => `${SLOT_EMOJI[slot?.id] ?? '🕒'} <b>${esc(slot?.label ?? '')}</b>${slot ? ` · ${slot.from}–${slot.to}` : ''}`;
+
+/** «▰▰▰▱▱» — тижнева ціль текстом; довгі цілі стискаємо до 10 позицій. */
+function progressBar(done, target) {
+  const n = Math.min(10, Math.max(target, 1));
+  const full = Math.min(n, Math.round((Math.min(done, target) / Math.max(target, 1)) * n));
+  return '▰'.repeat(full) + '▱'.repeat(n - full);
+}
+
+/**
+ * Справа у повідомленні: перший рядок — стан і назва, другий («└») — подробиці.
+ * Відкрита — емодзі заняття; йде — ▶; відмічена — ✅ ◐ ✕ ↷.
+ */
+function itemLines(it, a, tz, now) {
   const sec = elapsed(it, now);
+  const name = esc(a.name);
   const topic = it.topic ? ` — ${esc(it.topic)}` : '';
   if (it.status === 'planned') {
-    if (it.runningSince) return `▶ <b>${esc(a.name)}</b>${topic} · йде з ${local(it.runningSince, tz).hm}${sec ? `, ${dur(sec)}` : ''}`;
-    if (sec) return `⏸ <b>${esc(a.name)}</b>${topic} · на паузі, ${dur(sec)}`;
+    if (it.runningSince) return [`▶️ <b>${name}</b>${topic}`, `   └ йде з ${local(it.runningSince, tz).hm}${sec ? ` · ${dur(sec)}` : ''}`];
     const plan = [a.minutes ? `~${a.minutes} хв` : '', a.minVersion ? `мінімум: ${esc(a.minVersion)}` : ''].filter(Boolean).join(' · ');
-    return `• <b>${esc(a.name)}</b>${topic}${plan ? `\n   <i>${plan}</i>` : ''}`;
+    const pausedAt = sec ? `⏸ на паузі, ${dur(sec)}` : '';
+    const details = [pausedAt, plan].filter(Boolean).join(' · ');
+    return [`${actEmoji(a)} <b>${name}</b>${topic}`, ...(details ? [`   └ <i>${details}</i>`] : [])];
   }
-  const when = it.doneAt ? ` о ${it.doneAt}` : '';
-  const spent = sec && (it.status === 'done' || it.status === 'min') ? ` · ${dur(sec)}` : '';
-  const where = it.status === 'moved' && it.movedLabel ? ` ${esc(it.movedLabel)}` : '';
-  return `${MARK[it.status] ?? ''} ${esc(a.name)}${topic} — ${(STATUS[it.status] ?? it.status).toLowerCase()}${where}${when}${spent}`;
+  const parts = [(STATUS[it.status] ?? it.status).toLowerCase()];
+  if (it.status === 'moved' && it.movedLabel) parts[0] += ` ${esc(it.movedLabel)}`;
+  if (it.doneAt) parts.push(`о ${it.doneAt}`);
+  if (sec && (it.status === 'done' || it.status === 'min')) parts.push(dur(sec));
+  return [`${MARK[it.status] ?? '•'} ${name}${topic}`, `   └ <i>${parts.join(' · ')}</i>`];
+}
+
+/** «1 год 20 хв» до кінця вікна — щоб було видно, скільки ще є часу. */
+function timeLeft(date, slot, tz, now) {
+  if (!slot) return '';
+  const left = zoned(date, slot.to, tz) - now;
+  return left > 0 ? dur(Math.round(left / 1000)) : '';
 }
 
 /** Повний набір кнопок однієї справи — коли вона у вікні одна відкрита. */
@@ -253,11 +304,17 @@ function fullKeyboard(it, now) {
  */
 function windowMessage(list, acts, slot, tz, now, { prefix = '', more = null } = {}) {
   const sorted = [...list].sort((x, y) => (acts.get(x.activityId)?.order ?? 99) - (acts.get(y.activityId)?.order ?? 99));
-  const lines = [];
-  if (prefix) lines.push(prefix);
-  lines.push(`<b>${esc(slot?.label ?? '')}${slot ? ` · ${slot.from}–${slot.to}` : ''}</b>`);
-  for (const it of sorted) lines.push(itemLine(it, acts.get(it.activityId) ?? MISSING, tz, now));
   const open = sorted.filter((it) => it.status === 'planned');
+  const lines = [];
+  if (prefix) lines.push(`<i>${prefix}</i>`);
+  lines.push(slotHead(slot), '');
+  for (const it of sorted) lines.push(...itemLines(it, acts.get(it.activityId) ?? MISSING, tz, now));
+  // Підсумок унизу: скільки відмічено й скільки часу ще у вікні
+  const real = sorted.filter((it) => it.status !== 'moved');
+  const counted = real.filter((it) => it.status === 'done' || it.status === 'min').length;
+  const left = open.length && sorted[0] ? timeLeft(sorted[0].date, slot, tz, now) : '';
+  if (open.length && real.length > 1) lines.push('', `Зроблено ${counted} з ${real.length}${left ? ` · ⏳ до кінця вікна ${left}` : ''}`);
+  else if (open.length && left) lines.push('', `⏳ До кінця вікна ${left}`);
   let keyboard = [];
   const picked = open.find((it) => it.id === more);
   if (open.length === 1) {
@@ -276,8 +333,8 @@ function windowMessage(list, acts, slot, tz, now, { prefix = '', more = null } =
       btn('⋯', 'more', it),
     ]);
     if (!open.some((it) => it.runningSince)) keyboard.push([btn('⏰ +30 хв — усе вікно', 'snooze', open[0])]);
-  } else {
-    lines.push('', 'Вікно закрите — дякую!');
+  } else if (sorted.length) {
+    lines.push('', counted ? `🎉 Вікно закрите: зараховано ${counted} з ${real.length}` : 'Вікно закрите — наступного разу вийде');
   }
   return { text: lines.join('\n'), reply_markup: { inline_keyboard: keyboard } };
 }
@@ -686,26 +743,24 @@ async function sendToday(env, chatId, now, title, morning = false) {
   const cfg = await slotsCfg(env);
   const acts = await actsMap(env);
   const items = await todayItems(env, date);
-  const lines = [`<b>${esc(title)}</b>`];
+  const lines = [`<b>${esc(title)}</b>`, `<i>${dayTitle(date)}</i>`];
   if (!items.length) {
-    lines.push(morning ? 'План на сьогодні ще порожній — дві хвилини, і готово.' : 'На сьогодні нічого не заплановано.');
+    lines.push('', morning ? 'План на сьогодні ще порожній — дві хвилини, і готово.' : 'На сьогодні нічого не заплановано.');
   } else {
-    const mark = { done: '✅', min: '◐', skipped: '✕', planned: '•' };
+    // По вікнах: заголовок вікна, під ним справи; порожнє вікно — «вільно»
     for (const slot of slotsFor(date, cfg)) {
-      // У вікні може бути кілька справ — кожна окремим рядком, у порядку занять
       const mine = items.filter((x) => x.slot === slot.id)
         .sort((x, y) => (acts.get(x.activityId)?.order ?? 99) - (acts.get(y.activityId)?.order ?? 99));
-      for (const it of mine) {
-        const a = acts.get(it.activityId) ?? MISSING;
-        const running = it.status === 'planned' && it.runningSince ? ' ▶' : '';
-        const spent = elapsed(it, now);
-        lines.push(`${mark[it.status] ?? '•'} ${esc(slot.label)} — ${esc(a.name)}${it.topic ? `, ${esc(it.topic)}` : ''}${running}${spent ? ` · ${dur(spent)}` : ''}`);
-      }
+      lines.push('', slotHead(slot));
+      if (!mine.length) lines.push('   <i>вільно</i>');
+      for (const it of mine) lines.push(...itemLines(it, acts.get(it.activityId) ?? MISSING, tz, now));
     }
-    if (!morning) {
-      const done = items.filter((x) => x.status === 'done' || x.status === 'min').length;
-      lines.push('', `Зараховано: ${done} з ${items.length}`);
-    }
+    const done = items.filter((x) => x.status === 'done' || x.status === 'min');
+    const sec = done.reduce((s, x) => s + (x.spent || 0), 0);
+    const minutes = items.reduce((s, x) => s + ((acts.get(x.activityId) ?? MISSING).minutes || 0), 0);
+    lines.push('', morning
+      ? `Сьогодні ${items.length} ${plural(items.length, 'справа', 'справи', 'справ')}${minutes ? ` · ~${minutes} хв` : ''}. Гарного дня!`
+      : `Зараховано ${done.length} з ${items.length}${sec ? ` · ${dur(sec)}` : ''}`);
   }
   const link = items.length ? { text: 'Відкрити план', url: `${APP_URL}#today` } : { text: 'Спланувати', url: `${APP_URL}#plan` };
   await tg(env, 'sendMessage', { chat_id: chatId, parse_mode: 'HTML', text: lines.join('\n'), reply_markup: { inline_keyboard: [[link]] } });
@@ -722,14 +777,28 @@ async function sendWeek(env, chatId, now) {
   const items = results.map((r) => JSON.parse(r.data));
   const pauses = await pausesOf(env);
   const paused = Array.from({ length: 7 }, (_, i) => addDays(start, i)).filter((d) => pauseOn(d, pauses)).length;
-  const lines = [`<b>Тиждень</b>${paused ? ` · пауза ${paused} дн., цілі менші` : ''}`];
+  const [, sm, sd] = start.split('-').map(Number);
+  const [, em, ed] = end.split('-').map(Number);
+  const range = sm === em ? `${sd}–${ed} ${MONTHS[em - 1]}` : `${sd} ${MONTHS[sm - 1]} – ${ed} ${MONTHS[em - 1]}`;
+  const lines = [`📊 <b>Тиждень</b> · ${range}`];
+  if (paused) lines.push(`<i>🌴 Пауза ${paused} дн. — цілі менші</i>`);
+  lines.push('');
+  let doneAll = 0;
+  let targetAll = 0;
+  let secAll = 0;
   for (const a of acts) {
     const mine = items.filter((x) => x.activityId === a.id);
     const sec = mine.reduce((s, x) => s + (x.spent || 0), 0);
     const target = weekTarget(a, start, pauses);
-    lines.push(`${mine.length >= target ? '✅' : '•'} ${esc(a.name)}: ${mine.length}/${target}${sec ? ` · ${dur(sec)}` : ''}`);
+    doneAll += Math.min(mine.length, target);
+    targetAll += target;
+    secAll += sec;
+    const ok = target > 0 && mine.length >= target;
+    lines.push(`${actEmoji(a)} <b>${esc(a.name)}</b>${ok ? ' ✅' : ''}`);
+    lines.push(`   ${progressBar(mine.length, target)}  ${mine.length}/${target}${sec ? ` · ${dur(sec)}` : ''}`);
   }
   if (!acts.length) lines.push('Заняття ще не синхронізовані — відкрий застосунок.');
+  else lines.push('', `Разом ${doneAll} з ${targetAll}${secAll ? ` · ${dur(secAll)}` : ''}`);
   await tg(env, 'sendMessage', {
     chat_id: chatId, parse_mode: 'HTML', text: lines.join('\n'),
     reply_markup: { inline_keyboard: [[{ text: 'Відкрити тиждень', url: `${APP_URL}#week` }]] },
