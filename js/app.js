@@ -4,7 +4,7 @@ import * as M from './model.js';
 import { $, h, icon, toast, sheet, closeSheet, chips, swipeable, swipeStep, fold } from './ui.js';
 import { initSync, syncNow, scheduleSync, botConfig, setBotConfig, lastSync } from './sync.js';
 
-const state = { activities: [], plan: [], meta: [], tombstones: [] };
+const state = { activities: [], plan: [], meta: [], reminders: [], tombstones: [] };
 let slotsCfg = structuredClone(M.DEFAULT_SLOTS);
 let tab = 'today';
 let planDate = M.ymd();
@@ -54,16 +54,22 @@ async function save(changes, { render: redraw = true, remote = false } = {}) {
 }
 
 /** Відмітки з бота: беремо лише новіші за наші. */
-async function applyRemote(items, deleted) {
-  const put = items.filter((r) => {
-    const mine = state.plan.find((p) => p.id === r.id);
+async function applyRemote(items, deleted, reminders = [], reminderDeleted = []) {
+  const newer = (store) => (r) => {
+    const mine = state[store].find((p) => p.id === r.id);
     return !mine || (r.updated || 0) > (mine.updated || 0);
-  });
+  };
+  const changes = {};
+  const put = items.filter(newer('plan'));
   const del = deleted.filter((id) => state.plan.some((p) => p.id === id));
-  if (!put.length && !del.length) return;
+  if (put.length || del.length) changes.plan = { put, del };
+  const rPut = reminders.filter(newer('reminders'));
+  const rDel = reminderDeleted.filter((id) => state.reminders.some((r) => r.id === id));
+  if (rPut.length || rDel.length) changes.reminders = { put: rPut, del: rDel };
+  if (!Object.keys(changes).length) return;
   // Шторка відкрита чи щось вводять — дані зберігаємо, а перемалюємо з наступним тіком годинника
   const busy = $('layer').childElementCount || document.activeElement?.matches('input, textarea');
-  await save({ plan: { put, del } }, { remote: true, render: !busy });
+  await save(changes, { remote: true, render: !busy });
 }
 
 // Відкритість згорнутих груп: екран перемальовується щохвилини, тож стан живе тут, а не в DOM.
@@ -422,6 +428,137 @@ function pauseSection() {
   return folded('set-pause', head, body, { def: Boolean(cur), cls: 'card' });
 }
 
+// ---------- нагадування «не забудь» ----------
+
+// Позначки «зроблено» старші за два місяці відкидаємо, щоб запис не ріс роками
+const REMIND_KEEP_DAYS = 62;
+// Разове, яке не відмітили, ще два тижні висить на «Сьогодні» як прострочене
+const REMIND_OVERDUE_DAYS = 14;
+
+async function toggleReminder(r, date) {
+  const done = { ...(r.done ?? {}) };
+  const was = done[date];
+  if (was) delete done[date];
+  else done[date] = M.nowHm();
+  const oldest = M.addDays(M.ymd(), -REMIND_KEEP_DAYS);
+  for (const d of Object.keys(done)) if (d < oldest) delete done[d];
+  await save({ reminders: { put: [{ ...r, done }] } });
+  if (!was) toast(`Зроблено: ${r.text}`, { label: 'Скасувати', run: () => save({ reminders: { put: [{ ...r }] } }) });
+}
+
+function reminderRow(r, date, today, now) {
+  const done = r.done?.[date];
+  const ended = date < today || now >= r.to;
+  const status = done ? `зроблено о ${done}`
+    : date < today ? `прострочено · ${M.dayMonth(date)}`
+      : ended ? `вікно минуло · ${r.from}–${r.to}`
+        : now >= r.from ? `зараз · до ${r.to}` : `${r.from}–${r.to}`;
+  return h('div', { class: `remind-row${done ? ' done' : ended ? ' late' : ''}` },
+    h('button', {
+      type: 'button', class: 'remind-check', 'aria-pressed': String(Boolean(done)),
+      'aria-label': done ? `Зняти позначку: ${r.text}` : `Зроблено: ${r.text}`, onClick: () => toggleReminder(r, date),
+    }, done ? icon('check') : null),
+    h('button', { type: 'button', class: 'remind-text', onClick: () => editReminder(r) },
+      h('span', {}, r.text), h('span', { class: 'muted small' }, status)));
+}
+
+/** «Не забудь» на «Сьогодні»: нагадування дня й прострочені разові. */
+function remindersToday(today, now) {
+  const overdue = state.reminders.filter((r) => r.kind === 'once' && r.date < today
+    && r.date >= M.addDays(today, -REMIND_OVERDUE_DAYS) && !r.done?.[r.date]);
+  const rows = [
+    ...overdue.map((r) => reminderRow(r, r.date, today, now)),
+    ...M.remindersOn(state.reminders, today).map((r) => reminderRow(r, today, today, now)),
+  ];
+  if (!rows.length) return null;
+  return h('section', { class: 'card remind-card' }, h('h2', { class: 'remind-title' }, icon('bell'), 'Не забудь'), rows);
+}
+
+function editReminder(orig) {
+  const today = M.ymd();
+  const d = orig ? structuredClone(orig)
+    : { id: uid(), text: '', kind: 'once', date: today, days: [], monthDays: [], from: '09:00', to: '10:00', done: {} };
+  d.days ??= [];
+  d.monthDays ??= [];
+  const text = h('input', {
+    type: 'text', id: 'f-rtext', maxlength: 120, value: d.text, autocomplete: 'off',
+    placeholder: 'Наприклад: згенерувати код Нової пошти',
+  });
+  const when = h('div', { class: 'remind-when' });
+  const drawWhen = () => {
+    if (d.kind === 'once') {
+      when.replaceChildren(h('label', { class: 'flabel', for: 'f-rdate' }, 'Дата'),
+        h('input', { type: 'date', id: 'f-rdate', value: d.date || today, min: today, onChange: (e) => { d.date = e.target.value; } }));
+    } else if (d.kind === 'week') {
+      when.replaceChildren(h('p', { class: 'flabel' }, 'Дні тижня'),
+        chips(WEEK_DAYS, d.days.map(String), (v) => { d.days = v.map(Number); }, { multi: true }));
+    } else if (d.kind === 'month') {
+      const days = [...Array.from({ length: 31 }, (_, i) => [String(i + 1), String(i + 1)]), [String(M.LAST_MONTH_DAY), 'Останній']];
+      const row = chips(days, d.monthDays.map(String), (v) => { d.monthDays = v.map(Number); }, { multi: true });
+      row.classList.add('month-days');
+      when.replaceChildren(h('p', { class: 'flabel' }, 'Числа місяця'), row,
+        h('p', { class: 'muted small' }, 'Числа, якого в місяці немає (31-го в листопаді), — в останній день.'));
+    } else {
+      when.replaceChildren();
+    }
+  };
+  drawWhen();
+  const from = h('input', { type: 'time', id: 'f-rfrom', value: d.from });
+  const to = h('input', { type: 'time', id: 'f-rto', value: d.to });
+  const store = async () => {
+    const r = { ...d, text: text.value.trim(), from: from.value, to: to.value };
+    if (!r.text) { toast('Напиши, що не забути'); return; }
+    if (!r.from || !r.to || r.from >= r.to) { toast('Вкажи час: «з» раніше за «до»'); return; }
+    if (r.kind === 'once' && (!r.date || r.date < today)) { toast('Дата — сьогодні чи пізніше'); return; }
+    if (r.kind === 'week' && !r.days.length) { toast('Обери хоча б один день тижня'); return; }
+    if (r.kind === 'month' && !r.monthDays.length) { toast('Обери хоча б одне число'); return; }
+    if (r.kind !== 'once') r.date = '';
+    if (r.kind !== 'week') r.days = [];
+    if (r.kind !== 'month') r.monthDays = [];
+    closeSheet();
+    await save({ reminders: { put: [r] } });
+    toast(orig ? 'Нагадування змінено' : `Нагадаю: ${M.remindWhen(r).toLowerCase()}, ${r.from}–${r.to}`);
+  };
+  const remove = async () => {
+    closeSheet();
+    await save({ reminders: { del: [orig.id] } });
+    toast('Нагадування видалено', { label: 'Скасувати', run: () => save({ reminders: { put: [{ ...orig }] } }) });
+  };
+  sheet(orig ? 'Нагадування' : 'Нове нагадування', h('div', { class: 'sheet-body form' },
+    h('label', { class: 'flabel', for: 'f-rtext' }, 'Що не забути'), text,
+    h('p', { class: 'flabel' }, 'Коли'),
+    chips(M.REMIND_KINDS, d.kind, (v) => { d.kind = v; drawWhen(); }),
+    when,
+    h('div', { class: 'date-pair' }, h('label', { for: 'f-rfrom' }, 'з', from), h('label', { for: 'f-rto' }, 'до', to)),
+    h('p', { class: 'muted small' }, 'Бот напише на початку, далі раз на годину, поки не натиснеш «Зроблено», і за 15 хв до кінця. Нагадування приходять і під час паузи.'),
+    h('div', { class: 'btn-grid' },
+      button('check', 'Зберегти', 'primary', store),
+      orig ? button('skip', 'Видалити', 'danger', remove) : null)));
+}
+
+function reminderCard(r) {
+  return h('button', { type: 'button', class: 'card act-card', onClick: () => editReminder(r) },
+    h('span', { class: 'tile remind-tile' }, icon('bell')),
+    h('span', { class: 'act-text' },
+      h('span', { class: 'act-name' }, r.text),
+      h('span', { class: 'act-sub' }, `${M.remindWhen(r)} · ${r.from}–${r.to}`)));
+}
+
+/** Список нагадувань у вкладці «Заняття»: чинні, нижче згорнуті минулі разові. */
+function remindersSection() {
+  const today = M.ymd();
+  const byTime = (a, b) => (a.date || '').localeCompare(b.date || '') || a.from.localeCompare(b.from);
+  const past = state.reminders.filter((r) => r.kind === 'once' && r.date < today).sort(byTime).reverse();
+  const live = state.reminders.filter((r) => !past.includes(r)).sort(byTime);
+  return h('div', { class: 'stack' },
+    h('h2', { class: 'section-title' }, 'Нагадування'),
+    h('p', { class: 'muted small lead' }, 'Окремо від хобі: не рахуються в цілях. Разові й повторювані — щодня, у дні тижня чи в числа місяця.'),
+    ...live.map(reminderCard),
+    button('plus', 'Нове нагадування', 'copy-btn', () => editReminder()),
+    past.length ? folded('reminders-past', h('h2', { class: 'section-title' }, `Минулі разові · ${past.length}`),
+      h('div', { class: 'stack' }, past.map(reminderCard)), { def: false, persist: true, cls: 'plain-fold' }) : null);
+}
+
 // ---------- «Є кілька хвилин» ----------
 
 const QUICK_MINUTES = [10, 15, 20, 30, 45, 60];
@@ -523,6 +660,7 @@ function viewToday() {
       h('a', { class: 'week-pill', href: '#week', 'aria-label': `Тиждень: ${done} з ${target}` },
         h('span', { class: 'muted small' }, 'Тиждень'), h('b', {}, `${done} / ${target}`))),
     pauseBanner(today),
+    remindersToday(today, now),
     button('clock', 'Є кілька хвилин?', 'quick-btn', quickSheet),
     ...cards,
     h('p', { class: 'swipe-hint' }, '← перенести · зробив →', h('br'), 'натисни на справу — усі дії, на вікно — згорнути'));
@@ -711,9 +849,10 @@ async function deleteTemplate(tpl) {
 function templateSheet(date) {
   const today = M.ymd();
   const list = templates();
-  const weekend = M.isWeekend(date);
+  const off = (d) => M.isWeekend(d, slotsCfg.weekendDays);
+  const weekend = off(date);
   const alike = Array.from({ length: 7 }, (_, i) => M.addDays(M.weekStart(date), i))
-    .filter((d) => M.isWeekend(d) === weekend && d >= today);
+    .filter((d) => off(d) === weekend && d >= today);
   const body = h('div', { class: 'sheet-body' });
   if (!list.length) {
     body.append(h('p', { class: 'muted' }, 'Шаблонів ще немає. Сплануй день як зазвичай — і збережи його тут, щоб наступного разу поставити одним дотиком.'));
@@ -1080,7 +1219,8 @@ function viewActs() {
     archived.length
       ? folded('acts-archive', h('h2', { class: 'section-title' }, `Архів · ${archived.length}`),
         h('div', { class: 'stack' }, archived.map(actCard)), { def: false, persist: true, cls: 'plain-fold' })
-      : null);
+      : null,
+    remindersSection());
 }
 
 // ---------- «Налаштування» ----------
@@ -1101,6 +1241,21 @@ function applyTheme() {
 }
 
 lightScheme.addEventListener('change', applyTheme);
+
+// Пн…Нд — значення як у getDay(): тиждень у застосунку починається з понеділка
+const WEEK_DAYS = [['1', 'Пн'], ['2', 'Вт'], ['3', 'Ср'], ['4', 'Чт'], ['5', 'Пт'], ['6', 'Сб'], ['0', 'Нд']];
+
+/** Які дні — вихідні: у них діє розклад вікон «Вихідні», у решту — «Будні». */
+function weekendPicker() {
+  const days = (slotsCfg.weekendDays ?? M.DEFAULT_WEEKEND).map(String);
+  return h('div', { class: 'slot-edit' }, h('h3', {}, 'Вихідні дні'),
+    h('p', { class: 'muted small' }, 'У ці дні — час вікон «Вихідні», у решту — «Будні». Наприклад, змінний графік: вихідні вівторок і середа.'),
+    chips(WEEK_DAYS, days, (v) => {
+      const next = { ...structuredClone(slotsCfg), weekendDays: v.map(Number) };
+      slotsCfg = next;
+      save({ meta: { put: [next] } }, { render: false });
+    }, { multi: true }));
+}
 
 function slotEditor(kind, title) {
   const box = h('div', { class: 'slot-edit' }, h('h3', {}, title));
@@ -1208,8 +1363,8 @@ function viewSettings() {
     botSection(),
     h('section', { class: 'card' }, h('h2', {}, 'Тема'),
       chips(THEMES, themePref(), (v) => { remember('theme', v); applyTheme(); })),
-    folded('set-slots', h('h2', {}, 'Вікна дня'),
-      h('div', { class: 'fold-body' }, slotEditor('weekday', 'Будні'), slotEditor('weekend', 'Вихідні')),
+    folded('set-slots', h('h2', {}, 'Вікна дня й вихідні'),
+      h('div', { class: 'fold-body' }, weekendPicker(), slotEditor('weekday', 'Будні'), slotEditor('weekend', 'Вихідні')),
       { def: false, persist: true, cls: 'card' }),
     folded('set-backup', h('h2', {}, 'Резервна копія'), h('div', { class: 'fold-body' },
       h('p', { class: 'muted small' }, 'Дані живуть лише в цьому браузері. Копія — файл JSON, його можна відновити на іншому пристрої.'),

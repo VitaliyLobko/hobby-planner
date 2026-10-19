@@ -39,7 +39,10 @@ let timer;
 let running = false;
 let again = false;
 
-/** getState() → поточний state; apply(items, deleted) — записати зміни з бота; onStatus({ ok, error }). */
+/**
+ * getState() → поточний state; apply(items, deleted, reminders, reminderDeleted) — записати зміни з бота;
+ * onStatus({ ok, error }).
+ */
 export function initSync(h) {
   hooks = h;
 }
@@ -61,21 +64,27 @@ export async function syncNow() {
     const pushed = Number(get(KEYS.pushed) || 0);
     const state = hooks.getState();
     const items = state.plan.filter((p) => (p.updated || 0) > pushed);
-    const deletes = state.tombstones
-      .filter((t) => t.store === 'plan' && (t.updated || 0) > pushed)
+    const graves = (store) => state.tombstones
+      .filter((t) => t.store === store && (t.updated || 0) > pushed)
       .map((t) => ({ id: t.ref, updated: t.updated }));
+    const deletes = graves('plan');
+    // Нагадування «не забудь» — так само: змінені після минулого разу й видалені
+    const reminders = (state.reminders ?? []).filter((r) => (r.updated || 0) > pushed);
+    const reminderDeletes = graves('reminders');
     const slots = state.meta.find((m) => m.id === 'slots');
     // Паузи — щоразу цілком: їх кілька, а бот має знати, коли мовчати
     const pauses = state.meta.find((m) => m.id === 'pauses')?.list ?? [];
     const res = await fetch(`${url}/api/sync`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
-      body: JSON.stringify({ since: Number(get(KEYS.since) || 0), items, deletes, activities: state.activities, slots, pauses }),
+      body: JSON.stringify({
+        since: Number(get(KEYS.since) || 0), items, deletes, activities: state.activities, slots, pauses, reminders, reminderDeletes,
+      }),
     });
     if (res.status === 401) throw new Error('Ключ не підходить — візьми новий у бота командою /key');
     if (!res.ok) throw new Error(`Бот відповів помилкою ${res.status}`);
     const data = await res.json();
-    await hooks.apply(data.items ?? [], data.deleted ?? []);
+    await hooks.apply(data.items ?? [], data.deleted ?? [], data.reminders ?? [], data.reminderDeleted ?? []);
     set(KEYS.pushed, startedAt);
     set(KEYS.since, data.now);
     set(KEYS.last, Date.now());

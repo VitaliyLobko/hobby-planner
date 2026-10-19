@@ -30,7 +30,9 @@ export function weekDays(start) {
   return Array.from({ length: 7 }, (_, i) => addDays(start, i));
 }
 
-export const isWeekend = (s) => [0, 6].includes(parseYmd(s).getDay());
+// Вихідні — номери днів як у getDay() (0 — неділя); за замовчуванням субота й неділя
+export const DEFAULT_WEEKEND = [6, 0];
+export const isWeekend = (s, days = DEFAULT_WEEKEND) => days.includes(parseYmd(s).getDay());
 
 const DAY_NAMES = ['Неділя', 'Понеділок', 'Вівторок', 'Середа', 'Четвер', "П'ятниця", 'Субота'];
 export const DAY_SHORT = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Нд'];
@@ -99,7 +101,7 @@ export const DEFAULT_SLOTS = {
 };
 
 export function slotsFor(date, slots) {
-  return (isWeekend(date) ? slots.weekend : slots.weekday);
+  return (isWeekend(date, slots.weekendDays) ? slots.weekend : slots.weekday);
 }
 
 // Кольори — ключі, а не hex: справжній відтінок бере CSS (--c-*), окремо для світлої й темної теми.
@@ -198,6 +200,47 @@ export function weekCount(plan, activityId, start) {
   const end = addDays(start, 6);
   return plan.filter((p) => p.activityId === activityId && p.date >= start && p.date <= end && counts(p.status)).length;
 }
+
+// ---------- нагадування «не забудь» ----------
+// kind: once — один раз (date), daily — щодня, week — дні тижня (days, номери як у getDay()),
+// month — числа місяця (monthDays; -1 — останній день). Вікно from–to, done — { дата: «HH:MM» }.
+
+export const REMIND_KINDS = [['once', 'Один раз'], ['daily', 'Щодня'], ['week', 'Дні тижня'], ['month', 'Числа місяця']];
+export const LAST_MONTH_DAY = -1;
+
+/** Чи діє нагадування в цей день. Число, якого в місяці немає (31 у листопаді), — в останній день. */
+export function remindOn(r, date) {
+  if (r.kind === 'once') return r.date === date;
+  if (r.kind === 'daily') return true;
+  const d = parseYmd(date);
+  if (r.kind === 'week') return (r.days ?? []).includes(d.getDay());
+  if (r.kind === 'month') {
+    const day = d.getDate();
+    const last = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+    return (r.monthDays ?? []).some((x) => x === day || (day === last && (x === LAST_MONTH_DAY || x > last)));
+  }
+  return false;
+}
+
+const WEEK_ORDER = [1, 2, 3, 4, 5, 6, 0];
+
+/** «Один раз: 25 жовтня», «Щодня», «Пн, Чт», «1 і 15 числа», «останній день місяця». */
+export function remindWhen(r) {
+  if (r.kind === 'once') return r.date ? `Один раз: ${dayMonth(r.date)}` : 'Один раз';
+  if (r.kind === 'daily') return 'Щодня';
+  if (r.kind === 'week') {
+    const days = WEEK_ORDER.filter((x) => (r.days ?? []).includes(x)).map((x) => DAY_SHORT[(x + 6) % 7]);
+    return days.length === 7 ? 'Щодня' : days.join(', ') || 'Дні не обрані';
+  }
+  const nums = [...(r.monthDays ?? [])].filter((x) => x > 0).sort((a, b) => a - b);
+  const parts = [];
+  if (nums.length) parts.push(`${nums.length > 1 ? `${nums.slice(0, -1).join(', ')} і ${nums.at(-1)}` : nums[0]} числа`);
+  if ((r.monthDays ?? []).includes(LAST_MONTH_DAY)) parts.push('останній день місяця');
+  return parts.join(' і ') || 'Числа не обрані';
+}
+
+/** Нагадування на день — за часом початку. */
+export const remindersOn = (list, date) => list.filter((r) => remindOn(r, date)).sort((a, b) => (a.from < b.from ? -1 : a.from > b.from ? 1 : 0));
 
 // Рівні занять. Досвід за зараховану справу: повна — 10, мінімум — 5 (менше, але теж рахується),
 // плюс 1 за кожні 10 хв таймера, не більше 6 — довге заняття цінніше, але не в рази.

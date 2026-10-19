@@ -282,6 +282,29 @@ a { color: var(--accent); }
 .lvl-bar { flex: 1; height: 6px; min-width: 40px; }
 .act-card .act-text { flex: 1; }
 
+/* Нагадування «не забудь» */
+.remind-card { display: flex; flex-direction: column; gap: 8px; }
+.remind-title { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 15px; }
+.remind-title .ico svg { width: 18px; height: 18px; }
+.remind-row { display: flex; align-items: center; gap: 10px; }
+.remind-check {
+  width: 32px; height: 32px; flex: none; border-radius: 50%; border: 2px solid var(--line-strong);
+  background: transparent; color: #fff; display: inline-flex; align-items: center; justify-content: center;
+}
+.remind-check .ico svg { width: 18px; height: 18px; }
+.remind-row.done .remind-check { background: var(--ok-solid); border-color: var(--ok-solid); }
+.remind-row.late .remind-check { border-color: var(--bad-fg); }
+.remind-text {
+  flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
+  border: 0; background: none; padding: 0; color: var(--text); font-size: 15px; font-weight: 600; text-align: left;
+}
+.remind-row.done .remind-text > span:first-child { text-decoration: line-through; color: var(--muted); }
+.remind-row.late .remind-text .muted { color: var(--bad-fg); }
+.remind-tile { --c: var(--c-orange); }
+.month-days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
+.month-days .chip { padding: 8px 0; justify-content: center; }
+.month-days .chip:last-child { grid-column: span 3; }
+
 /* Шаблони дня */
 .tpl-row { padding: 10px 0; border-bottom: 1px solid var(--line); }
 .tpl-row:last-of-type { border-bottom: 0; }

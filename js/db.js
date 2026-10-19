@@ -3,8 +3,9 @@
 // без цього майбутня синхронізація (0.2, бот) не відрізнить «видалено» від «ще не приїхало».
 // Ім'я бази з префіксом застосунку: на vitaliylobko.github.io поруч живуть shooting-log і weight-log.
 const DB_NAME = 'hobby-planner';
-const DB_VERSION = 1;
-export const STORES = ['activities', 'plan', 'meta'];
+// 2 — сховище нагадувань «не забудь»; нові сховища створює onupgradeneeded, старі дані лишаються
+const DB_VERSION = 2;
+export const STORES = ['activities', 'plan', 'meta', 'reminders'];
 const ALL = [...STORES, 'tombstones'];
 
 let opening;
