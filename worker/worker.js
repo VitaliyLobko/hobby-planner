@@ -17,9 +17,9 @@ const WEIGHT_URL = 'https://vitaliylobko.github.io/weight-log/';
 const ORIGINS = ['https://vitaliylobko.github.io', 'http://127.0.0.1:8093', 'http://127.0.0.1:8094'];
 const DEFAULT_TZ = 'Europe/Kyiv';
 const MIN = 60000;
-// Повтори від початку вікна, хв; останній — за 10 хв до кінця вікна
-const NUDGES_MIN = [0, 15, 45];
-const LAST_NUDGE_BEFORE_END_MIN = 10;
+// Нагадування вікна: на початку й ще раз за 30 хв до кінця, якщо справи не відмічені
+const NUDGES_MIN = [0];
+const LAST_NUDGE_BEFORE_END_MIN = 30;
 
 const DEFAULT_SLOTS = {
   weekday: [
@@ -50,6 +50,9 @@ const SCHEMA = [
   'CREATE TABLE IF NOT EXISTS acts (id TEXT PRIMARY KEY, data TEXT NOT NULL)',
   'CREATE TABLE IF NOT EXISTS weights (date TEXT PRIMARY KEY, kg REAL NOT NULL, note TEXT, updated INTEGER DEFAULT 0, srv INTEGER DEFAULT 0)',
   'CREATE INDEX IF NOT EXISTS weights_srv ON weights(srv)',
+  'CREATE TABLE IF NOT EXISTS reminders (id TEXT PRIMARY KEY, data TEXT NOT NULL, updated INTEGER DEFAULT 0, srv INTEGER DEFAULT 0, deleted INTEGER DEFAULT 0)',
+  'CREATE INDEX IF NOT EXISTS reminders_srv ON reminders(srv)',
+  'CREATE TABLE IF NOT EXISTS rem_state (key TEXT PRIMARY KEY, last_at INTEGER DEFAULT 0, snooze_at INTEGER, msg_id INTEGER, n INTEGER DEFAULT 0)',
 ];
 
 export default {
@@ -158,9 +161,10 @@ function addDays(date, n) {
   return t.toISOString().slice(0, 10);
 }
 
-function isWeekend(date) {
+/** Вихідні — з налаштувань застосунку (номери як у getDay(), 0 — неділя); за замовчуванням субота й неділя. */
+function isWeekend(date, days = [6, 0]) {
   const [y, m, d] = date.split('-').map(Number);
-  return [0, 6].includes(new Date(Date.UTC(y, m - 1, d)).getUTCDay());
+  return days.includes(new Date(Date.UTC(y, m - 1, d)).getUTCDay());
 }
 
 function weekStart(date) {
@@ -169,7 +173,7 @@ function weekStart(date) {
   return addDays(date, -((day + 6) % 7));
 }
 
-const slotsFor = (date, cfg) => (isWeekend(date) ? cfg.weekend : cfg.weekday);
+const slotsFor = (date, cfg) => (isWeekend(date, cfg.weekendDays) ? cfg.weekend : cfg.weekday);
 
 function minusMinutes(hm, n) {
   const [h, m] = hm.split(':').map(Number);
@@ -177,7 +181,7 @@ function minusMinutes(hm, n) {
   return `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
 }
 
-/** Розклад нагадувань для вікна: старт, +15, +45 хв і за 10 хв до кінця — лише ті, що всередині вікна. */
+/** Розклад нагадувань для вікна: старт і за 30 хв до кінця — лише ті, що всередині вікна. */
 function nudgeTimes(start, end) {
   const times = NUDGES_MIN.map((n) => start + n * MIN);
   times.push(end - LAST_NUDGE_BEFORE_END_MIN * MIN);
@@ -415,6 +419,7 @@ async function onTelegram(request, env) {
 
   if (cb && String(cb.data || '').startsWith('w:')) await onWeighButton(env, cb, chatId);
   else if (cb && String(cb.data || '').startsWith('u:')) await onUndo(env, cb, chatId);
+  else if (cb && String(cb.data || '').startsWith('r:')) await onReminderButton(env, cb, chatId);
   else if (cb) await onButton(env, cb, chatId);
   else if (msg?.voice || msg?.audio) await onVoice(env, msg, chatId);
   else if (msg?.text) await onCommand(env, msg.text.trim(), chatId);
@@ -444,13 +449,15 @@ async function onCommand(env, cmd, chatId) {
       chat_id: chatId, parse_mode: 'HTML',
       text: [
         '<b>Хобі-план</b>',
-        'Нагадую про вікно дня одним повідомленням з усіма справами: на початку, через 15 і 45 хв і за 10 хв до кінця — поки не відмітиш.',
+        'Нагадую про вікно дня одним повідомленням з усіма справами: на початку і за 30 хв до кінця, якщо ще не відмітив.',
         'Кнопки: ▶ почав (таймер) · ✅ зробив · ⋯ — мінімум, перенести, пропускаю · ⏰ +30 хв — усе вікно.',
         '',
         '/today — план на сьогодні',
         '/week — тиждень',
         '',
         '🎙 Голосом чи текстом: «гітара 30 хв, вчив баре», «пайтон на завтра ввечері, урок 6», «перенеси англійську на суботу», «пропускаю спорт».',
+        '',
+        '📌 Не забудь: «нагадай 1 і 15 числа з 6 до 9 згенерувати код Нової пошти», «нагадай завтра о 18 забрати посилку». Приходять на початку, раз на годину й за 15 хв до кінця — поки не «Зроблено», і під час паузи теж.',
         '',
         '⚖️ Вага — надішли число, наприклад <code>82,4</code> або <code>82.4 після свята</code>: запишу за сьогодні, застосунок «Вага» забере сам.',
         '/key — новий ключ для застосунку',
@@ -635,7 +642,13 @@ async function onSync(request, env) {
   const tz = tzOf(env);
 
   if (body.slots?.weekday && body.slots?.weekend) {
-    await setMeta(env, 'slots', JSON.stringify({ weekday: body.slots.weekday, weekend: body.slots.weekend }));
+    const days = Array.isArray(body.slots.weekendDays)
+      ? [...new Set(body.slots.weekendDays.filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))] : undefined;
+    const next = JSON.stringify({ weekday: body.slots.weekday, weekend: body.slots.weekend, weekendDays: days });
+    if (next !== await getMeta(env, 'slots')) {
+      await setMeta(env, 'slots', next);
+      await reschedule(env, JSON.parse(next), tz, now);
+    }
   }
   if (Array.isArray(body.pauses)) {
     const list = body.pauses.filter((p) => /^\d{4}-\d{2}-\d{2}$/.test(p?.from) && /^\d{4}-\d{2}-\d{2}$/.test(p?.to));
@@ -664,14 +677,49 @@ async function onSync(request, env) {
     if (row.msg_id && chatId) await editWindow(env, chatId, row.msg_id, row.date, row.slot, cfg, acts, tz, now);
   }
 
+  for (const r of Array.isArray(body.reminders) ? body.reminders : []) {
+    if (r?.id && typeof r.text === 'string') await acceptReminder(env, r, now, tz, chatId);
+  }
+  for (const d of Array.isArray(body.reminderDeletes) ? body.reminderDeletes : []) {
+    if (!d?.id) continue;
+    await env.DB.prepare('UPDATE reminders SET deleted = 1, updated = ?, srv = ? WHERE id = ? AND updated <= ?')
+      .bind(d.updated || now, now, d.id, d.updated || now).run();
+  }
+
   const since = Number(body.since) || 0;
   const { results } = await env.DB.prepare('SELECT data, deleted, id FROM items WHERE srv > ? AND date >= ?')
     .bind(since, addDays(local(now, tz).date, -60)).all();
+  const rem = (await env.DB.prepare('SELECT data, deleted, id FROM reminders WHERE srv > ?').bind(since).all()).results;
   return json({
     now,
     items: results.filter((r) => !r.deleted).map((r) => JSON.parse(r.data)),
     deleted: results.filter((r) => r.deleted).map((r) => r.id),
+    reminders: rem.filter((r) => !r.deleted).map((r) => JSON.parse(r.data)),
+    reminderDeleted: rem.filter((r) => r.deleted).map((r) => r.id),
   });
+}
+
+/**
+ * Змінились вікна чи вихідні — заплановані справи від сьогодні отримують час вікна за новим розкладом.
+ * Початок той самий — лишаємо, де були нагадування; інакше рахуємо їх з нового початку.
+ */
+async function reschedule(env, cfg, tz, now) {
+  const today = local(now, tz).date;
+  const { results } = await env.DB.prepare(`SELECT id, date, start_at, end_at, json_extract(data, '$.slot') AS slot FROM items
+    WHERE deleted = 0 AND status = 'planned' AND date >= ?`).bind(today).all();
+  const updates = [];
+  for (const r of results) {
+    const slot = slotsFor(r.date, cfg).find((s) => s.id === r.slot);
+    if (!slot) continue;
+    const start = zoned(r.date, slot.from, tz);
+    const end = zoned(r.date, slot.to, tz);
+    if (start === r.start_at && end === r.end_at) continue;
+    updates.push(start === r.start_at
+      ? env.DB.prepare('UPDATE items SET end_at = ? WHERE id = ?').bind(end, r.id)
+      : env.DB.prepare('UPDATE items SET start_at = ?, end_at = ?, next_at = ?, nudge = 0 WHERE id = ?')
+        .bind(start, end, end > now ? Math.max(start, now) : null, r.id));
+  }
+  if (updates.length) await env.DB.batch(updates);
 }
 
 /** Запис із застосунку: перемагає новіший (updated). Розклад нагадувань перераховуємо лише коли змінилось вікно чи стан. */
@@ -711,6 +759,8 @@ async function tick(env) {
   if (!chatId || !env.BOT_TOKEN) return;
   const tz = tzOf(env);
   const now = Date.now();
+  // «Не забудь» — не хобі: приходять і під час паузи (код посилки потрібен і у відпустці)
+  await sendReminders(env, chatId, tz, now);
   // Пауза — жодних нагадувань і підсумків; вікна, що минули за паузу, потім відсіє перевірка кінця вікна
   if (pauseOn(local(now, tz).date, await pausesOf(env))) return;
   const cfg = await slotsCfg(env);
@@ -789,8 +839,13 @@ async function sendToday(env, chatId, now, title, morning = false) {
   const acts = await actsMap(env);
   const items = await todayItems(env, date);
   const lines = [`<b>${esc(title)}</b>`, `<i>${dayTitle(date)}</i>`];
+  // «Не забудь» дня — окремим блоком під вікнами
+  const reminders = await remindersFor(env, date);
+  const remindLines = reminders.length ? ['', '📌 <b>Не забудь</b>',
+    ...reminders.map((r) => `${r.done?.[date] ? '✅' : '▫️'} ${esc(r.text)} · <i>${esc(r.from)}–${esc(r.to)}</i>`)] : [];
   if (!items.length) {
     lines.push('', morning ? 'План на сьогодні ще порожній — дві хвилини, і готово.' : 'На сьогодні нічого не заплановано.');
+    lines.push(...remindLines);
   } else {
     // По вікнах: заголовок вікна, під ним справи; порожнє вікно — «вільно»
     for (const slot of slotsFor(date, cfg)) {
@@ -802,6 +857,7 @@ async function sendToday(env, chatId, now, title, morning = false) {
     }
     const done = items.filter((x) => x.status === 'done' || x.status === 'min');
     const sec = done.reduce((s, x) => s + (x.spent || 0), 0);
+    lines.push(...remindLines);
     const minutes = items.reduce((s, x) => s + ((acts.get(x.activityId) ?? MISSING).minutes || 0), 0);
     lines.push('', morning
       ? `Сьогодні ${items.length} ${plural(items.length, 'справа', 'справи', 'справ')}${minutes ? ` · ~${minutes} хв` : ''}. Гарного дня!`
@@ -994,6 +1050,148 @@ async function onWeights(request, env) {
   return json({ now, weights: results });
 }
 
+// ---------- нагадування «не забудь» ----------
+// Записи — із застосунку (чи з голосу): { id, text, kind: once|daily|week|month, date, days, monthDays, from, to, done }.
+// Як у застосунку (js/model.js remindOn): days — номери як у getDay(), monthDays: -1 — останній день місяця.
+
+// Повтори: на початку вікна, далі раз на годину, останнє — за 15 хв до кінця; поки не «Зроблено»
+const REMIND_EVERY_MIN = 60;
+const REMIND_LAST_BEFORE_END_MIN = 15;
+const REMIND_SNOOZE_MIN = 30;
+
+function remindOn(r, date) {
+  if (r.kind === 'once') return r.date === date;
+  if (r.kind === 'daily') return true;
+  const [y, m, d] = date.split('-').map(Number);
+  if (r.kind === 'week') return (r.days ?? []).includes(new Date(Date.UTC(y, m - 1, d)).getUTCDay());
+  if (r.kind === 'month') {
+    const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    return (r.monthDays ?? []).some((x) => x === d || (d === last && (x === -1 || x > last)));
+  }
+  return false;
+}
+
+/** «25 жовтня», «щодня», «пн, чт», «1 і 15 числа», «останній день місяця». */
+function remindWhen(r) {
+  if (r.kind === 'once') return r.date ? dayMonth(r.date) : 'один раз';
+  if (r.kind === 'daily') return 'щодня';
+  if (r.kind === 'week') {
+    return [1, 2, 3, 4, 5, 6, 0].filter((x) => (r.days ?? []).includes(x)).map((x) => DAYS[x].slice(0, 2).toLowerCase()).join(', ');
+  }
+  const nums = (r.monthDays ?? []).filter((x) => x > 0).sort((a, b) => a - b);
+  const parts = [];
+  if (nums.length) parts.push(`${nums.length > 1 ? `${nums.slice(0, -1).join(', ')} і ${nums.at(-1)}` : nums[0]} числа`);
+  if ((r.monthDays ?? []).includes(-1)) parts.push('останній день місяця');
+  return parts.join(' і ');
+}
+
+function remindTimes(start, end) {
+  const last = end - REMIND_LAST_BEFORE_END_MIN * MIN;
+  const times = [];
+  for (let t = start; t < last; t += REMIND_EVERY_MIN * MIN) times.push(t);
+  if (last > start) times.push(last);
+  return times.length ? times : [start];
+}
+
+/** Запис із застосунку: перемагає новіший. Відмітив «зроблено» в застосунку — у чаті прибираємо кнопки. */
+async function acceptReminder(env, r, now, tz, chatId) {
+  const row = await env.DB.prepare('SELECT updated FROM reminders WHERE id = ?').bind(r.id).first();
+  if (row && (row.updated || 0) >= (r.updated || 0)) return;
+  await env.DB.prepare(`INSERT INTO reminders (id, data, updated, srv, deleted) VALUES (?, ?, ?, ?, 0)
+    ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated = excluded.updated, srv = excluded.srv, deleted = 0`)
+    .bind(r.id, JSON.stringify(r), r.updated || now, now).run();
+  const today = local(now, tz).date;
+  if (r.done?.[today] && chatId) {
+    const st = await env.DB.prepare('SELECT msg_id FROM rem_state WHERE key = ?').bind(`${r.id}|${today}`).first();
+    if (st?.msg_id) {
+      await tg(env, 'editMessageText', {
+        chat_id: chatId, message_id: st.msg_id, parse_mode: 'HTML', text: reminderDoneText(r, r.done[today]), reply_markup: { inline_keyboard: [] },
+      });
+    }
+  }
+}
+
+const reminderDoneText = (r, hm) => `✅ <s>${esc(r.text)}</s>\n<i>зроблено о ${esc(hm)}</i>`;
+
+async function sendReminders(env, chatId, tz, now) {
+  const { date } = local(now, tz);
+  const { results } = await env.DB.prepare('SELECT data FROM reminders WHERE deleted = 0').all();
+  for (const { data } of results) {
+    const r = JSON.parse(data);
+    if (!remindOn(r, date) || r.done?.[date] || !/^\d{2}:\d{2}$/.test(r.from) || !/^\d{2}:\d{2}$/.test(r.to)) continue;
+    const start = zoned(date, r.from, tz);
+    const end = zoned(date, r.to, tz);
+    if (now < start || now >= end) continue;
+    const key = `${r.id}|${date}`;
+    const st = await env.DB.prepare('SELECT * FROM rem_state WHERE key = ?').bind(key).first() ?? { last_at: 0, snooze_at: null, msg_id: null, n: 0 };
+    const last = st.last_at || 0;
+    // Відклав — до snooze_at тиша; далі одне нагадування, потім знову за розкладом
+    if (st.snooze_at && now < st.snooze_at) continue;
+    const snoozeDue = st.snooze_at && last < st.snooze_at;
+    const times = remindTimes(start, end);
+    const due = times.some((t) => t > last && t <= now);
+    if (!due && !snoozeDue) continue;
+    if (st.msg_id) await tg(env, 'editMessageReplyMarkup', { chat_id: chatId, message_id: st.msg_id, reply_markup: { inline_keyboard: [] } });
+    const isLast = !times.some((t) => t > now + MIN);
+    const sent = await tg(env, 'sendMessage', {
+      chat_id: chatId, parse_mode: 'HTML',
+      text: [
+        st.n ? (isLast ? '<i>⚠️ Останнє нагадування</i>' : '<i>🔔 Нагадую</i>') : null,
+        '📌 <b>Не забудь</b>',
+        esc(r.text),
+        `<i>до ${esc(r.to)}</i>`,
+      ].filter((x) => x !== null).join('\n'),
+      reply_markup: {
+        inline_keyboard: [[
+          { text: '✅ Зроблено', callback_data: `r:done:${r.id}:${date}` },
+          { text: `⏰ +${REMIND_SNOOZE_MIN} хв`, callback_data: `r:snooze:${r.id}:${date}` },
+        ]],
+      },
+    });
+    await env.DB.prepare(`INSERT INTO rem_state (key, last_at, snooze_at, msg_id, n) VALUES (?, ?, NULL, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET last_at = excluded.last_at, snooze_at = NULL, msg_id = excluded.msg_id, n = excluded.n`)
+      .bind(key, now, sent.result?.message_id ?? null, (st.n || 0) + 1).run();
+  }
+}
+
+async function onReminderButton(env, cb, chatId) {
+  const [, action, id, date] = String(cb.data).split(':');
+  const row = await env.DB.prepare('SELECT data FROM reminders WHERE id = ? AND deleted = 0').bind(id).first();
+  if (!row) {
+    await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: 'Цього нагадування вже немає' });
+    return;
+  }
+  const r = JSON.parse(row.data);
+  const now = Date.now();
+  const tz = tzOf(env);
+  let answer;
+  if (action === 'done') {
+    r.done = { ...(r.done ?? {}) };
+    r.done[date] ??= local(now, tz).hm;
+    r.updated = now;
+    await env.DB.prepare('UPDATE reminders SET data = ?, updated = ?, srv = ? WHERE id = ?').bind(JSON.stringify(r), now, now, id).run();
+    answer = 'Зроблено 👍';
+    if (cb.message) {
+      await tg(env, 'editMessageText', {
+        chat_id: chatId, message_id: cb.message.message_id, parse_mode: 'HTML', text: reminderDoneText(r, r.done[date]), reply_markup: { inline_keyboard: [] },
+      });
+    }
+  } else {
+    const at = now + REMIND_SNOOZE_MIN * MIN;
+    await env.DB.prepare(`INSERT INTO rem_state (key, last_at, snooze_at, msg_id, n) VALUES (?, ?, ?, NULL, 1)
+      ON CONFLICT(key) DO UPDATE SET snooze_at = excluded.snooze_at`).bind(`${id}|${date}`, now, at).run();
+    answer = `Нагадаю о ${local(at, tz).hm}`;
+    if (cb.message) await tg(env, 'editMessageReplyMarkup', { chat_id: chatId, message_id: cb.message.message_id, reply_markup: { inline_keyboard: [] } });
+  }
+  await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: answer });
+}
+
+/** Нагадування дня для ранкового плану й /today. */
+async function remindersFor(env, date) {
+  const { results } = await env.DB.prepare('SELECT data FROM reminders WHERE deleted = 0').all();
+  return results.map((x) => JSON.parse(x.data)).filter((r) => remindOn(r, date)).sort((a, b) => (a.from < b.from ? -1 : 1));
+}
+
 // ---------- голос і фрази ----------
 
 // Workers AI — прив'язка AI у налаштуваннях Worker: розпізнавання мови й розбір фрази в дії.
@@ -1002,7 +1200,7 @@ const STT_MODEL = '@cf/openai/whisper-large-v3-turbo';
 const NLU_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
 const VOICE_MAX_SEC = 60;
 const MAX_ACTIONS = 5;
-const PHRASE_ACTIONS = ['done', 'min', 'skip', 'start', 'stop', 'plan', 'move', 'unplan', 'weight', 'today', 'week', 'unknown'];
+const PHRASE_ACTIONS = ['done', 'min', 'skip', 'start', 'stop', 'plan', 'move', 'unplan', 'weight', 'remind', 'today', 'week', 'unknown'];
 const PHRASE_SCHEMA = {
   type: 'object',
   properties: {
@@ -1018,6 +1216,11 @@ const PHRASE_SCHEMA = {
           minutes: { type: 'number' },
           topic: { type: 'string' },
           kg: { type: 'number' },
+          kind: { type: 'string', enum: ['once', 'daily', 'week', 'month'] },
+          days: { type: 'array', items: { type: 'integer' } },
+          monthDays: { type: 'array', items: { type: 'integer' } },
+          from: { type: 'string' },
+          to: { type: 'string' },
         },
         required: ['type'],
       },
@@ -1088,7 +1291,7 @@ function phraseContext(now, tz, cfg, list, acts, rows) {
     'You convert a short message from the owner of a hobby planner into actions. The message is in Ukrainian or Russian and may contain speech-recognition errors. Answer with JSON only.',
     `Now: ${today} (${dow(today)}), ${hm}.`,
     `Dates: ${days.join(', ')}.`,
-    `Day windows on weekdays: ${slotText(cfg.weekday)}. On weekends: ${slotText(cfg.weekend)}.`,
+    `Day windows on working days: ${slotText(cfg.weekday)}. On days off (${(cfg.weekendDays ?? [6, 0]).map((d) => DAYS[d].toLowerCase()).join(', ') || 'none'}): ${slotText(cfg.weekend)}.`,
     `Activities (copy the name exactly): ${list.map((a) => a.name).join(', ')}.`,
     plan.length ? `Plan for today and tomorrow:\n${plan.join('\n')}` : 'The plan for today and tomorrow is empty.',
     '',
@@ -1101,12 +1304,15 @@ function phraseContext(now, tz, cfg, list, acts, rows) {
     '- move: move an already planned activity; date and slot = where to move it;',
     '- unplan: remove it from the plan;',
     '- weight: body weight in kg;',
+    '- remind: a «do not forget» reminder about something that is not one of the activities (topic = what to remember, in the language of the message);',
     "- today: show today's plan; week: show weekly progress;",
     '- unknown: anything else.',
     'Rules: one action per activity mentioned. date: YYYY-MM-DD from the list above, or "" if not said (means today).',
     'slot: m (morning, зранку, утром), n (midday or daytime, в обід, днем), e (evening, ввечері, вечером), or "" if not said.',
     'minutes: 0 if not said. topic: short, in the language of the message, "" if none. activity: "" for weight, today, week, unknown.',
     'Map misheard, translated or transliterated names to the closest activity from the list.',
+    'For remind: kind once (date), daily, week (days: 0 = Sunday … 6 = Saturday) or month (monthDays: 1–31, -1 = last day of the month);',
+    'from / to: HH:MM time window; one time said — from = that time, to = one hour later; no time said — from "" and to "".',
   ].join('\n');
 }
 
@@ -1198,6 +1404,7 @@ async function performPhrase(ctx, x) {
   if (type === 'unknown') return null;
   if (type === 'today') { ctx.after.push(() => sendToday(env, chatId, now, 'План на сьогодні')); return null; }
   if (type === 'week') { ctx.after.push(() => sendWeek(env, chatId, now)); return null; }
+  if (type === 'remind') return createReminder(ctx, x);
   if (type === 'weight') {
     const kg = Number(x.kg);
     if (!(kg >= 30 && kg <= 250)) return '❓ Не розчув вагу — надішли числом, наприклад 82,4';
@@ -1327,6 +1534,32 @@ async function performPhrase(ctx, x) {
   return `🗑 ${name} — прибрано${s ? ` (${whenLabel(d, s, today).replace(/^на /, '')})` : ''}`;
 }
 
+/** «Нагадай …» з фрази → нагадування, як із застосунку; застосунок підтягне його з синхронізацією. */
+async function createReminder(ctx, x) {
+  const { env, now, today, undo } = ctx;
+  const text = String(x.topic || '').trim().slice(0, 120);
+  if (!text) return '❓ Не зрозумів, про що нагадати';
+  const kind = ['once', 'daily', 'week', 'month'].includes(x.kind) ? x.kind : 'once';
+  const hmOk = (v) => /^([01]\d|2[0-3]):[0-5]\d$/.test(v || '');
+  const from = hmOk(x.from) ? x.from : '09:00';
+  const hourLater = `${String(Math.min(23, Number(from.slice(0, 2)) + 1)).padStart(2, '0')}:${from.slice(3)}`;
+  const to = hmOk(x.to) && x.to > from ? x.to : (hourLater > from ? hourLater : '23:59');
+  const ints = (list, ok) => [...new Set((Array.isArray(list) ? list : []).map(Number).filter(ok))];
+  const r = {
+    id: crypto.randomUUID(), text, kind,
+    date: kind === 'once' ? (/^\d{4}-\d{2}-\d{2}$/.test(x.date || '') && x.date >= today ? x.date : today) : '',
+    days: kind === 'week' ? ints(x.days, (d) => Number.isInteger(d) && d >= 0 && d <= 6) : [],
+    monthDays: kind === 'month' ? ints(x.monthDays, (d) => Number.isInteger(d) && (d === -1 || (d >= 1 && d <= 31))) : [],
+    from, to, done: {}, updated: now,
+  };
+  if (kind === 'week' && !r.days.length) return `❓ «${esc(text)}» — не розчув, у які дні тижня`;
+  if (kind === 'month' && !r.monthDays.length) return `❓ «${esc(text)}» — не розчув, яких чисел`;
+  await env.DB.prepare('INSERT INTO reminders (id, data, updated, srv, deleted) VALUES (?, ?, ?, ?, 0)')
+    .bind(r.id, JSON.stringify(r), now, now).run();
+  undo.push({ id: r.id, created: true, table: 'reminders' });
+  return `📌 Нагадаю: ${esc(text)} — ${esc(remindWhen(r))}, ${from}–${to}`;
+}
+
 /** «Скасувати» під підсумком фрази: повертає рядки як були, створені — прибирає. Лише остання фраза. */
 async function onUndo(env, cb, chatId) {
   const token = String(cb.data).split(':')[1];
@@ -1339,6 +1572,10 @@ async function onUndo(env, cb, chatId) {
   const now = Date.now();
   // Від останньої зміни до першої: рядок, змінений двічі, повернеться до найпершого стану
   for (const u of [...saved.list].reverse()) {
+    if (u.created && u.table === 'reminders') {
+      await env.DB.prepare('UPDATE reminders SET deleted = 1, updated = ?, srv = ? WHERE id = ?').bind(now, now, u.id).run();
+      continue;
+    }
     if (u.created) {
       await env.DB.prepare('UPDATE items SET deleted = 1, next_at = NULL, updated = ?, srv = ? WHERE id = ?').bind(now, now, u.id).run();
       continue;
