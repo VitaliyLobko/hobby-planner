@@ -23,14 +23,14 @@ const LAST_NUDGE_BEFORE_END_MIN = 30;
 
 const DEFAULT_SLOTS = {
   weekday: [
-    { id: 'm', label: 'Ранок', from: '07:00', to: '09:00' },
-    { id: 'n', label: 'Обід', from: '12:00', to: '14:00' },
-    { id: 'e', label: 'Вечір', from: '19:00', to: '22:00' },
+    { id: 'm', label: 'Ранок', from: '07:00', to: '12:00' },
+    { id: 'n', label: 'Обід', from: '12:00', to: '18:00' },
+    { id: 'e', label: 'Вечір', from: '18:00', to: '22:00' },
   ],
   weekend: [
     { id: 'm', label: 'Ранок', from: '09:00', to: '12:00' },
-    { id: 'n', label: 'День', from: '13:00', to: '18:00' },
-    { id: 'e', label: 'Вечір', from: '19:00', to: '23:00' },
+    { id: 'n', label: 'День', from: '12:00', to: '18:00' },
+    { id: 'e', label: 'Вечір', from: '18:00', to: '22:00' },
   ],
 };
 
@@ -64,6 +64,7 @@ export default {
       if (url.pathname === '/tg' && request.method === 'POST') return await onTelegram(request, env);
       if (url.pathname === '/api/sync' && request.method === 'POST') return cors(request, await onSync(request, env));
       if (url.pathname === '/api/weights' && request.method === 'POST') return cors(request, await onWeights(request, env));
+      if (url.pathname === '/api/restore' && request.method === 'POST') return cors(request, await onRestore(request, env));
       if (url.pathname === '/' && request.method === 'GET') return await onSetup(url, env);
       return new Response('Not found', { status: 404 });
     } catch (err) {
@@ -111,6 +112,14 @@ async function pausesOf(env) {
 }
 
 const pauseOn = (date, pauses) => pauses.find((p) => p.from <= date && date <= p.to) ?? null;
+
+/** Тихі години з застосунку: { on, from, to }, «з» може бути пізніше за «до» (через північ). */
+async function quietOf(env) {
+  try { return JSON.parse(await getMeta(env, 'quiet') || 'null'); } catch { return null; }
+}
+
+const quietOn = (hm, q) => Boolean(q?.on && q.from && q.to && q.from !== q.to
+  && (q.from < q.to ? hm >= q.from && hm < q.to : hm >= q.from || hm < q.to));
 
 /** Як у застосунку: ціль × активні дні / 7. */
 function weekTarget(a, start, pauses) {
@@ -674,6 +683,13 @@ async function onSync(request, env) {
     const list = body.pauses.filter((p) => /^\d{4}-\d{2}-\d{2}$/.test(p?.from) && /^\d{4}-\d{2}-\d{2}$/.test(p?.to));
     await setMeta(env, 'pauses', JSON.stringify(list.map(({ from, to, reason }) => ({ from, to, reason }))));
   }
+  if (body.quiet && typeof body.quiet === 'object') {
+    const { on, from, to } = body.quiet;
+    const hm = /^\d{2}:\d{2}$/;
+    await setMeta(env, 'quiet', JSON.stringify({ on: Boolean(on), from: hm.test(from) ? from : '', to: hm.test(to) ? to : '' }));
+  }
+  // Шаблони дня боту не потрібні — зберігаємо лише для відновлення на новому телефоні
+  if (Array.isArray(body.templates)) await setMeta(env, 'templates', JSON.stringify(body.templates));
   if (Array.isArray(body.activities)) {
     await env.DB.batch([
       env.DB.prepare('DELETE FROM acts'),
@@ -716,6 +732,26 @@ async function onSync(request, env) {
     deleted: results.filter((r) => r.deleted).map((r) => r.id),
     reminders: rem.filter((r) => !r.deleted).map((r) => JSON.parse(r.data)),
     reminderDeleted: rem.filter((r) => r.deleted).map((r) => r.id),
+  });
+}
+
+/**
+ * Усе, що бот знає, — для нового телефона: заняття, увесь план (не лише 60 днів), нагадування,
+ * вікна, паузи, тихі години й шаблони. Нічого не змінює.
+ */
+async function onRestore(request, env) {
+  if (!await authorized(request, env)) return json({ error: 'unauthorized' }, 401);
+  const rows = async (sql) => (await env.DB.prepare(sql).all()).results.map((r) => { try { return JSON.parse(r.data); } catch { return null; } }).filter(Boolean);
+  const meta = async (k) => { try { return JSON.parse(await getMeta(env, k) || 'null'); } catch { return null; } };
+  return json({
+    now: Date.now(),
+    activities: await rows('SELECT data FROM acts'),
+    items: await rows('SELECT data FROM items WHERE deleted = 0'),
+    reminders: await rows('SELECT data FROM reminders WHERE deleted = 0'),
+    slots: await meta('slots'),
+    pauses: await meta('pauses'),
+    quiet: await meta('quiet'),
+    templates: await meta('templates'),
   });
 }
 
@@ -779,6 +815,8 @@ async function tick(env) {
   if (!chatId || !env.BOT_TOKEN) return;
   const tz = tzOf(env);
   const now = Date.now();
+  // Тихі години — не пишемо нічого; що настало за цей час, прийде одним повідомленням після них
+  if (quietOn(local(now, tz).hm, await quietOf(env))) return;
   // «Не забудь» — не хобі: приходять і під час паузи (код посилки потрібен і у відпустці)
   await sendReminders(env, chatId, tz, now);
   // Пауза — жодних нагадувань і підсумків; вікна, що минули за паузу, потім відсіє перевірка кінця вікна
@@ -1165,6 +1203,8 @@ async function sendReminders(env, chatId, tz, now) {
         inline_keyboard: [[
           { text: '✅ Зроблено', callback_data: `r:done:${r.id}:${date}` },
           { text: `⏰ +${REMIND_SNOOZE_MIN} хв`, callback_data: `r:snooze:${r.id}:${date}` },
+          // Разове можна перенести на завтра; повторюване й так прийде за своїм розкладом
+          ...(r.kind === 'once' ? [{ text: '➡️ Завтра', callback_data: `r:tomorrow:${r.id}:${date}` }] : []),
         ]],
       },
     });
@@ -1194,6 +1234,21 @@ async function onReminderButton(env, cb, chatId) {
     if (cb.message) {
       await tg(env, 'editMessageText', {
         chat_id: chatId, message_id: cb.message.message_id, parse_mode: 'HTML', text: reminderDoneText(r, r.done[date]), reply_markup: { inline_keyboard: [] },
+      });
+    }
+  } else if (action === 'tomorrow') {
+    if (r.kind !== 'once') {
+      await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: 'Повторюване прийде за розкладом' });
+      return;
+    }
+    r.date = addDays(date, 1);
+    r.updated = now;
+    await env.DB.prepare('UPDATE reminders SET data = ?, updated = ?, srv = ? WHERE id = ?').bind(JSON.stringify(r), now, now, id).run();
+    answer = `Нагадаю завтра о ${r.from}`;
+    if (cb.message) {
+      await tg(env, 'editMessageText', {
+        chat_id: chatId, message_id: cb.message.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: [] },
+        text: `➡️ ${esc(r.text)}\n<i>перенесено на завтра, ${esc(r.from)}–${esc(r.to)}</i>`,
       });
     }
   } else {
