@@ -5,13 +5,16 @@
 //   DB         — прив'язка (binding) бази D1; таблиці Worker створює сам;
 //   BOT_TOKEN  — секрет, токен від @BotFather;
 //   cron       — тригер «* * * * *» (щохвилини): нагадування, ранковий план, вечірній підсумок.
-// Необов'язково: TZ (за замовчуванням Europe/Kyiv), OWNER_ID (id чату власника, якщо не через /start).
+// Необов'язково: TZ (за замовчуванням Europe/Kyiv), OWNER_ID (id чату власника, якщо не через /start),
+//   AI — прив'язка Workers AI: голосові й фрази текстом («гітара 30 хв», «пайтон на завтра ввечері»).
 //
 // Власник — перший, хто напише боту /start; решта чатів бот ігнорує.
 // Ключ для застосунку видає бот командою /key; у базі лежить лише його хеш.
+// Вага: бот нагадує зважитись і приймає вагу повідомленням, застосунок «Вага» (weight-log) забирає її через /api/weights.
 
 const APP_URL = 'https://vitaliylobko.github.io/hobby-planner/';
-const ORIGINS = ['https://vitaliylobko.github.io', 'http://127.0.0.1:8093'];
+const WEIGHT_URL = 'https://vitaliylobko.github.io/weight-log/';
+const ORIGINS = ['https://vitaliylobko.github.io', 'http://127.0.0.1:8093', 'http://127.0.0.1:8094'];
 const DEFAULT_TZ = 'Europe/Kyiv';
 const MIN = 60000;
 // Повтори від початку вікна, хв; останній — за 10 хв до кінця вікна
@@ -45,6 +48,8 @@ const SCHEMA = [
   'CREATE INDEX IF NOT EXISTS items_srv ON items(srv)',
   'CREATE INDEX IF NOT EXISTS items_date ON items(date)',
   'CREATE TABLE IF NOT EXISTS acts (id TEXT PRIMARY KEY, data TEXT NOT NULL)',
+  'CREATE TABLE IF NOT EXISTS weights (date TEXT PRIMARY KEY, kg REAL NOT NULL, note TEXT, updated INTEGER DEFAULT 0, srv INTEGER DEFAULT 0)',
+  'CREATE INDEX IF NOT EXISTS weights_srv ON weights(srv)',
 ];
 
 export default {
@@ -55,6 +60,7 @@ export default {
       if (request.method === 'OPTIONS') return cors(request, new Response(null, { status: 204 }));
       if (url.pathname === '/tg' && request.method === 'POST') return await onTelegram(request, env);
       if (url.pathname === '/api/sync' && request.method === 'POST') return cors(request, await onSync(request, env));
+      if (url.pathname === '/api/weights' && request.method === 'POST') return cors(request, await onWeights(request, env));
       if (url.pathname === '/' && request.method === 'GET') return await onSetup(url, env);
       return new Response('Not found', { status: 404 });
     } catch (err) {
@@ -407,7 +413,10 @@ async function onTelegram(request, env) {
   }
   if (chatId !== own) return text('ok');
 
-  if (cb) await onButton(env, cb, chatId);
+  if (cb && String(cb.data || '').startsWith('w:')) await onWeighButton(env, cb, chatId);
+  else if (cb && String(cb.data || '').startsWith('u:')) await onUndo(env, cb, chatId);
+  else if (cb) await onButton(env, cb, chatId);
+  else if (msg?.voice || msg?.audio) await onVoice(env, msg, chatId);
   else if (msg?.text) await onCommand(env, msg.text.trim(), chatId);
   return text('ok');
 }
@@ -426,6 +435,10 @@ async function onCommand(env, cmd, chatId) {
     await sendToday(env, chatId, Date.now(), 'План на сьогодні');
   } else if (name === '/week') {
     await sendWeek(env, chatId, Date.now());
+  } else if (parseWeight(cmd)) {
+    await recordWeight(env, chatId, parseWeight(cmd), Date.now());
+  } else if (env.AI && !cmd.startsWith('/')) {
+    await onPhrase(env, cmd, chatId);
   } else {
     await tg(env, 'sendMessage', {
       chat_id: chatId, parse_mode: 'HTML',
@@ -436,6 +449,10 @@ async function onCommand(env, cmd, chatId) {
         '',
         '/today — план на сьогодні',
         '/week — тиждень',
+        '',
+        '🎙 Голосом чи текстом: «гітара 30 хв, вчив баре», «пайтон на завтра ввечері, урок 6», «перенеси англійську на суботу», «пропускаю спорт».',
+        '',
+        '⚖️ Вага — надішли число, наприклад <code>82,4</code> або <code>82.4 після свята</code>: запишу за сьогодні, застосунок «Вага» забере сам.',
         '/key — новий ключ для застосунку',
       ].join('\n'),
       reply_markup: { inline_keyboard: [[{ text: 'Відкрити застосунок', url: APP_URL }]] },
@@ -485,21 +502,7 @@ async function onButton(env, cb, chatId) {
     await saveFromBot(env, row, it);
     answer = { done: 'Зараховано!', min: 'Мінімум зараховано', skipped: 'Пропущено — без докорів' }[status];
   } else if (action === 'start') {
-    // Таймер лише один: інший, що йде, стає на паузу
-    const { results } = await env.DB.prepare("SELECT * FROM items WHERE deleted = 0 AND status = 'planned' AND id != ?").bind(it.id).all();
-    for (const other of results) {
-      const o = JSON.parse(other.data);
-      if (!o.runningSince) continue;
-      o.spent = elapsed(o, now);
-      o.runningSince = null;
-      await saveFromBot(env, other, o);
-      // Пауза в іншому вікні — його повідомлення теж має це показати
-      if (other.msg_id && other.msg_id !== cb.message?.message_id) {
-        await editWindow(env, chatId, other.msg_id, o.date, o.slot, cfg, acts, tz, now);
-      }
-    }
-    it.runningSince = now;
-    await saveFromBot(env, row, it);
+    await startTimer(env, row, it, { chatId, cfg, acts, tz, now, skipMsg: cb.message?.message_id });
     answer = 'Таймер пішов';
   } else if (action === 'stop') {
     it.spent = elapsed(it, now);
@@ -521,10 +524,39 @@ async function onButton(env, cb, chatId) {
 }
 
 /**
+ * Таймер лише один: інший, що йде, стає на паузу. undo — знімки рядків до зміни (для «Скасувати» в голосі).
+ * skipMsg — повідомлення, яке оновить сам виклик (кнопка в ньому натиснута).
+ */
+async function startTimer(env, row, it, { chatId, cfg, acts, tz, now, skipMsg = null, undo = null }) {
+  const { results } = await env.DB.prepare("SELECT * FROM items WHERE deleted = 0 AND status = 'planned' AND id != ?").bind(it.id).all();
+  for (const other of results) {
+    const o = JSON.parse(other.data);
+    if (!o.runningSince) continue;
+    undo?.push({ id: other.id, row: other });
+    o.spent = elapsed(o, now);
+    o.runningSince = null;
+    await saveFromBot(env, other, o);
+    // Пауза в іншому вікні — його повідомлення теж має це показати
+    if (other.msg_id && other.msg_id !== skipMsg) {
+      await editWindow(env, chatId, other.msg_id, o.date, o.slot, cfg, acts, tz, now);
+    }
+  }
+  it.runningSince = now;
+  await saveFromBot(env, row, it);
+}
+
+/** «на сьогодні, вечір», «на завтра, ранок», «на 23 жовтня, вечір». */
+function whenLabel(date, slot, today) {
+  const day = date === today ? 'на сьогодні' : date === addDays(today, 1) ? 'на завтра' : `на ${dayMonth(date)}`;
+  return `${day}, ${slot.label.toLowerCase()}`;
+}
+
+/**
  * Перенести: наступне вікно сьогодні, інакше завтра (те саме вікно або перше, що підходить). Як у застосунку:
  * у вікні може бути кілька справ, не годиться лише вікно, що скінчилось, чи де це заняття вже є.
+ * forced — { date, slot }: куди саме (з голосу); undo — сюди id нової справи, щоб «Скасувати» її прибрало.
  */
-async function moveItem(env, row, it, cfg, tz, now, acts, chatId) {
+async function moveItem(env, row, it, cfg, tz, now, acts, chatId, { forced = null, undo = null } = {}) {
   const today = local(now, tz).date;
   const taken = async (date) => {
     const { results } = await env.DB.prepare("SELECT data FROM items WHERE date = ? AND deleted = 0 AND status != 'moved'").bind(date).all();
@@ -532,7 +564,12 @@ async function moveItem(env, row, it, cfg, tz, now, acts, chatId) {
   };
   const open = (date, slot) => zoned(date, slot.to, tz) > now;
   let target = null;
-  if (it.date >= today) {
+  if (forced) {
+    if (!open(forced.date, forced.slot)) return 'Це вікно вже минуло';
+    if ((await taken(forced.date)).has(forced.slot.id)) return 'Там це заняття вже є';
+    target = { ...forced, label: whenLabel(forced.date, forced.slot, today) };
+  }
+  if (!target && it.date >= today) {
     const used = await taken(it.date);
     const slots = slotsFor(it.date, cfg);
     const later = slots.slice(slots.findIndex((s) => s.id === it.slot) + 1).find((s) => !used.has(s.id) && open(it.date, s));
@@ -558,6 +595,8 @@ async function moveItem(env, row, it, cfg, tz, now, acts, chatId) {
   await env.DB.prepare(`INSERT INTO items (id, date, data, status, start_at, end_at, next_at, nudge, updated, srv, deleted)
     VALUES (?, ?, ?, 'planned', ?, ?, ?, 0, ?, ?, 0)`)
     .bind(fresh.id, fresh.date, JSON.stringify(fresh), start, end, end > now ? Math.max(start, now) : null, now, now).run();
+  undo?.push({ id: fresh.id, created: true });
+  undo?.push({ id: row.id, row });
   Object.assign(it, { status: 'moved', movedTo: `${fresh.date} ${fresh.slot}`, movedLabel: target.label, spent: 0, runningSince: null });
   await saveFromBot(env, row, it);
   return `Перенесено ${target.label}`;
@@ -579,11 +618,16 @@ function cors(request, response) {
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
-async function onSync(request, env) {
+/** Ключ із /key у заголовку Authorization: Bearer — спільний для Хобі-плану й «Ваги». */
+async function authorized(request, env) {
   const auth = request.headers.get('Authorization') || '';
   const key = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
   const hash = await getMeta(env, 'key_hash');
-  if (!key || !hash || await sha256hex(key) !== hash) return json({ error: 'unauthorized' }, 401);
+  return Boolean(key && hash && await sha256hex(key) === hash);
+}
+
+async function onSync(request, env) {
+  if (!await authorized(request, env)) return json({ error: 'unauthorized' }, 401);
 
   const body = await request.json().catch(() => null);
   if (!body || !Array.isArray(body.items)) return json({ error: 'bad request' }, 400);
@@ -673,6 +717,7 @@ async function tick(env) {
   const acts = await actsMap(env);
   await sendNudges(env, chatId, cfg, acts, tz, now);
   await sendDigests(env, chatId, cfg, tz, now);
+  await sendWeighReminder(env, chatId, tz, now);
 }
 
 /**
@@ -803,4 +848,521 @@ async function sendWeek(env, chatId, now) {
     chat_id: chatId, parse_mode: 'HTML', text: lines.join('\n'),
     reply_markup: { inline_keyboard: [[{ text: 'Відкрити тиждень', url: `${APP_URL}#week` }]] },
   });
+}
+
+// ---------- вага ----------
+
+// Друге нагадування — через годину, якщо ваги ще немає; пізніше 3 год від часу нагадування не смикаємо:
+// зважування натщесерце о третій дня — вже шум
+const WEIGH_REPEAT_MIN = 60;
+const WEIGH_LATE_MIN = 180;
+
+/** «82,4», «82.4 кг», «82,4 після свята» → { kg, note }; інше — null. */
+function parseWeight(input) {
+  const m = /^(\d{2,3}(?:[.,]\d{1,2})?)\s*(?:кг|kg)?\.?(?:\s+([\s\S]*))?$/i.exec(input);
+  if (!m) return null;
+  const kg = Number(m[1].replace(',', '.'));
+  if (!(kg >= 30 && kg <= 250)) return null;
+  return { kg: Math.round(kg * 100) / 100, note: (m[2] || '').trim().slice(0, 200) };
+}
+
+/** 82.4 → «82,4», 82.45 → «82,45». */
+const kgText = (v) => v.toFixed(2).replace(/0$/, '').replace('.', ',');
+const kgDiff = (d) => (Math.abs(d) < 0.005 ? '±0' : `${d > 0 ? '+' : '−'}${kgText(Math.abs(d))}`);
+
+function dayMonth(date) {
+  const [, m, d] = date.split('-').map(Number);
+  return `${d} ${MONTHS[m - 1]}`;
+}
+
+/** Стан нагадування за день: { date, n — скільки надіслано, next — коли наступне, msg — повідомлення з кнопками }. */
+async function weighState(env) {
+  try { return JSON.parse(await getMeta(env, 'weigh') || '{}'); } catch { return {}; }
+}
+
+const setWeighState = (env, st) => setMeta(env, 'weigh', JSON.stringify(st));
+
+async function closeWeighMessage(env, chatId, msgId) {
+  if (msgId) await tg(env, 'editMessageReplyMarkup', { chat_id: chatId, message_id: msgId, reply_markup: { inline_keyboard: [] } });
+}
+
+/** Вага з повідомлення — за сьогодні; той самий день замінюється, нотатку без нової не стираємо. */
+async function recordWeight(env, chatId, { kg, note }, now) {
+  const date = local(now, tzOf(env)).date;
+  const was = await env.DB.prepare('SELECT kg FROM weights WHERE date = ?').bind(date).first('kg');
+  const prev = await env.DB.prepare('SELECT date, kg FROM weights WHERE date < ? ORDER BY date DESC LIMIT 1').bind(date).first();
+  await env.DB.prepare(`INSERT INTO weights (date, kg, note, updated, srv) VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(date) DO UPDATE SET kg = excluded.kg, updated = excluded.updated, srv = excluded.srv,
+      note = CASE WHEN excluded.note != '' THEN excluded.note ELSE weights.note END`)
+    .bind(date, kg, note, now, now).run();
+
+  const st = await weighState(env);
+  if (st.date === date) {
+    await closeWeighMessage(env, chatId, st.msg);
+    await setWeighState(env, { ...st, next: null, msg: null });
+  }
+  const replaced = was != null && Math.abs(was - kg) >= 0.005;
+  const lines = [`✅ ${replaced ? `Замінив ${kgText(was)} → ` : 'Записано '}<b>${kgText(kg)} кг</b> за ${dayMonth(date)}`];
+  if (note) lines.push(`<i>${esc(note)}</i>`);
+  if (prev) lines.push(`Минулого разу ${kgText(prev.kg)} кг (${dayMonth(prev.date)}) · <b>${kgDiff(kg - prev.kg)}</b>`);
+  lines.push('', '<i>«Вага» забере запис, щойно її відкриєш.</i>');
+  await tg(env, 'sendMessage', {
+    chat_id: chatId, parse_mode: 'HTML', text: lines.join('\n'),
+    reply_markup: { inline_keyboard: [[{ text: 'Відкрити «Вагу»', url: WEIGHT_URL }]] },
+  });
+}
+
+/** Нагадування зважитись о часі з «Ваги»: перше, через годину друге — поки за сьогодні немає ваги. */
+async function sendWeighReminder(env, chatId, tz, now) {
+  const time = await getMeta(env, 'weigh_time');
+  if (!time) return;
+  const { date } = local(now, tz);
+  const at = zoned(date, time, tz);
+  if (now < at || now >= at + WEIGH_LATE_MIN * MIN) return;
+  let st = await weighState(env);
+  if (st.date !== date) st = { date, n: 0, next: at, msg: null };
+  if (!st.next || now < st.next) return;
+  if (await env.DB.prepare('SELECT 1 AS x FROM weights WHERE date = ?').bind(date).first('x')) {
+    await setWeighState(env, { ...st, next: null });
+    return;
+  }
+  await closeWeighMessage(env, chatId, st.msg);
+  const sent = await tg(env, 'sendMessage', {
+    chat_id: chatId, parse_mode: 'HTML',
+    text: [
+      st.n ? '<i>🔔 Нагадую</i>' : null,
+      '⚖️ <b>Час зважитись</b>',
+      'Натщесерце, після туалету, до їжі.',
+      '',
+      'Надішли вагу числом, наприклад <code>82,4</code> — можна з нотаткою.',
+    ].filter((x) => x !== null).join('\n'),
+    reply_markup: {
+      inline_keyboard: [[
+        { text: '⏰ +30 хв', callback_data: 'w:snooze' },
+        { text: 'Сьогодні без зважування', callback_data: 'w:skip' },
+      ]],
+    },
+  });
+  await setWeighState(env, {
+    date, n: st.n + 1, next: st.n === 0 ? now + WEIGH_REPEAT_MIN * MIN : null, msg: sent.result?.message_id ?? null,
+  });
+}
+
+async function onWeighButton(env, cb, chatId) {
+  const action = String(cb.data).split(':')[1];
+  const now = Date.now();
+  const st = await weighState(env);
+  let answer;
+  if (st.date !== local(now, tzOf(env)).date) {
+    answer = 'Це нагадування вже не актуальне';
+  } else if (action === 'snooze') {
+    await setWeighState(env, { ...st, next: now + 30 * MIN, msg: null });
+    answer = 'Нагадаю через 30 хв';
+  } else {
+    await setWeighState(env, { ...st, next: null, msg: null });
+    answer = 'Добре, сьогодні без зважування';
+  }
+  await closeWeighMessage(env, chatId, cb.message?.message_id);
+  await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: answer });
+}
+
+/**
+ * Обмін із «Вагою»: застосунок шле свої зважування (перемагає новіший updated) і час нагадування
+ * (null — вимкнено), у відповідь — записи, змінені на сервері після since, зокрема надіслані боту.
+ */
+async function onWeights(request, env) {
+  if (!await authorized(request, env)) return json({ error: 'unauthorized' }, 401);
+  const body = await request.json().catch(() => null);
+  if (!body || !Array.isArray(body.weights)) return json({ error: 'bad request' }, 400);
+  const now = Date.now();
+  if ('remind' in body) {
+    if (/^\d{2}:\d{2}$/.test(body.remind ?? '')) await setMeta(env, 'weigh_time', body.remind);
+    else await env.DB.prepare("DELETE FROM meta WHERE k = 'weigh_time'").run();
+  }
+  const put = body.weights
+    .filter((w) => /^\d{4}-\d{2}-\d{2}$/.test(w?.date) && Number.isFinite(w.kg) && w.kg > 0)
+    .slice(0, 400);
+  if (put.length) {
+    await env.DB.batch(put.map((w) => env.DB.prepare(`INSERT INTO weights (date, kg, note, updated, srv) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(date) DO UPDATE SET kg = excluded.kg, note = excluded.note, updated = excluded.updated, srv = excluded.srv
+      WHERE excluded.updated > weights.updated`)
+      .bind(w.date, w.kg, String(w.note ?? '').slice(0, 200), Number(w.updated) || 0, now)));
+  }
+  const since = Number(body.since) || 0;
+  const { results } = await env.DB.prepare('SELECT date, kg, note, updated FROM weights WHERE srv > ? ORDER BY date')
+    .bind(since).all();
+  return json({ now, weights: results });
+}
+
+// ---------- голос і фрази ----------
+
+// Workers AI — прив'язка AI у налаштуваннях Worker: розпізнавання мови й розбір фрази в дії.
+// Модель лише пропонує дії; що й як змінити в плані, вирішує код нижче за тими ж правилами, що й кнопки.
+const STT_MODEL = '@cf/openai/whisper-large-v3-turbo';
+const NLU_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
+const VOICE_MAX_SEC = 60;
+const MAX_ACTIONS = 5;
+const PHRASE_ACTIONS = ['done', 'min', 'skip', 'start', 'stop', 'plan', 'move', 'unplan', 'weight', 'today', 'week', 'unknown'];
+const PHRASE_SCHEMA = {
+  type: 'object',
+  properties: {
+    actions: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', enum: PHRASE_ACTIONS },
+          activity: { type: 'string' },
+          date: { type: 'string' },
+          slot: { type: 'string' },
+          minutes: { type: 'number' },
+          topic: { type: 'string' },
+          kg: { type: 'number' },
+        },
+        required: ['type'],
+      },
+    },
+  },
+  required: ['actions'],
+};
+
+const say = (env, chatId, body, extra = {}) => tg(env, 'sendMessage', { chat_id: chatId, parse_mode: 'HTML', text: body, ...extra });
+
+const activeActs = (acts) => [...acts.values()].filter((a) => !a.archived).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+
+function base64(buf) {
+  const bytes = new Uint8Array(buf);
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+/** Голосове → текст (Whisper) → той самий розбір, що й для тексту. */
+async function onVoice(env, msg, chatId) {
+  if (!env.AI) {
+    await say(env, chatId, 'Голос ще не підключено: Cloudflare → hobby-bot → Bindings → Workers AI з іменем <code>AI</code>.');
+    return;
+  }
+  const v = msg.voice ?? msg.audio;
+  if ((v.duration || 0) > VOICE_MAX_SEC) {
+    await say(env, chatId, 'Задовге — до хвилини: я розбираю коротку фразу.');
+    return;
+  }
+  await tg(env, 'sendChatAction', { chat_id: chatId, action: 'typing' });
+  let heard = '';
+  try {
+    const file = await tg(env, 'getFile', { file_id: v.file_id });
+    if (!file.ok) throw new Error(file.description || 'getFile');
+    const res = await fetch(`https://api.telegram.org/file/bot${env.BOT_TOKEN}/${file.result.file_path}`);
+    if (!res.ok) throw new Error(`file ${res.status}`);
+    // Назви занять — підказка розпізнаванню: «Python» замість «пайтон», власні назви без помилок
+    const names = activeActs(await actsMap(env)).map((a) => a.name).join(', ');
+    const out = await env.AI.run(STT_MODEL, {
+      audio: base64(await res.arrayBuffer()), vad_filter: true, ...(names ? { initial_prompt: `Хобі: ${names}.` } : {}),
+    });
+    heard = String(out?.text ?? '').trim();
+  } catch (err) {
+    console.log('voice', err.stack || err);
+    await say(env, chatId, 'Не вийшло розпізнати голосове — спробуй ще раз або напиши текстом.');
+    return;
+  }
+  if (!heard) {
+    await say(env, chatId, 'Нічого не розчув — спробуй ще раз, ближче до мікрофона.');
+    return;
+  }
+  await onPhrase(env, heard, chatId, { voice: true });
+}
+
+/** Що бачить модель: дати з днями тижня (рахувати їх сама вона помиляється), вікна, заняття, план на сьогодні-завтра. */
+function phraseContext(now, tz, cfg, list, acts, rows) {
+  const { date: today, hm } = local(now, tz);
+  const dow = (d) => DAYS[new Date(`${d}T12:00:00Z`).getUTCDay()].toLowerCase();
+  const mark = { [addDays(today, -1)]: ' (вчора)', [today]: ' (сьогодні)', [addDays(today, 1)]: ' (завтра)' };
+  const days = Array.from({ length: 9 }, (_, i) => addDays(today, i - 1)).map((d) => `${d} ${dow(d)}${mark[d] ?? ''}`);
+  const slotText = (slots) => slots.map((s) => `${s.id} = ${s.label} ${s.from}–${s.to}`).join('; ');
+  const plan = rows
+    .filter((r) => r.it.date >= today && r.it.date <= addDays(today, 1) && r.it.status !== 'moved')
+    .map((r) => `- ${r.it.date} ${r.it.slot} ${(acts.get(r.it.activityId) ?? MISSING).name} — ${STATUS[r.it.status] ?? r.it.status}`
+      + `${r.it.runningSince ? ', таймер іде' : ''}${r.it.topic ? `, «${r.it.topic}»` : ''}`);
+  return [
+    'You convert a short message from the owner of a hobby planner into actions. The message is in Ukrainian or Russian and may contain speech-recognition errors. Answer with JSON only.',
+    `Now: ${today} (${dow(today)}), ${hm}.`,
+    `Dates: ${days.join(', ')}.`,
+    `Day windows on weekdays: ${slotText(cfg.weekday)}. On weekends: ${slotText(cfg.weekend)}.`,
+    `Activities (copy the name exactly): ${list.map((a) => a.name).join(', ')}.`,
+    plan.length ? `Plan for today and tomorrow:\n${plan.join('\n')}` : 'The plan for today and tomorrow is empty.',
+    '',
+    'Action types:',
+    '- done: the activity was done (minutes = time spent if said, topic = what exactly was done);',
+    '- min: only the minimal version was done;',
+    '- skip: skipping it;',
+    '- start / stop: start or pause its timer;',
+    '- plan: add the activity to a date and window (topic = what to do, e.g. a lesson number);',
+    '- move: move an already planned activity; date and slot = where to move it;',
+    '- unplan: remove it from the plan;',
+    '- weight: body weight in kg;',
+    "- today: show today's plan; week: show weekly progress;",
+    '- unknown: anything else.',
+    'Rules: one action per activity mentioned. date: YYYY-MM-DD from the list above, or "" if not said (means today).',
+    'slot: m (morning, зранку, утром), n (midday or daytime, в обід, днем), e (evening, ввечері, вечером), or "" if not said.',
+    'minutes: 0 if not said. topic: short, in the language of the message, "" if none. activity: "" for weight, today, week, unknown.',
+    'Map misheard, translated or transliterated names to the closest activity from the list.',
+  ].join('\n');
+}
+
+async function understand(env, phrase, context) {
+  const out = await env.AI.run(NLU_MODEL, {
+    messages: [{ role: 'system', content: context }, { role: 'user', content: phrase }],
+    response_format: { type: 'json_schema', json_schema: PHRASE_SCHEMA },
+    max_tokens: 500,
+    temperature: 0,
+  });
+  let r = out?.response;
+  if (typeof r === 'string') r = JSON.parse(r);
+  return Array.isArray(r?.actions) ? r.actions.slice(0, MAX_ACTIONS) : [];
+}
+
+/** Назва від моделі → заняття: точно, потім за початком, потім входженням. */
+function findAct(list, name) {
+  const n = String(name || '').trim().toLowerCase();
+  if (!n) return null;
+  const low = (a) => a.name.toLowerCase();
+  return list.find((a) => low(a) === n)
+    ?? list.find((a) => low(a).startsWith(n) || n.startsWith(low(a)))
+    ?? list.find((a) => low(a).includes(n) || n.includes(low(a)))
+    ?? null;
+}
+
+function joinTopic(old, add) {
+  if (!add) return old || '';
+  if (!old) return add;
+  return old.toLowerCase().includes(add.toLowerCase()) ? old : `${old} · ${add}`;
+}
+
+/** Фраза (текст чи розпізнане голосове) → дії → одне повідомлення з підсумком і «Скасувати». */
+async function onPhrase(env, phrase, chatId, { voice = false } = {}) {
+  const now = Date.now();
+  const tz = tzOf(env);
+  const cfg = await slotsCfg(env);
+  const acts = await actsMap(env);
+  const list = activeActs(acts);
+  const today = local(now, tz).date;
+  if (!voice) await tg(env, 'sendChatAction', { chat_id: chatId, action: 'typing' });
+  const { results } = await env.DB.prepare('SELECT * FROM items WHERE deleted = 0 AND date >= ? AND date <= ?')
+    .bind(addDays(today, -7), addDays(today, 60)).all();
+  const rows = results.map((row) => ({ row, it: JSON.parse(row.data) }));
+
+  let actions;
+  try {
+    actions = await understand(env, phrase, phraseContext(now, tz, cfg, list, acts, rows));
+  } catch (err) {
+    console.log('phrase', err.stack || err);
+    await say(env, chatId, `${voice ? `🎙 <i>«${esc(phrase)}»</i>\n\n` : ''}Не зміг розібрати — спробуй сказати інакше.`);
+    return;
+  }
+  const ctx = { env, chatId, now, tz, cfg, acts, list, today, rows, undo: [], touched: new Set(), after: [] };
+  const lines = [];
+  for (const x of actions) {
+    const line = await performPhrase(ctx, x);
+    if (line) lines.push(line);
+  }
+  if (!lines.length && !ctx.after.length) {
+    lines.push('🤷 Не зрозумів, що зробити. Наприклад: «гітара 30 хв, вчив баре», «пайтон на завтра ввечері», «перенеси англійську на суботу».');
+  }
+
+  // Змінені справи, в яких є повідомлення вікна, — оновити, щоб кнопки там показували новий стан
+  const seen = new Set();
+  for (const id of ctx.touched) {
+    const r = await env.DB.prepare("SELECT msg_id, date, json_extract(data, '$.slot') AS slot FROM items WHERE id = ?").bind(id).first();
+    if (!r?.msg_id || seen.has(r.msg_id)) continue;
+    seen.add(r.msg_id);
+    await editWindow(env, chatId, r.msg_id, r.date, r.slot, cfg, acts, tz, now);
+  }
+
+  let extra = {};
+  if (ctx.undo.length) {
+    const token = crypto.randomUUID().slice(0, 8);
+    await setMeta(env, 'undo', JSON.stringify({ token, list: ctx.undo }));
+    extra = { reply_markup: { inline_keyboard: [[{ text: '↩️ Скасувати', callback_data: `u:${token}` }]] } };
+  }
+  const head = voice ? `🎙 <i>«${esc(phrase)}»</i>` : null;
+  if (head || lines.length) await say(env, chatId, [head, head && lines.length ? '' : null, ...lines].filter((x) => x !== null).join('\n'), extra);
+  // План, тиждень і вага — своїми повідомленнями, після підсумку
+  for (const fn of ctx.after) await fn();
+}
+
+/** Одна дія з фрази. Повертає рядок для підсумку або null (дія відповідає окремим повідомленням). */
+async function performPhrase(ctx, x) {
+  const { env, chatId, now, tz, cfg, acts, list, today, rows, undo } = ctx;
+  const type = PHRASE_ACTIONS.includes(x?.type) ? x.type : 'unknown';
+  if (type === 'unknown') return null;
+  if (type === 'today') { ctx.after.push(() => sendToday(env, chatId, now, 'План на сьогодні')); return null; }
+  if (type === 'week') { ctx.after.push(() => sendWeek(env, chatId, now)); return null; }
+  if (type === 'weight') {
+    const kg = Number(x.kg);
+    if (!(kg >= 30 && kg <= 250)) return '❓ Не розчув вагу — надішли числом, наприклад 82,4';
+    ctx.after.push(() => recordWeight(env, chatId, { kg: Math.round(kg * 100) / 100, note: String(x.topic || '').trim().slice(0, 200) }, now));
+    return null;
+  }
+
+  const a = findAct(list, x.activity);
+  if (!a) return `❓ Не знайшов заняття «${esc(x.activity || '…')}» — є: ${list.map((z) => esc(z.name)).join(', ')}`;
+  const name = `${actEmoji(a)} <b>${esc(a.name)}</b>`;
+  const hm = local(now, tz).hm;
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(x.date || '') && x.date >= addDays(today, -7) && x.date <= addDays(today, 60) ? x.date : null;
+  const slotIn = (d) => slotsFor(d, cfg).find((s) => s.id === x.slot) ?? null;
+  const isOpen = (d, s) => zoned(d, s.to, tz) > now;
+  const minutes = Math.max(0, Math.min(600, Math.round(Number(x.minutes) || 0)));
+  const topic = String(x.topic || '').trim().slice(0, 120);
+  const topicText = topic ? ` · <i>${esc(topic)}</i>` : '';
+  const live = (r) => r.it.activityId === a.id && r.it.status !== 'moved' && !r.row.deleted;
+  // Серед кандидатів — названого вікна, далі того, що йде зараз, далі перший.
+  // Для перенесення вікно з фрази — куди, а не звідки: тоді named = false
+  const pick = (cands, d, named = true) => (named ? cands.find((r) => r.it.slot === x.slot) : null)
+    ?? cands.find((r) => {
+      const s = slotsFor(d, cfg).find((z) => z.id === r.it.slot);
+      return d === today && s && s.from <= hm && hm < s.to;
+    })
+    ?? cands[0] ?? null;
+  const touch = (r) => { undo.push({ id: r.row.id, row: { ...r.row } }); ctx.touched.add(r.row.id); };
+  const create = async (it) => {
+    await acceptItem(env, it, cfg, tz, now, acts, chatId);
+    undo.push({ id: it.id, created: true });
+    rows.push({ row: { id: it.id, deleted: 0 }, it });
+  };
+
+  if (type === 'plan') {
+    const d = date && date >= today ? date : today;
+    const open = slotsFor(d, cfg).filter((s) => isOpen(d, s));
+    const s = slotIn(d) ?? open.find((z) => a.slots?.includes(z.id)) ?? open[0];
+    if (!s) return `${name} — сьогодні всі вікна вже минули, скажи день`;
+    if (!isOpen(d, s)) return `${name} — ${s.label.toLowerCase()} ${d === today ? 'сьогодні' : dayMonth(d)} уже минув`;
+    if (rows.some((r) => live(r) && r.it.date === d && r.it.slot === s.id)) return `${name} уже є ${whenLabel(d, s, today)}`;
+    await create({ id: crypto.randomUUID(), date: d, slot: s.id, activityId: a.id, topic, status: 'planned', doneAt: null, updated: now });
+    return `🗓 ${name} — ${whenLabel(d, s, today)}${topicText}`;
+  }
+
+  if (type === 'move') {
+    // Звідки — найближча запланована справа заняття від сьогодні; дата й вікно з фрази — куди
+    const src = rows.filter((r) => live(r) && r.it.status === 'planned' && r.it.date >= today)
+      .sort((p, q) => (p.it.date < q.it.date ? -1 : p.it.date > q.it.date ? 1 : 0));
+    const r = pick(src.filter((z) => z.it.date === src[0]?.it.date), src[0]?.it.date ?? today, false);
+    if (!r) return `${name} — немає запланованої справи, яку можна перенести`;
+    let forced = null;
+    if (date || slotIn(date ?? r.it.date)) {
+      const d = date && date >= today ? date : r.it.date;
+      const slots = slotsFor(d, cfg);
+      const s = slotIn(d) ?? slots.find((z) => z.id === r.it.slot && isOpen(d, z))
+        ?? slots.find((z) => a.slots?.includes(z.id) && isOpen(d, z)) ?? slots.find((z) => isOpen(d, z));
+      if (!s) return `${name} — ${dayMonth(d)} вікон уже немає`;
+      forced = { date: d, slot: s };
+    }
+    const before = undo.length;
+    const answer = await moveItem(env, r.row, r.it, cfg, tz, now, acts, chatId, { forced, undo });
+    if (undo.length > before) ctx.touched.add(r.row.id);
+    return `${undo.length > before ? '↷' : '⚠️'} ${name} — ${esc(answer.charAt(0).toLowerCase() + answer.slice(1))}${topicText}`;
+  }
+
+  const d = date ?? today;
+  const mine = rows.filter((r) => live(r) && r.it.date === d);
+  const target = pick(mine.filter((r) => r.it.status === 'planned'), d);
+  const dayText = d === today ? '' : ` · ${dayMonth(d)}`;
+
+  if (type === 'done' || type === 'min') {
+    const verb = type === 'done' ? '✅' : '◐';
+    const what = type === 'done' ? 'зараховано' : 'мінімум зараховано';
+    const r = target ?? mine.find((z) => z.it.status === 'skipped');
+    if (!r && mine.some((z) => z.it.status === 'done' || z.it.status === 'min')) {
+      return `${name} — уже зараховано${d === today ? ' сьогодні' : ` ${dayMonth(d)}`}`;
+    }
+    if (r) {
+      touch(r);
+      const it = r.it;
+      it.spent = minutes ? minutes * 60 : elapsed(it, now);
+      it.runningSince = null;
+      it.status = type;
+      it.doneAt = hm;
+      it.topic = joinTopic(it.topic, topic);
+      await saveFromBot(env, r.row, it);
+      return `${verb} ${name} — ${what}${it.spent ? ` · ${dur(it.spent)}` : ''}${topicText}${dayText}`;
+    }
+    // Не було в плані — додаємо зробленим у вікно, що йде чи вже минуло (до першого вікна — у перше)
+    const slots = slotsFor(d, cfg);
+    const s = (d === today ? [...slots].reverse().find((z) => z.from <= hm) : slots.at(-1)) ?? slots[0];
+    await create({
+      id: crypto.randomUUID(), date: d, slot: s.id, activityId: a.id, topic, status: type, doneAt: hm,
+      spent: minutes * 60, runningSince: null, updated: now,
+    });
+    return `${verb} ${name} — ${what}${minutes ? ` · ${dur(minutes * 60)}` : ''}${topicText}${dayText} <i>(не було в плані — додав)</i>`;
+  }
+
+  if (!target) return `${name} — ${d === today ? 'сьогодні' : dayMonth(d)} немає запланованої справи`;
+
+  if (type === 'skip') {
+    touch(target);
+    Object.assign(target.it, { spent: elapsed(target.it, now), runningSince: null, status: 'skipped', doneAt: null });
+    await saveFromBot(env, target.row, target.it);
+    return `✕ ${name} — пропущено, без докорів${dayText}`;
+  }
+  if (type === 'start') {
+    if (target.it.runningSince) return `${name} — таймер уже йде`;
+    touch(target);
+    await startTimer(env, target.row, target.it, { chatId, cfg, acts, tz, now, undo });
+    return `▶️ ${name} — таймер пішов${topicText}`;
+  }
+  if (type === 'stop') {
+    if (!target.it.runningSince) return `${name} — таймер не йде`;
+    touch(target);
+    target.it.spent = elapsed(target.it, now);
+    target.it.runningSince = null;
+    await saveFromBot(env, target.row, target.it);
+    return `⏸ ${name} — пауза · ${dur(target.it.spent)}`;
+  }
+  // unplan
+  if (elapsed(target.it, now) > 0) return `${name} — уже почато, скажи краще «пропускаю»`;
+  touch(target);
+  await env.DB.prepare('UPDATE items SET deleted = 1, next_at = NULL, updated = ?, srv = ? WHERE id = ?').bind(now, now, target.row.id).run();
+  target.row.deleted = 1;
+  const s = slotsFor(d, cfg).find((z) => z.id === target.it.slot);
+  return `🗑 ${name} — прибрано${s ? ` (${whenLabel(d, s, today).replace(/^на /, '')})` : ''}`;
+}
+
+/** «Скасувати» під підсумком фрази: повертає рядки як були, створені — прибирає. Лише остання фраза. */
+async function onUndo(env, cb, chatId) {
+  const token = String(cb.data).split(':')[1];
+  let saved = null;
+  try { saved = JSON.parse(await getMeta(env, 'undo') || 'null'); } catch { /* битий запис */ }
+  if (!saved || saved.token !== token) {
+    await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: 'Скасувати можна лише останню фразу' });
+    return;
+  }
+  const now = Date.now();
+  // Від останньої зміни до першої: рядок, змінений двічі, повернеться до найпершого стану
+  for (const u of [...saved.list].reverse()) {
+    if (u.created) {
+      await env.DB.prepare('UPDATE items SET deleted = 1, next_at = NULL, updated = ?, srv = ? WHERE id = ?').bind(now, now, u.id).run();
+      continue;
+    }
+    const it = JSON.parse(u.row.data);
+    it.updated = now;
+    await env.DB.prepare(`UPDATE items SET data = ?, status = ?, next_at = ?, nudge = ?, msg_id = ?, deleted = ?, updated = ?, srv = ?
+      WHERE id = ?`).bind(JSON.stringify(it), u.row.status, u.row.next_at, u.row.nudge ?? 0, u.row.msg_id, u.row.deleted ?? 0, now, now, u.id).run();
+  }
+  await setMeta(env, 'undo', 'null');
+
+  const tz = tzOf(env);
+  const cfg = await slotsCfg(env);
+  const acts = await actsMap(env);
+  const seen = new Set();
+  for (const u of saved.list) {
+    const r = await env.DB.prepare("SELECT msg_id, date, json_extract(data, '$.slot') AS slot FROM items WHERE id = ?").bind(u.id).first();
+    if (!r?.msg_id || seen.has(r.msg_id)) continue;
+    seen.add(r.msg_id);
+    await editWindow(env, chatId, r.msg_id, r.date, r.slot, cfg, acts, tz, now);
+  }
+  await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: 'Скасовано' });
+  if (cb.message) {
+    await tg(env, 'editMessageReplyMarkup', { chat_id: chatId, message_id: cb.message.message_id, reply_markup: { inline_keyboard: [] } });
+    await say(env, chatId, '↩️ Скасовано — план як був.', { reply_to_message_id: cb.message.message_id });
+  }
 }
