@@ -30,7 +30,7 @@ const DEFAULT_SLOTS = {
   weekend: [
     { id: 'm', label: 'Ранок', from: '09:00', to: '12:00' },
     { id: 'n', label: 'День', from: '12:00', to: '18:00' },
-    { id: 'e', label: 'Вечір', from: '18:00', to: '22:00' },
+    { id: 'e', label: 'Вечір', from: '18:00', to: '21:00' },
   ],
 };
 
@@ -420,6 +420,10 @@ async function onSetup(url, env) {
     commands: [
       { command: 'today', description: 'План на сьогодні' },
       { command: 'week', description: 'Тиждень: цілі й час' },
+      { command: 'tomorrow', description: 'План на завтра' },
+      { command: 'quick', description: 'Є кілька хвилин — що встигнути' },
+      { command: 'pause', description: 'Пауза на N днів: /pause 3' },
+      { command: 'resume', description: 'Завершити паузу' },
       { command: 'key', description: 'Ключ для застосунку' },
       { command: 'help', description: 'Як користуватися' },
     ],
@@ -461,6 +465,9 @@ async function onTelegram(request, env) {
   else if (cb && String(cb.data || '').startsWith('r:')) await onReminderButton(env, cb, chatId);
   else if (cb && String(cb.data || '').startsWith('t:')) await onTimerButton(env, cb, chatId);
   else if (cb && String(cb.data || '').startsWith('p:')) await onTomorrowButton(env, cb, chatId);
+  else if (cb && String(cb.data || '').startsWith('q:')) await onQuickButton(env, cb, chatId);
+  else if (cb && String(cb.data || '').startsWith('qm:')) await onQuickMinutes(env, cb, chatId);
+  else if (cb && String(cb.data || '').startsWith('n:')) await onNextWeekButton(env, cb, chatId);
   else if (cb) await onButton(env, cb, chatId);
   else if (msg?.voice || msg?.audio) await onVoice(env, msg, chatId);
   else if (msg?.text) await onCommand(env, msg.text.trim(), chatId);
@@ -481,6 +488,16 @@ async function onCommand(env, cmd, chatId) {
     await sendToday(env, chatId, Date.now(), 'План на сьогодні');
   } else if (name === '/week') {
     await sendWeek(env, chatId, Date.now());
+  } else if (name === '/tomorrow') {
+    await sendTomorrowOffer(env, chatId, Date.now(), { always: true });
+  } else if (name === '/quick' || quickMinutes(cmd)) {
+    const min = quickMinutes(cmd) ?? Number(cmd.split(/\s+/)[1]);
+    if (min >= 5 && min <= 240) await sendQuick(env, chatId, Date.now(), Math.round(min));
+    else await askQuick(env, chatId);
+  } else if (name === '/pause') {
+    await onPauseCommand(env, chatId, cmd.split(/\s+/)[1], Date.now());
+  } else if (name === '/resume') {
+    await onResumeCommand(env, chatId, Date.now());
   } else if (parseWeight(cmd)) {
     await recordWeight(env, chatId, parseWeight(cmd), Date.now());
   } else if (env.AI && !cmd.startsWith('/')) {
@@ -494,6 +511,9 @@ async function onCommand(env, cmd, chatId) {
         '<b>Команди</b>',
         '/today — план на сьогодні й «📌 Не забудь»',
         '/week — як іде тиждень',
+        '/tomorrow — план на завтра й кнопки «як минулого тижня / як сьогодні / шаблон»',
+        '/quick — є кілька хвилин: до трьох справ, ▶ — таймер одразу (або напиши «маю 20 хвилин»)',
+        '/pause 3 — пауза на 3 дні з сьогодні · /resume — завершити паузу',
         '/help — ця підказка',
         '/key — новий ключ для застосунку. ⚠️ Старий ключ перестане працювати — лише для першого підключення.',
         '',
@@ -507,6 +527,13 @@ async function onCommand(env, cmd, chatId) {
         '',
         '<b>🌙 План на завтра</b>',
         'Увечері, після підсумку дня: «Як минулого вівторка», «Як сьогодні» чи шаблон — одним дотиком, «↩️ Скасувати» поверне як було.',
+        'Заняття пропущено двічі поспіль — окрема кнопка поставити його на завтра, у вікно, де воно частіше виходить.',
+        'Тихі години починаються раніше за кінець останнього вікна — підсумок прийде за хвилину до них.',
+        'У неділю до підсумку — ще й тиждень із кнопкою «Наступний тиждень як цей» і підказками 💡, у якому вікні заняття виходить, а в якому ні (за 8 тижнів).',
+        'Кажеш «заплануй» чи «перенеси» без вікна — ставлю туди, де заняття реально виходить, а не туди, де його зазвичай пропускаєш.',
+        '',
+        '<b>🔥 Серії</b>',
+        'Днів поспіль із хоч однією зарахованою справою — у плані й підсумку. За 2 год до підсумку, якщо ще нічого не зараховано, — нагадаю й запропоную справи на 15 хв.',
         '',
         '<b>🔁 Постійний розклад</b>',
         'Задається в застосунку, у занятті: дні тижня й вікно. Справи ставлю на тиждень уперед; прибрав чи переніс якусь — назад не поверну.',
@@ -522,7 +549,9 @@ async function onCommand(env, cmd, chatId) {
         '• прибрати з плану — «прибери спорт на завтра»',
         '• вага — «82,4» або «вага 82,4»',
         '• нагадування — «нагадай завтра о 18 забрати посилку», «нагадуй 1 і 15 числа з 6 до 9 згенерувати код Нової пошти»',
-        '• план і тиждень — «що на сьогодні?», «як тиждень?»',
+        '• план і тиждень — «що на сьогодні?», «що на завтра?», «як тиждень?»',
+        '• вільний час — «маю 20 хвилин», «є пів години»',
+        '• статистика — «скільки разів я грав на гітарі цього місяця?», «коли востаннє був пайтон?», «що я робив минулого тижня?», «скільки я схуд за місяць?»',
         'У відповідь — що почув і що зробив. Не так зрозумів — «↩️ Скасувати».',
         '',
         '<b>📌 Не забудь</b>',
@@ -720,9 +749,12 @@ async function onSync(request, env) {
       await reschedule(env, JSON.parse(next), tz, now);
     }
   }
-  if (Array.isArray(body.pauses)) {
+  // Паузу могли поставити й у боті (/pause) — лишається новіший список: мітка застосунку проти pauses_at бота
+  const appPausesAt = Number(body.pausesAt) || 0;
+  if (Array.isArray(body.pauses) && appPausesAt >= (Number(await getMeta(env, 'pauses_at')) || 0)) {
     const list = body.pauses.filter((p) => /^\d{4}-\d{2}-\d{2}$/.test(p?.from) && /^\d{4}-\d{2}-\d{2}$/.test(p?.to));
-    await setMeta(env, 'pauses', JSON.stringify(list.map(({ from, to, reason }) => ({ from, to, reason }))));
+    await setMeta(env, 'pauses', JSON.stringify(list.map(({ id, from, to, reason }) => ({ id: id || `p-${from}-${to}`, from, to, reason }))));
+    await setMeta(env, 'pauses_at', appPausesAt);
   }
   if (body.quiet && typeof body.quiet === 'object') {
     const { on, from, to } = body.quiet;
@@ -769,7 +801,9 @@ async function onSync(request, env) {
   const { results } = await env.DB.prepare('SELECT data, deleted, id FROM items WHERE srv > ? AND date >= ?')
     .bind(since, addDays(local(now, tz).date, -60)).all();
   const rem = (await env.DB.prepare('SELECT data, deleted, id FROM reminders WHERE srv > ?').bind(since).all()).results;
+  const botPausesAt = Number(await getMeta(env, 'pauses_at')) || 0;
   return json({
+    pauses: botPausesAt > appPausesAt ? { list: await pausesOf(env), at: botPausesAt } : null,
     now,
     items: results.filter((r) => !r.deleted).map((r) => JSON.parse(r.data)),
     deleted: results.filter((r) => r.deleted).map((r) => r.id),
@@ -984,20 +1018,41 @@ async function todayItems(env, date) {
   return results.map((r) => JSON.parse(r.data));
 }
 
-/** Ранковий план (за 10 хв до першого вікна) і вечірній підсумок (у кінці останнього) — раз на день. */
+/**
+ * Час вечірнього підсумку: кінець останнього вікна. Тихі години починаються раніше чи саме тоді —
+ * за хвилину до них, інакше підсумок і «План на завтра» того дня не прийшли б зовсім.
+ */
+async function eveningTime(env, slots) {
+  const end = slots[slots.length - 1].to;
+  const q = await quietOf(env);
+  return q?.on && q.from && q.from > slots[0].from && q.from <= end ? minusMinutes(q.from, 1) : end;
+}
+
+// Попередження про серію — за стільки хвилин до вечірнього підсумку
+const STREAK_WARN_MIN = 120;
+
+/**
+ * Раз на день: ранковий план (за 10 хв до першого вікна), попередження про серію (за 2 год до підсумку,
+ * якщо сьогодні ще нічого не зараховано), вечірній підсумок, у неділю — ще й тиждень, далі «План на завтра».
+ */
 async function sendDigests(env, chatId, cfg, tz, now) {
   const { date, hm } = local(now, tz);
   const slots = slotsFor(date, cfg);
   const morningAt = minusMinutes(slots[0].from, 10);
-  const eveningAt = slots[slots.length - 1].to;
+  const eveningAt = await eveningTime(env, slots);
   if (hm >= morningAt && hm < slots[0].to && await getMeta(env, 'digest') !== date) {
     await setMeta(env, 'digest', date);
     await sendToday(env, chatId, now, 'Доброго ранку!', true);
+  }
+  if (hm >= minusMinutes(eveningAt, STREAK_WARN_MIN) && hm < eveningAt && await getMeta(env, 'streak_warn') !== date) {
+    await setMeta(env, 'streak_warn', date);
+    await sendStreakWarning(env, chatId, now);
   }
   if (hm >= eveningAt && await getMeta(env, 'summary') !== date) {
     await setMeta(env, 'summary', date);
     const items = await todayItems(env, date);
     if (items.length) await sendToday(env, chatId, now, 'Підсумок дня');
+    if (weekdayOf(date) === 0) await sendWeek(env, chatId, now, { offerNext: true });
     await sendTomorrowOffer(env, chatId, now);
   }
 }
@@ -1033,11 +1088,54 @@ async function sendToday(env, chatId, now, title, morning = false) {
       ? `Сьогодні ${items.length} ${plural(items.length, 'справа', 'справи', 'справ')}${minutes ? ` · ~${minutes} хв` : ''}. Гарного дня!`
       : `Зараховано ${done.length} з ${items.length}${sec ? ` · ${dur(sec)}` : ''}`);
   }
+  const streak = streakLine(await dayStreak(env, date, await pausesOf(env)), morning);
+  if (streak) lines.push('', streak);
   const link = items.length ? { text: 'Відкрити план', url: `${APP_URL}#today` } : { text: 'Спланувати', url: `${APP_URL}#plan` };
   await tg(env, 'sendMessage', { chat_id: chatId, parse_mode: 'HTML', text: lines.join('\n'), reply_markup: { inline_keyboard: [[link]] } });
 }
 
-async function sendWeek(env, chatId, now) {
+// ---------- серії ----------
+
+// Як у застосунку (dayStreak у js/model.js): серію показуємо з двох днів
+const MIN_STREAK = 2;
+const STREAK_LIMIT_DAYS = 366;
+
+/** Днів поспіль із хоч однією зарахованою справою; сьогодні додає 1, якщо вже є; дні паузи пропускаємо. */
+async function dayStreak(env, today, pauses) {
+  const { results } = await env.DB.prepare(`SELECT DISTINCT date FROM items WHERE deleted = 0 AND status IN ('done', 'min')
+    AND date >= ? AND date <= ?`).bind(addDays(today, -STREAK_LIMIT_DAYS), today).all();
+  const done = new Set(results.map((r) => r.date));
+  let n = done.has(today) ? 1 : 0;
+  let d = today;
+  for (let i = 0; i < STREAK_LIMIT_DAYS; i++) {
+    d = addDays(d, -1);
+    if (pauseOn(d, pauses)) continue;
+    if (!done.has(d)) break;
+    n++;
+  }
+  return { n, today: done.has(today) };
+}
+
+const daysText = (n) => `${n} ${plural(n, 'день', 'дні', 'днів')}`;
+
+function streakLine({ n, today }, morning) {
+  if (n < MIN_STREAK) return '';
+  if (today) return `🔥 ${daysText(n)} поспіль`;
+  return morning ? `🔥 Серія ${daysText(n)} — сьогодні продовжимо` : `🔥 Серія ${daysText(n)} — сьогодні ще нічого не зараховано`;
+}
+
+/** Серія під загрозою: за 2 год до підсумку ще нічого не зараховано — нагадати й одразу запропонувати швидкі справи. */
+async function sendStreakWarning(env, chatId, now) {
+  const tz = tzOf(env);
+  const { date } = local(now, tz);
+  const s = await dayStreak(env, date, await pausesOf(env));
+  if (s.today || s.n < MIN_STREAK) return;
+  await sendQuick(env, chatId, now, 15, {
+    head: `🔥 <b>Серія ${daysText(s.n)}</b> — сьогодні ще нічого не зараховано.\nЄ 15 хвилин? Навіть мінімум рахується.`,
+  });
+}
+
+async function sendWeek(env, chatId, now, { offerNext = false } = {}) {
   const tz = tzOf(env);
   const { date } = local(now, tz);
   const start = weekStart(date);
@@ -1070,10 +1168,84 @@ async function sendWeek(env, chatId, now) {
   }
   if (!acts.length) lines.push('Заняття ще не синхронізовані — відкрий застосунок.');
   else lines.push('', `Разом ${doneAll} з ${targetAll}${secAll ? ` · ${dur(secAll)}` : ''}`);
+  // «Коли реально виходить» — лише в неділю: підказка, куди ставити наступного тижня
+  if (offerNext && acts.length) {
+    const cfg = await slotsCfg(env);
+    const tips = [];
+    for (const a of acts) {
+      const tip = fitInsight(a, await slotAdviceOf(env, a.id, cfg, tz, now, pauses));
+      if (tip) tips.push(tip);
+    }
+    if (tips.length) lines.push('', ...tips.slice(0, 3));
+  }
+  const keyboard = [[{ text: 'Відкрити тиждень', url: `${APP_URL}#week` }]];
+  // Неділя ввечері: наступний тиждень одним дотиком — тими самими справами
+  if (offerNext) {
+    const next = addDays(start, 7);
+    const put = await nextWeekPut(env, now, next);
+    if (put.length) keyboard.unshift([{ text: `🔁 Наступний тиждень як цей · +${put.length}`, callback_data: `n:${next}` }]);
+  }
   await tg(env, 'sendMessage', {
     chat_id: chatId, parse_mode: 'HTML', text: lines.join('\n'),
-    reply_markup: { inline_keyboard: [[{ text: 'Відкрити тиждень', url: `${APP_URL}#week` }]] },
+    reply_markup: { inline_keyboard: keyboard },
   });
+}
+
+/**
+ * Справи цього тижня → на ті самі дні й вікна тижня next. Без справ за розкладом (їх поставить розклад),
+ * архівних занять, днів паузи й того, що там уже стоїть.
+ */
+async function nextWeekPut(env, now, next) {
+  const tz = tzOf(env);
+  const cfg = await slotsCfg(env);
+  const acts = await actsMap(env);
+  const pauses = await pausesOf(env);
+  const start = addDays(next, -7);
+  const read = async (from) => (await env.DB.prepare("SELECT data FROM items WHERE date >= ? AND date <= ? AND deleted = 0 AND status != 'moved'")
+    .bind(from, addDays(from, 6)).all()).results.map((r) => JSON.parse(r.data));
+  const have = await read(next);
+  const put = [];
+  for (const x of await read(start)) {
+    const a = acts.get(x.activityId);
+    const date = addDays(x.date, 7);
+    if (!a || a.archived || x.rep != null || pauseOn(date, pauses)) continue;
+    const slot = slotsFor(date, cfg).find((s) => s.id === x.slot);
+    if (!slot || zoned(date, slot.to, tz) <= now) continue;
+    if ([...have, ...put].some((p) => p.date === date && p.slot === x.slot && p.activityId === x.activityId)) continue;
+    put.push({ date, slot: x.slot, activityId: x.activityId });
+  }
+  return put;
+}
+
+async function onNextWeekButton(env, cb, chatId) {
+  const next = String(cb.data).split(':')[1];
+  const now = Date.now();
+  const tz = tzOf(env);
+  const msgId = cb.message?.message_id;
+  // Натиснули вже на тому тижні — пропозиція застаріла
+  const put = next === addDays(weekStart(local(now, tz).date), 7) ? await nextWeekPut(env, now, next) : [];
+  if (!put.length) {
+    await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: 'Уже не актуально — сплануй у застосунку' });
+    if (msgId) await tg(env, 'editMessageReplyMarkup', { chat_id: chatId, message_id: msgId, reply_markup: { inline_keyboard: [] } });
+    return;
+  }
+  const cfg = await slotsCfg(env);
+  const acts = await actsMap(env);
+  const undo = [];
+  for (const p of put) {
+    const it = { id: crypto.randomUUID(), date: p.date, slot: p.slot, activityId: p.activityId, topic: '', status: 'planned', doneAt: null, updated: now };
+    await acceptItem(env, it, cfg, tz, now, acts, chatId);
+    undo.push({ id: it.id, created: true });
+  }
+  const token = crypto.randomUUID().slice(0, 8);
+  await setMeta(env, 'undo', JSON.stringify({ token, list: undo }));
+  await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: `Наступний тиждень: +${put.length} ${plural(put.length, 'справа', 'справи', 'справ')}` });
+  if (msgId) {
+    await tg(env, 'editMessageReplyMarkup', {
+      chat_id: chatId, message_id: msgId,
+      reply_markup: { inline_keyboard: [[{ text: `↩️ Скасувати (+${put.length})`, callback_data: `u:${token}` }]] },
+    });
+  }
 }
 
 // ---------- таймер: звичні хвилини минули ----------
@@ -1157,6 +1329,370 @@ async function onTimerButton(env, cb, chatId) {
   if (msgId) await tg(env, 'editMessageText', { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', text: body });
 }
 
+// ---------- закриті справи: «не пропускай двічі» ----------
+
+const SLOT_ORDER = ['m', 'n', 'e'];
+
+/** Як справа закрилась: статус; запланована у вікні, що минуло, — missed; ще відкрита чи йде таймер — null. */
+function closedStatus(p, cfg, tz, now) {
+  if (p.status !== 'planned') return p.status;
+  if (p.runningSince) return null;
+  const slot = slotsFor(p.date, cfg).find((s) => s.id === p.slot);
+  return !slot || zoned(p.date, slot.to, tz) <= now ? 'missed' : null;
+}
+
+const isMiss = (st) => st === 'skipped' || st === 'missed';
+
+/** Закриті рази заняття до дати until включно — від найновішого; перенесені й дні паузи не рахуються. */
+async function closedRuns(env, actId, until, cfg, tz, now, pauses, limit = 2) {
+  const { results } = await env.DB.prepare(`SELECT data FROM items WHERE deleted = 0 AND status != 'moved' AND date <= ?
+    AND json_extract(data, '$.activityId') = ? ORDER BY date DESC LIMIT 30`).bind(until, actId).all();
+  const list = results.map((r) => JSON.parse(r.data)).filter((p) => !pauseOn(p.date, pauses))
+    .sort((x, y) => (x.date === y.date ? SLOT_ORDER.indexOf(y.slot) - SLOT_ORDER.indexOf(x.slot) : (x.date < y.date ? 1 : -1)));
+  const out = [];
+  for (const p of list) {
+    const st = closedStatus(p, cfg, tz, now);
+    if (st) out.push({ it: p, st });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+/** Як missedLastTime у застосунку: останній закритий раз до дати before — пропуск. */
+async function missedLast(env, actId, before, cfg, tz, now, pauses) {
+  const [last] = await closedRuns(env, actId, addDays(before, -1), cfg, tz, now, pauses, 1);
+  return Boolean(last && isMiss(last.st));
+}
+
+// ---------- «Коли реально виходить» ----------
+// Як slotFit/slotAdvice у model.js застосунку — правити разом. Перенесене з вікна — там не вийшло.
+
+const FIT_DAYS = 56;
+const FIT_MIN = 3;
+const FIT_GOOD = 0.6;
+const FIT_BAD = 0.4;
+const SLOT_WHEN = { m: 'вранці', n: 'вдень', e: 'ввечері' };
+
+/** { best, bad } по вікнах за останні 8 тижнів; даних замало — null. */
+async function slotAdviceOf(env, actId, cfg, tz, now, pauses) {
+  const today = local(now, tz).date;
+  const { results } = await env.DB.prepare(`SELECT data FROM items WHERE deleted = 0 AND date >= ? AND date <= ?
+    AND json_extract(data, '$.activityId') = ?`).bind(addDays(today, -FIT_DAYS), today, actId).all();
+  const by = {};
+  for (const { data } of results) {
+    const p = JSON.parse(data);
+    if (pauseOn(p.date, pauses)) continue;
+    const st = closedStatus(p, cfg, tz, now);
+    if (!st) continue;
+    const b = (by[p.slot] ??= { ok: 0, all: 0 });
+    b.all += 1;
+    if (st === 'done' || st === 'min') b.ok += 1;
+  }
+  const known = Object.entries(by).filter(([, b]) => b.all >= FIT_MIN)
+    .map(([slot, b]) => ({ slot, ...b, rate: b.ok / b.all }))
+    .sort((x, y) => y.rate - x.rate || y.all - x.all);
+  if (!known.length) return null;
+  const best = known[0].rate >= FIT_GOOD ? known[0] : null;
+  const bad = known.filter((x) => x.rate <= FIT_BAD && x !== best);
+  return best || bad.length ? { best, bad } : null;
+}
+
+/** Вікно для заняття з відкритих: де виходить → звичне → решта; де не виходить — останнім. */
+function preferredSlot(slots, a, adv, fallbackId = null) {
+  const rank = (s) => (adv?.best?.slot === s.id ? 4 : 0) + (a.slots?.includes(s.id) ? 2 : 0)
+    + (s.id === fallbackId ? 1 : 0) - (adv?.bad.some((x) => x.slot === s.id) ? 4 : 0);
+  return [...slots].sort((x, y) => rank(y) - rank(x))[0] ?? null;
+}
+
+/** Рядок для підсумку тижня — лише коли є вікно, де не виходить. */
+function fitInsight(a, adv) {
+  if (!adv?.bad.length) return '';
+  const bad = adv.bad.map((x) => `${SLOT_WHEN[x.slot] ?? x.slot} — ${x.ok}/${x.all}`).join(', ');
+  const name = `${actEmoji(a)} ${esc(a.name)}`;
+  return adv.best
+    ? `💡 ${name} краще виходить ${SLOT_WHEN[adv.best.slot] ?? adv.best.slot} (${adv.best.ok}/${adv.best.all}), ${bad}`
+    : `💡 ${name} не виходить ${bad}`;
+}
+
+// ---------- питання про статистику: «скільки разів…», «коли востаннє…», «скільки я схуд…» ----------
+// Модель лише впізнає питання й період — числа рахує код, щоб не вигадала.
+
+const STAT_PERIODS = ['week', 'last_week', 'month', 'last_month', 'year', 'all', 'last'];
+
+/** [від, до, підпис] за періодом; невідомий — цей тиждень. */
+function statRange(period, today) {
+  const week = weekStart(today);
+  const month = `${today.slice(0, 8)}01`;
+  const prevEnd = addDays(month, -1);
+  switch (period) {
+    case 'last_week': return [addDays(week, -7), addDays(week, -1), 'минулого тижня'];
+    case 'month': return [month, today, 'цього місяця'];
+    case 'last_month': return [`${prevEnd.slice(0, 8)}01`, prevEnd, 'минулого місяця'];
+    case 'year': return [`${today.slice(0, 4)}-01-01`, today, 'цього року'];
+    case 'all': return ['0000-01-01', today, 'за весь час'];
+    default: return [week, today, 'цього тижня'];
+  }
+}
+
+const daysBetween = (from, to) => Math.round((Date.parse(`${to}T12:00:00Z`) - Date.parse(`${from}T12:00:00Z`)) / 86400000);
+const agoText = (date, today) => {
+  const n = daysBetween(date, today);
+  return n <= 0 ? 'сьогодні' : n === 1 ? 'вчора' : `${n} ${plural(n, 'день', 'дні', 'днів')} тому`;
+};
+
+/** Зараховані, мінімум, пропуски (без днів паузи) і час заняття за [from, to]. */
+async function actTotals(env, actId, from, to, cfg, tz, now, pauses) {
+  const { results } = await env.DB.prepare(`SELECT data FROM items WHERE deleted = 0 AND date >= ? AND date <= ?
+    AND json_extract(data, '$.activityId') = ?`).bind(from, to, actId).all();
+  const t = { done: 0, min: 0, miss: 0, sec: 0 };
+  for (const { data } of results) {
+    const p = JSON.parse(data);
+    if (p.status === 'moved') continue;
+    t.sec += elapsed(p, now);
+    const st = closedStatus(p, cfg, tz, now);
+    if (st === 'done') t.done += 1;
+    else if (st === 'min') t.min += 1;
+    else if (isMiss(st) && !pauseOn(p.date, pauses)) t.miss += 1;
+  }
+  return t;
+}
+
+/** Останній зарахований раз до сьогодні включно: найпізніший день, у ньому — найпізніше вікно. */
+async function lastDone(env, actId, today) {
+  const { results } = await env.DB.prepare(`SELECT data FROM items WHERE deleted = 0 AND date <= ? AND status IN ('done', 'min')
+    AND json_extract(data, '$.activityId') = ? ORDER BY date DESC LIMIT 5`).bind(today, actId).all();
+  return results.map((r) => JSON.parse(r.data))
+    .sort((x, y) => (x.date === y.date ? SLOT_ORDER.indexOf(y.slot) - SLOT_ORDER.indexOf(x.slot) : (x.date < y.date ? 1 : -1)))[0] ?? null;
+}
+
+function lastText(it, today) {
+  if (!it) return 'ще жодного разу';
+  return `${dayMonth(it.date)} (${agoText(it.date, today)})${it.status === 'min' ? ' · мінімум' : ''}${it.topic ? ` · <i>${esc(it.topic)}</i>` : ''}`;
+}
+
+async function actStats(ctx, a, period) {
+  const { env, cfg, tz, now, today } = ctx;
+  const name = `${actEmoji(a)} <b>${esc(a.name)}</b>`;
+  const last = await lastDone(env, a.id, today);
+  if (period === 'last') return `${name} — востаннє ${lastText(last, today)}`;
+  const [from, to, label] = statRange(period, today);
+  const pauses = await pausesOf(env);
+  const t = await actTotals(env, a.id, from, to, cfg, tz, now, pauses);
+  const n = t.done + t.min;
+  const weekly = period === 'week' || period === 'last_week' || !STAT_PERIODS.includes(period);
+  const count = weekly ? `${n} з ${weekTarget(a, from, pauses)}` : `${n} ${plural(n, 'раз', 'рази', 'разів')}`;
+  return [
+    `${name} · ${label}`,
+    `✅ ${count}${t.min ? ` (мінімум — ${t.min})` : ''}${t.sec ? ` · ⏱ ${dur(t.sec)}` : ''}`,
+    t.miss ? `✕ пропущено ${t.miss}` : null,
+    `Востаннє: ${lastText(last, today)}`,
+  ].filter(Boolean).join('\n');
+}
+
+async function allStats(ctx, period) {
+  const { env, cfg, tz, now, today, list } = ctx;
+  if (!list.length) return 'Заняття ще не синхронізовані — відкрий застосунок.';
+  if (period === 'last') {
+    const lines = ['🕘 <b>Востаннє</b>'];
+    for (const a of list) lines.push(`${actEmoji(a)} ${esc(a.name)} — ${lastText(await lastDone(env, a.id, today), today)}`);
+    return lines.join('\n');
+  }
+  const [from, to, label] = statRange(period, today);
+  const pauses = await pausesOf(env);
+  const lines = [`📈 <b>${label[0].toUpperCase()}${label.slice(1)}</b>`];
+  const none = [];
+  let all = 0;
+  let secAll = 0;
+  for (const a of list) {
+    const t = await actTotals(env, a.id, from, to, cfg, tz, now, pauses);
+    const n = t.done + t.min;
+    all += n;
+    secAll += t.sec;
+    if (n || t.sec) lines.push(`${actEmoji(a)} ${esc(a.name)} — ${n}${t.sec ? ` · ${dur(t.sec)}` : ''}`);
+    else none.push(esc(a.name));
+  }
+  if (none.length) lines.push(`Не було: ${none.join(', ')}`);
+  lines.push('', `Разом ${all} ${plural(all, 'раз', 'рази', 'разів')}${secAll ? ` · ${dur(secAll)}` : ''}`);
+  return lines.join('\n');
+}
+
+async function weightStats(env, today, period) {
+  const latest = await env.DB.prepare('SELECT date, kg FROM weights ORDER BY date DESC LIMIT 1').first();
+  if (!latest) return '⚖️ Ваги ще немає — надішли число, наприклад 82,4';
+  const head = `⚖️ <b>${kgText(latest.kg)} кг</b> · ${dayMonth(latest.date)} (${agoText(latest.date, today)})`;
+  if (period === 'last') return head;
+  const [from, to, label] = statRange(period, today);
+  const { results } = await env.DB.prepare('SELECT date, kg FROM weights WHERE date >= ? AND date <= ? ORDER BY date')
+    .bind(from, to).all();
+  if (results.length < 2) return `${head}\n${label[0].toUpperCase()}${label.slice(1)} записів замало, щоб порівняти`;
+  const first = results[0];
+  const end = results.at(-1);
+  const kgs = results.map((r) => r.kg);
+  return [
+    head,
+    `${label[0].toUpperCase()}${label.slice(1)}: <b>${kgDiff(end.kg - first.kg)} кг</b> (з ${kgText(first.kg)} ${dayMonth(first.date)})`,
+    `Мін ${kgText(Math.min(...kgs))} · макс ${kgText(Math.max(...kgs))} · записів ${results.length}`,
+  ].join('\n');
+}
+
+// ---------- «Є кілька хвилин?» ----------
+
+const QUICK_CHOICES = [[10, 15, 20, 30], [45, 60, 90]];
+const QUICK_RE = /^(?:я\s+)?(?:маю|є|у мене є|у мене|в мене є|в мене|имею|есть|у меня есть|у меня)\s+(?:ще\s+|еще\s+)?(\d{1,3})\s*(?:хв|хвилин[аиу]?|хвилинк[аиу]|мин|минут[аы]?|минутк[аи])\.?\s*$/i;
+
+/** «маю 20 хвилин», «есть 30 минут» → 20, 30; інше — null. */
+function quickMinutes(cmd) {
+  const m = QUICK_RE.exec(String(cmd).trim());
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * Як quickIdeas у застосунку: невідмічені справи сьогоднішнього плану — першими, далі заняття, що відстають
+ * від тижневої цілі чи минулого разу пропущені. Повна версія не влазить — мінімум, мінімуму немає — частина.
+ */
+async function quickIdeas(env, now, min) {
+  const tz = tzOf(env);
+  const today = local(now, tz).date;
+  const cfg = await slotsCfg(env);
+  const acts = await actsMap(env);
+  const pauses = await pausesOf(env);
+  const todays = await todayItems(env, today);
+  const done = new Set(todays.filter((p) => p.status === 'done' || p.status === 'min').map((p) => p.activityId));
+  const wk = weekStart(today);
+  const { results } = await env.DB.prepare(`SELECT json_extract(data, '$.activityId') AS act, COUNT(*) AS n FROM items
+    WHERE deleted = 0 AND status IN ('done', 'min') AND date >= ? AND date <= ? GROUP BY act`).bind(wk, addDays(wk, 6)).all();
+  const counted = new Map(results.map((r) => [r.act, r.n]));
+  const ideas = [];
+  for (const a of activeActs(acts)) {
+    if (done.has(a.id)) continue;
+    const item = todays.find((p) => p.activityId === a.id && p.status === 'planned' && !closedStatus(p, cfg, tz, now));
+    const cnt = counted.get(a.id) ?? 0;
+    const goal = weekTarget(a, wk, pauses);
+    const missed = await missedLast(env, a.id, today, cfg, tz, now, pauses);
+    const kind = !a.minutes || a.minutes <= min ? 'full' : a.minVersion ? 'min' : 'part';
+    const score = (item ? 100 : 0) + (goal ? Math.max(0, 1 - cnt / goal) * 50 : 0) + (missed ? 20 : 0)
+      + { full: 10, min: 0, part: -30 }[kind];
+    ideas.push({ a, item, kind, cnt, goal, missed, score });
+  }
+  return ideas.sort((x, y) => y.score - x.score || (x.a.order ?? 0) - (y.a.order ?? 0)).slice(0, 3);
+}
+
+/** До трьох справ на min хвилин, кожна з ▶ — таймер іде одразу, сигнал — коли минуть саме ці хвилини. */
+async function sendQuick(env, chatId, now, min, { head = null } = {}) {
+  const ideas = await quickIdeas(env, now, min);
+  if (!ideas.length) {
+    await say(env, chatId, head ? head.split('\n')[0] : 'На сьогодні все зараховано — відпочивай 🙂');
+    return;
+  }
+  const lines = [head ?? `⏳ <b>${min} хв</b> — що встигнути:`, ''];
+  for (const x of ideas) {
+    const what = x.kind === 'full' ? (x.a.minutes ? `~${x.a.minutes} хв` : 'скільки вийде')
+      : x.kind === 'min' ? `мінімум: ${esc(x.a.minVersion)}` : `частина — зазвичай ~${x.a.minutes} хв`;
+    const why = [x.item ? 'у плані' : null, x.goal > x.cnt ? `тиждень ${x.cnt}/${x.goal}` : null, x.missed ? 'минулого разу пропуск' : null]
+      .filter(Boolean).join(' · ');
+    lines.push(`${actEmoji(x.a)} <b>${esc(x.a.name)}</b> — ${what}${why ? `\n   <i>${why}</i>` : ''}`);
+  }
+  await say(env, chatId, lines.join('\n'), {
+    reply_markup: { inline_keyboard: ideas.map((x) => [{ text: `▶ ${short(x.a.name)}`, callback_data: `q:${min}:${x.a.id}` }]) },
+  });
+}
+
+async function askQuick(env, chatId) {
+  await say(env, chatId, '⏳ Скільки є часу?', {
+    reply_markup: { inline_keyboard: QUICK_CHOICES.map((row) => row.map((n) => ({ text: `${n} хв`, callback_data: `qm:${n}` }))) },
+  });
+}
+
+async function onQuickMinutes(env, cb, chatId) {
+  const min = Number(String(cb.data).split(':')[1]);
+  await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id });
+  if (cb.message) await tg(env, 'deleteMessage', { chat_id: chatId, message_id: cb.message.message_id });
+  if (min >= 5 && min <= 240) await sendQuick(env, chatId, Date.now(), min);
+}
+
+/** ▶ зі швидких справ: справа заняття сьогодні, що ще відкрита, — інакше нова у вікні, що йде (як у застосунку). */
+async function onQuickButton(env, cb, chatId) {
+  const [, minText, actId] = String(cb.data).split(':');
+  const min = Number(minText) || 0;
+  const now = Date.now();
+  const tz = tzOf(env);
+  const { date: today, hm } = local(now, tz);
+  const cfg = await slotsCfg(env);
+  const acts = await actsMap(env);
+  const a = acts.get(actId);
+  const msgId = cb.message?.message_id;
+  const rows = a ? (await env.DB.prepare(`SELECT * FROM items WHERE date = ? AND deleted = 0
+    AND json_extract(data, '$.activityId') = ?`).bind(today, actId).all()).results.map((row) => ({ row, it: JSON.parse(row.data) })) : [];
+  const answer = !a ? 'Цього заняття вже немає'
+    : rows.some((r) => r.it.status === 'done' || r.it.status === 'min') ? 'Сьогодні вже зараховано' : null;
+  if (answer) {
+    await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: answer });
+    return;
+  }
+  let target = rows.find((r) => r.it.status === 'planned' && !closedStatus(r.it, cfg, tz, now));
+  if (!target) {
+    const slots = slotsFor(today, cfg);
+    const slot = slots.find((s) => s.from <= hm && hm < s.to) ?? slots.find((s) => hm < s.from) ?? slots.at(-1);
+    // Це заняття у вікні вже було (пропущене) — повертаємо його в план, а не робимо дубль
+    const old = rows.find((r) => r.it.slot === slot.id && r.it.status !== 'moved');
+    const it = old ? { ...old.it, status: 'planned', doneAt: null, updated: now }
+      : { id: crypto.randomUUID(), date: today, slot: slot.id, activityId: actId, topic: '', status: 'planned', doneAt: null, updated: now };
+    await acceptItem(env, it, cfg, tz, now, acts, chatId);
+    target = await loadItem(env, it.id);
+  }
+  await startTimer(env, target.row, target.it, { chatId, cfg, acts, tz, now, skipMsg: msgId });
+  if (min) await setTimerState(env, target.row.id, elapsed(target.it, now) + min * 60, now);
+  if (target.row.msg_id) await editWindow(env, chatId, target.row.msg_id, target.it.date, target.it.slot, cfg, acts, tz, now);
+  await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: 'Таймер пішов' });
+  if (msgId) {
+    await tg(env, 'editMessageText', {
+      chat_id: chatId, message_id: msgId, parse_mode: 'HTML',
+      text: `▶ ${actEmoji(a)} <b>${esc(a.name)}</b> — таймер пішов.${min ? ` Через ${min} хв напишу.` : ''}`,
+    });
+  }
+}
+
+// ---------- пауза з Telegram ----------
+
+const PAUSE_MAX_DAYS = 60;
+
+/** Паузу поставили в боті — список з міткою часу: застосунок забере його, бо він новіший (див. onSync). */
+async function savePauses(env, list, now) {
+  await setMeta(env, 'pauses', JSON.stringify(list.map(({ id, from, to, reason }) => ({ id: id || `p-${from}-${to}`, from, to, reason: reason || 'other' }))));
+  await setMeta(env, 'pauses_at', now);
+}
+
+async function onPauseCommand(env, chatId, arg, now) {
+  const today = local(now, tzOf(env)).date;
+  const list = await pausesOf(env);
+  const cur = pauseOn(today, list);
+  const n = Math.round(Number(arg));
+  if (!(n >= 1 && n <= PAUSE_MAX_DAYS)) {
+    await say(env, chatId, cur
+      ? `🌴 Пауза до ${dayMonth(cur.to)} включно. Повернутись раніше — /resume.`
+      : '🌴 Пауза — бот мовчить про хобі, цілі тижня менші. <code>/pause 3</code> — на 3 дні з сьогодні. «Не забудь» приходять і на паузі.');
+    return;
+  }
+  const to = addDays(today, n - 1);
+  const next = cur ? list.map((p) => (p === cur ? { ...p, to } : p)) : [...list, { id: crypto.randomUUID(), from: today, to, reason: 'other' }];
+  await savePauses(env, next, now);
+  await say(env, chatId, `🌴 Пауза до ${dayMonth(to)} включно — нагадування про хобі мовчать, цілі тижня менші. «Не забудь» приходять. Повернутись раніше — /resume.`);
+}
+
+async function onResumeCommand(env, chatId, now) {
+  const today = local(now, tzOf(env)).date;
+  const list = await pausesOf(env);
+  const cur = pauseOn(today, list);
+  if (!cur) {
+    await say(env, chatId, 'Паузи немає — усе працює.');
+    return;
+  }
+  // Як «Завершити» в застосунку: почалась раніше — закінчується вчора; почалась сьогодні — зникає
+  const next = cur.from >= today ? list.filter((p) => p !== cur) : list.map((p) => (p === cur ? { ...p, to: addDays(today, -1) } : p));
+  await savePauses(env, next, now);
+  await say(env, chatId, '▶️ Паузу завершено — з поверненням! Нагадування знову приходять.');
+}
+
 // ---------- план на завтра ----------
 
 const LAST_DAY = ['минулої неділі', 'минулого понеділка', 'минулого вівторка', 'минулої середи', 'минулого четверга', "минулої п'ятниці", 'минулої суботи'];
@@ -1198,7 +1734,17 @@ async function tomorrowOptions(env, now) {
     seen.add(sig);
     return true;
   });
-  return { day, have, list, cfg, acts, tz };
+  // «Не пропускай двічі»: сьогодні пропущено й минулого разу теж — запропонувати на завтра окремою кнопкою
+  const pauses = await pausesOf(env);
+  const again = [];
+  for (const a of activeActs(acts)) {
+    const [last, prev] = await closedRuns(env, a.id, today, cfg, tz, now, pauses);
+    if (!last || last.it.date !== today || !isMiss(last.st) || !prev || !isMiss(prev.st)) continue;
+    const slot = preferredSlot(slots, a, await slotAdviceOf(env, a.id, cfg, tz, now, pauses), last.it.slot);
+    const put = slot ? fill([{ slot: slot.id, activityId: a.id }]) : [];
+    if (put.length) again.push({ key: `act:${a.id}`, a, label: `↪ ${short(a.name)} на завтра`, put });
+  }
+  return { day, have, list, again, cfg, acts, tz };
 }
 
 /** «🌅 Ранок: Англійська, Python» — по рядку на непорожнє вікно. */
@@ -1209,18 +1755,26 @@ function planLines(date, items, cfg, acts) {
     .map(([s, names]) => `${SLOT_EMOJI[s.id] ?? '🕒'} ${esc(s.label)}: ${names.map(esc).join(', ')}`);
 }
 
-/** Увечері, після підсумку: варіанти плану на завтра кнопками. Нема чого додати чи завтра пауза — мовчимо. */
-async function sendTomorrowOffer(env, chatId, now) {
-  const { day, have, list, cfg, acts } = await tomorrowOptions(env, now);
-  if (!list.length || pauseOn(day, await pausesOf(env))) return;
+/**
+ * План на завтра кнопками: варіанти й «не пропускай двічі». Увечері — лише коли є що додати й завтра не пауза;
+ * always (/tomorrow, «що на завтра?») — завжди: хоча б що вже стоїть.
+ */
+async function sendTomorrowOffer(env, chatId, now, { always = false } = {}) {
+  const { day, have, list, again, cfg, acts } = await tomorrowOptions(env, now);
+  const paused = pauseOn(day, await pausesOf(env));
+  if (!always && (paused || (!list.length && !again.length))) return;
   const lines = ['🌙 <b>План на завтра</b>', `<i>${dayTitle(day)}</i>`, ''];
-  lines.push(...(have.length ? ['Уже є:', ...planLines(day, have, cfg, acts)] : ['Поки порожньо.']), '', 'Поставити одним дотиком?');
+  if (paused) lines.push('🌴 Завтра пауза — нагадувань не буде.', '');
+  lines.push(...(have.length ? ['Уже є:', ...planLines(day, have, cfg, acts)] : ['Поки порожньо.']));
+  for (const o of again) lines.push('', `⚠️ ${actEmoji(o.a)} <b>${esc(o.a.name)}</b> — пропущено двічі поспіль. Утретє не пропускай?`);
+  if (list.length || again.length) lines.push('', 'Поставити одним дотиком?');
   await tg(env, 'sendMessage', {
     chat_id: chatId, parse_mode: 'HTML', text: lines.join('\n'),
     reply_markup: {
       inline_keyboard: [
+        ...again.map((o) => [{ text: o.label, callback_data: `p:${o.key}:${day}` }]),
         ...list.map((o) => [{ text: `${o.label} · +${o.put.length}`, callback_data: `p:${o.key}:${day}` }]),
-        [{ text: 'Відкрити план', url: `${APP_URL}#plan` }, { text: 'Не треба', callback_data: 'p:no' }],
+        [{ text: 'Відкрити план', url: `${APP_URL}#plan` }, ...(list.length || again.length ? [{ text: 'Не треба', callback_data: 'p:no' }] : [])],
       ],
     },
   });
@@ -1237,9 +1791,9 @@ async function onTomorrowButton(env, cb, chatId) {
   }
   const key = parts.slice(1, -1).join(':');
   const now = Date.now();
-  const { day, list, cfg, acts, tz } = await tomorrowOptions(env, now);
+  const { day, list, again, cfg, acts, tz } = await tomorrowOptions(env, now);
   // Натиснули наступного дня чи план уже змінили — варіант міг застаріти
-  const opt = parts.at(-1) === day ? list.find((o) => o.key === key) : null;
+  const opt = parts.at(-1) === day ? [...again, ...list].find((o) => o.key === key) : null;
   if (!opt) {
     await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: 'Уже не актуально — сплануй у застосунку' });
     await clear();
@@ -1576,7 +2130,8 @@ const STT_MODEL = '@cf/openai/whisper-large-v3-turbo';
 const NLU_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
 const VOICE_MAX_SEC = 60;
 const MAX_ACTIONS = 5;
-const PHRASE_ACTIONS = ['done', 'min', 'skip', 'start', 'stop', 'plan', 'move', 'unplan', 'weight', 'remind', 'today', 'week', 'unknown'];
+const PHRASE_ACTIONS = ['done', 'min', 'skip', 'start', 'stop', 'plan', 'move', 'unplan', 'weight', 'remind', 'today', 'week', 'tomorrow', 'quick',
+  'stats', 'weight_stats', 'unknown'];
 const PHRASE_SCHEMA = {
   type: 'object',
   properties: {
@@ -1597,6 +2152,7 @@ const PHRASE_SCHEMA = {
           monthDays: { type: 'array', items: { type: 'integer' } },
           from: { type: 'string' },
           to: { type: 'string' },
+          period: { type: 'string', enum: STAT_PERIODS },
         },
         required: ['type'],
       },
@@ -1681,11 +2237,16 @@ function phraseContext(now, tz, cfg, list, acts, rows) {
     '- unplan: remove it from the plan;',
     '- weight: body weight in kg;',
     '- remind: a «do not forget» reminder about something that is not one of the activities (topic = what to remember, in the language of the message);',
-    "- today: show today's plan; week: show weekly progress;",
+    "- today: show today's plan; week: show weekly progress; tomorrow: show or plan tomorrow («що на завтра?», «сплануй завтра»);",
+    '- quick: the owner says how much free time they have right now («маю 20 хвилин», «есть полчаса»): minutes = that time;',
+    '- stats: a question about how often, how much time or when the owner did an activity («скільки разів я грав на гітарі цього тижня?», «коли я востаннє займався пайтоном?», «скільки часу на англійську за місяць?», «що я робив за тиждень?»): activity = that activity, "" for all activities;',
+    '- weight_stats: a question about body weight («скільки я схуд за місяць?», «яка в мене вага?»);',
     '- unknown: anything else.',
+    'period (stats and weight_stats only): week (this week; the default), last_week, month (this month), last_month, year, all (all time), last (when was the last time, or the current weight).',
+    'A question is never done/plan/weight: «скільки разів я грав?» is stats, not done.',
     'Rules: one action per activity mentioned. date: YYYY-MM-DD from the list above, or "" if not said (means today).',
     'slot: m (morning, зранку, утром), n (midday or daytime, в обід, днем), e (evening, ввечері, вечером), or "" if not said.',
-    'minutes: 0 if not said. topic: short, in the language of the message, "" if none. activity: "" for weight, today, week, unknown.',
+    'minutes: 0 if not said. topic: short, in the language of the message, "" if none. activity: "" for weight, weight_stats, today, week, tomorrow, quick, unknown.',
     'Map misheard, translated or transliterated names to the closest activity from the list.',
     'For remind: kind once (date), daily, week (days: 0 = Sunday … 6 = Saturday) or month (monthDays: 1–31, -1 = last day of the month);',
     'from / to: HH:MM time window; one time said — from = that time, to = one hour later; no time said — from "" and to "".',
@@ -1780,7 +2341,19 @@ async function performPhrase(ctx, x) {
   if (type === 'unknown') return null;
   if (type === 'today') { ctx.after.push(() => sendToday(env, chatId, now, 'План на сьогодні')); return null; }
   if (type === 'week') { ctx.after.push(() => sendWeek(env, chatId, now)); return null; }
+  if (type === 'tomorrow') { ctx.after.push(() => sendTomorrowOffer(env, chatId, now, { always: true })); return null; }
+  if (type === 'quick') {
+    const min = Math.round(Number(x.minutes) || 0);
+    ctx.after.push(() => (min >= 5 && min <= 240 ? sendQuick(env, chatId, now, min) : askQuick(env, chatId)));
+    return null;
+  }
   if (type === 'remind') return createReminder(ctx, x);
+  if (type === 'weight_stats') return weightStats(env, today, x.period);
+  if (type === 'stats') {
+    if (!String(x.activity || '').trim()) return allStats(ctx, x.period);
+    const a = findAct(list, x.activity);
+    return a ? actStats(ctx, a, x.period) : `❓ Не знайшов заняття «${esc(x.activity)}» — є: ${list.map((z) => esc(z.name)).join(', ')}`;
+  }
   if (type === 'weight') {
     const kg = Number(x.kg);
     if (!(kg >= 30 && kg <= 250)) return '❓ Не розчув вагу — надішли числом, наприклад 82,4';
@@ -1817,7 +2390,7 @@ async function performPhrase(ctx, x) {
   if (type === 'plan') {
     const d = date && date >= today ? date : today;
     const open = slotsFor(d, cfg).filter((s) => isOpen(d, s));
-    const s = slotIn(d) ?? open.find((z) => a.slots?.includes(z.id)) ?? open[0];
+    const s = slotIn(d) ?? preferredSlot(open, a, await slotAdviceOf(env, a.id, cfg, tz, now, await pausesOf(env)));
     if (!s) return `${name} — сьогодні всі вікна вже минули, скажи день`;
     if (!isOpen(d, s)) return `${name} — ${s.label.toLowerCase()} ${d === today ? 'сьогодні' : dayMonth(d)} уже минув`;
     if (rows.some((r) => live(r) && r.it.date === d && r.it.slot === s.id)) return `${name} уже є ${whenLabel(d, s, today)}`;
@@ -1836,7 +2409,7 @@ async function performPhrase(ctx, x) {
       const d = date && date >= today ? date : r.it.date;
       const slots = slotsFor(d, cfg);
       const s = slotIn(d) ?? slots.find((z) => z.id === r.it.slot && isOpen(d, z))
-        ?? slots.find((z) => a.slots?.includes(z.id) && isOpen(d, z)) ?? slots.find((z) => isOpen(d, z));
+        ?? preferredSlot(slots.filter((z) => isOpen(d, z)), a, await slotAdviceOf(env, a.id, cfg, tz, now, await pausesOf(env)));
       if (!s) return `${name} — ${dayMonth(d)} вікон уже немає`;
       forced = { date: d, slot: s };
     }
