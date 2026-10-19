@@ -254,7 +254,8 @@ a { color: var(--accent); }
   border: 1.5px solid var(--line-strong); background: var(--surface); color: var(--text);
   display: flex; flex-direction: column; align-items: flex-start; gap: 1px; text-align: left;
 }
-.pick.on { background: var(--now-bg); color: var(--now-fg); border-color: var(--now-bg); }
+/* Обране заняття — у його кольорі, а не білою плашкою: у темній темі біле сліпить */
+.pick.on { background: color-mix(in srgb, var(--c) 24%, var(--surface)); color: var(--text); border-color: var(--c); }
 .pick-name { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 700; }
 .dot { width: 10px; height: 10px; border-radius: 3px; background: var(--c); }
 .pick-why { font-size: 11px; font-weight: 600; opacity: .8; }
