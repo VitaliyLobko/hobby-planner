@@ -38,6 +38,40 @@ let hooks = null;
 let timer;
 let running = false;
 let again = false;
+// Поки людина вирішує, чиї дані лишити, обмін стоїть: інакше заняття телефона перезапишуть боту його
+let held = false;
+
+export function holdSync(on) {
+  held = on;
+}
+
+async function call(path, body) {
+  const { url, key } = botConfig();
+  const res = await fetch(`${url}${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401) throw new Error('Ключ не підходить — візьми новий у бота командою /key');
+  if (!res.ok) throw new Error(`Бот відповів помилкою ${res.status}`);
+  return res.json();
+}
+
+/** Усе, що знає бот (заняття, план, нагадування, вікна…) — для нового телефона. */
+export async function fetchRestore() {
+  try {
+    return await call('/api/restore', {});
+  } catch (err) {
+    throw err instanceof TypeError ? new Error('Немає зв’язку з ботом') : err;
+  }
+}
+
+/** Дані взяли з бота — далі обмін від цієї миті, без повторної відправки всього назад. */
+export function markRestored(serverNow) {
+  set(KEYS.since, serverNow);
+  set(KEYS.pushed, Date.now());
+  set(KEYS.last, Date.now());
+}
 
 /**
  * getState() → поточний state; apply(items, deleted, reminders, reminderDeleted) — записати зміни з бота;
@@ -55,6 +89,7 @@ export function scheduleSync(delay = 1500) {
 export async function syncNow() {
   const { url, key } = botConfig();
   if (!hooks || !url || !key) return { ok: false, off: true };
+  if (held) return { ok: false, held: true };
   if (running) { again = true; return { ok: false, busy: true }; }
   running = true;
   let result;
@@ -74,16 +109,12 @@ export async function syncNow() {
     const slots = state.meta.find((m) => m.id === 'slots');
     // Паузи — щоразу цілком: їх кілька, а бот має знати, коли мовчати
     const pauses = state.meta.find((m) => m.id === 'pauses')?.list ?? [];
-    const res = await fetch(`${url}/api/sync`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
-      body: JSON.stringify({
-        since: Number(get(KEYS.since) || 0), items, deletes, activities: state.activities, slots, pauses, reminders, reminderDeletes,
-      }),
+    // Тихі години — теж щоразу: бот перевіряє їх щохвилини
+    const quiet = state.meta.find((m) => m.id === 'quiet') ?? { on: false };
+    const templates = state.meta.find((m) => m.id === 'templates')?.list ?? [];
+    const data = await call('/api/sync', {
+      since: Number(get(KEYS.since) || 0), items, deletes, activities: state.activities, slots, pauses, quiet, templates, reminders, reminderDeletes,
     });
-    if (res.status === 401) throw new Error('Ключ не підходить — візьми новий у бота командою /key');
-    if (!res.ok) throw new Error(`Бот відповів помилкою ${res.status}`);
-    const data = await res.json();
     await hooks.apply(data.items ?? [], data.deleted ?? [], data.reminders ?? [], data.reminderDeleted ?? []);
     set(KEYS.pushed, startedAt);
     set(KEYS.since, data.now);

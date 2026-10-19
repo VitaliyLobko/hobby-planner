@@ -62,13 +62,152 @@ export function toast(text, action) {
 
 // Шторка має запис в історії: системна «Назад» на Android закриває її, а не йде з вкладки.
 let openSheet = null;
+// Вибір часу відкривається поверх шторки й має свій запис в історії
+let openPicker = null;
+// «Назад», яким вибір часу прибрав свій запис, — не для шторки під ним
+let skipPop = false;
 
 window.addEventListener('popstate', () => {
+  if (skipPop) { skipPop = false; return; }
+  if (openPicker) { openPicker.close(true); return; }
   if (openSheet) openSheet.close(true);
 });
 
+const pad2 = (n) => String(n).padStart(2, '0');
+const TURN = Math.PI * 2;
+// Години як на циферблаті Android: зовні 12, 1…11, всередині 00, 13…23
+const outerHour = (i) => (i === 0 ? 12 : i);
+const innerHour = (i) => (i === 0 ? 0 : i + 12);
+// Внутрішнє коло — ближче за цю частку радіуса циферблата
+const INNER_RING = 0.62;
+
+/**
+ * Вибір часу циферблатом: тап чи палець по колу — година, далі коло хвилин (крок 5).
+ * null — закрили без вибору.
+ */
+export function pickTime(value, title) {
+  openPicker?.close();
+  return new Promise((resolve) => {
+    let [hh, mm] = (value || '09:00').split(':').map(Number);
+    let mode = 'h';
+    const layer = h('div', { class: 'picker-layer' });
+    const close = (result, fromHistory = false) => {
+      if (openPicker !== api) return;
+      openPicker = null;
+      layer.remove();
+      if (!fromHistory && history.state?.picker) { skipPop = true; history.back(); }
+      resolve(result);
+    };
+    const api = { close: (fromHistory) => close(null, fromHistory) };
+
+    const hBtn = h('button', { type: 'button', class: 'picker-part', onClick: () => { mode = 'h'; draw(); } });
+    const mBtn = h('button', { type: 'button', class: 'picker-part', onClick: () => { mode = 'm'; draw(); } });
+    const dial = h('div', { class: 'dial', role: 'group' });
+    const hand = h('span', { class: 'dial-hand', 'aria-hidden': 'true' });
+
+    // Позиція на колі: індекс 0–11 від 12-ї години за стрілкою, r — частка радіуса
+    const place = (el, i, r) => {
+      const a = (i / 12) * TURN;
+      el.style.left = `${50 + Math.sin(a) * r * 50}%`;
+      el.style.top = `${50 - Math.cos(a) * r * 50}%`;
+    };
+    const num = (label, on, i, r, pick, inner = false) => {
+      const b = h('button', {
+        type: 'button', class: `dial-num${inner ? ' inner' : ''}${on ? ' on' : ''}`, tabindex: on ? 0 : -1,
+        // Мишею й пальцем обирає коло (pointer-обробник), кнопка — для клавіатури
+        onClick: (e) => { if (e.detail === 0) pick(); },
+      }, label);
+      place(b, i, r);
+      return b;
+    };
+    const draw = () => {
+      hBtn.textContent = pad2(hh);
+      mBtn.textContent = pad2(mm);
+      hBtn.classList.toggle('on', mode === 'h');
+      mBtn.classList.toggle('on', mode === 'm');
+      dial.setAttribute('aria-label', mode === 'h' ? 'Година' : 'Хвилини');
+      const nums = [];
+      let handI;
+      let handR = 0.8;
+      if (mode === 'h') {
+        for (let i = 0; i < 12; i++) {
+          nums.push(num(String(outerHour(i)), hh === outerHour(i), i, 0.8, () => setHour(outerHour(i))));
+          nums.push(num(pad2(innerHour(i)), hh === innerHour(i), i, 0.5, () => setHour(innerHour(i)), true));
+        }
+        handI = hh % 12;
+        if (hh === 0 || hh > 12) handR = 0.5;
+      } else {
+        for (let i = 0; i < 12; i++) nums.push(num(pad2(i * 5), mm === i * 5, i, 0.8, () => setMinute(i * 5)));
+        handI = mm / 5;
+      }
+      hand.style.transform = `rotate(${(handI / 12) * 360}deg)`;
+      hand.style.height = `${handR * 50}%`;
+      dial.replaceChildren(hand, h('span', { class: 'dial-center', 'aria-hidden': 'true' }), ...nums);
+    };
+    const setHour = (v) => { hh = v; mode = 'm'; draw(); };
+    const setMinute = (v) => { mm = v; draw(); };
+
+    // Палець по колу: найближча поділка; година — ще й коло (зовнішнє/внутрішнє)
+    const fromPointer = (e) => {
+      const r = dial.getBoundingClientRect();
+      const dx = e.clientX - (r.left + r.width / 2);
+      const dy = e.clientY - (r.top + r.height / 2);
+      const i = Math.round((((Math.atan2(dx, -dy) + TURN) % TURN) / TURN) * 12) % 12;
+      if (mode === 'h') {
+        hh = Math.hypot(dx, dy) < (r.width / 2) * INNER_RING ? innerHour(i) : outerHour(i);
+      } else {
+        mm = i * 5;
+      }
+      draw();
+    };
+    let dragging = false;
+    dial.addEventListener('pointerdown', (e) => {
+      dragging = true;
+      try { dial.setPointerCapture(e.pointerId); } catch { /* вказівник уже відпущено */ }
+      fromPointer(e);
+    });
+    dial.addEventListener('pointermove', (e) => { if (dragging) fromPointer(e); });
+    const release = () => {
+      if (!dragging) return;
+      dragging = false;
+      if (mode === 'h') { mode = 'm'; draw(); }
+    };
+    dial.addEventListener('pointerup', release);
+    dial.addEventListener('pointercancel', () => { dragging = false; });
+
+    draw();
+    const panel = h('div', { class: 'sheet picker', role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
+      h('div', { class: 'sheet-grip', 'aria-hidden': 'true' }),
+      h('h2', { class: 'sheet-title' }, title),
+      h('p', { class: 'picker-now' }, hBtn, h('span', { 'aria-hidden': 'true' }, ':'), mBtn),
+      dial,
+      h('div', { class: 'btn-grid' },
+        h('button', { type: 'button', class: 'btn primary', onClick: () => close(`${pad2(hh)}:${pad2(mm)}`) }, icon('check'), 'Готово')));
+    panel.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); api.close(); } });
+    layer.append(h('div', { class: 'backdrop picker-backdrop', onClick: () => api.close() }), panel);
+    document.body.append(layer);
+    openPicker = api;
+    history.pushState({ picker: true }, '');
+    hBtn.focus({ preventScroll: true });
+  });
+}
+
+/** Поле часу замість input type=time: кнопка «ГГ:ХХ», value — як в input; onChange(v, поле). */
+export function timeField({ value, label, id, onChange }) {
+  const btn = h('button', { type: 'button', class: 'time-field', id, 'aria-label': label });
+  btn.setTime = (v) => { btn.value = v; btn.textContent = v || '--:--'; };
+  btn.setTime(value);
+  btn.addEventListener('click', async () => {
+    const v = await pickTime(btn.value, label);
+    if (v == null || v === btn.value) return;
+    btn.setTime(v);
+    onChange?.(v, btn);
+  });
+  return btn;
+}
+
 /** Нижня шторка. content — елемент; повертає close(). */
-export function sheet(title, content) {
+export function sheet(title, content, { onClose } = {}) {
   openSheet?.close();
   const layer = $('layer');
   const close = (fromHistory = false) => {
@@ -76,6 +215,7 @@ export function sheet(title, content) {
     openSheet = null;
     layer.replaceChildren();
     if (!fromHistory && history.state?.sheet) history.back();
+    onClose?.();
   };
   const api = { close };
   const panel = h('div', { class: 'sheet', role: 'dialog', 'aria-modal': 'true', 'aria-label': title },

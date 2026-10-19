@@ -89,14 +89,14 @@ export const SLOT_ICONS = { m: 'sunrise', n: 'sun', e: 'moon' };
 export const DEFAULT_SLOTS = {
   id: 'slots',
   weekday: [
-    { id: 'm', label: 'Ранок', from: '07:00', to: '09:00' },
-    { id: 'n', label: 'Обід', from: '12:00', to: '14:00' },
-    { id: 'e', label: 'Вечір', from: '19:00', to: '22:00' },
+    { id: 'm', label: 'Ранок', from: '07:00', to: '12:00' },
+    { id: 'n', label: 'Обід', from: '12:00', to: '18:00' },
+    { id: 'e', label: 'Вечір', from: '18:00', to: '22:00' },
   ],
   weekend: [
     { id: 'm', label: 'Ранок', from: '09:00', to: '12:00' },
-    { id: 'n', label: 'День', from: '13:00', to: '18:00' },
-    { id: 'e', label: 'Вечір', from: '19:00', to: '23:00' },
+    { id: 'n', label: 'День', from: '12:00', to: '18:00' },
+    { id: 'e', label: 'Вечір', from: '18:00', to: '22:00' },
   ],
 };
 
@@ -105,7 +105,9 @@ export function slotsFor(date, slots) {
 }
 
 // Кольори — ключі, а не hex: справжній відтінок бере CSS (--c-*), окремо для світлої й темної теми.
-export const COLORS = ['blue', 'green', 'olive', 'orange', 'purple', 'red', 'teal', 'pink'];
+// Перші вісім — як були (за ними нові заняття беруть колір по черзі), далі — додані
+export const COLORS = ['blue', 'green', 'olive', 'orange', 'purple', 'red', 'teal', 'pink',
+  'indigo', 'sky', 'mint', 'lime', 'amber', 'brown', 'magenta', 'slate'];
 // Іконки занять групами — у формі заняття кожна група згортається.
 export const ICON_GROUPS = [
   { title: 'Навчання', icons: [['book', 'Книга'], ['globe', 'Мова'], ['code', 'Код'], ['pen', 'Письмо'], ['bulb', 'Ідея'], ['calc', 'Математика'], ['chart', 'Аналітика']] },
@@ -199,6 +201,43 @@ export function weekSeconds(plan, activityId, start) {
 export function weekCount(plan, activityId, start) {
   const end = addDays(start, 6);
   return plan.filter((p) => p.activityId === activityId && p.date >= start && p.date <= end && counts(p.status)).length;
+}
+
+// ---------- серії ----------
+// Скільки перевіряємо назад: далі рік — і так рекорд
+const STREAK_LIMIT_WEEKS = 52;
+const STREAK_LIMIT_DAYS = 366;
+
+/**
+ * Тижнів поспіль із виконаною ціллю. Поточний додає 1, лише коли ціль уже є (інакше серія ще не рветься);
+ * тиждень цілком на паузі (ціль 0) серію не рве й не подовжує.
+ */
+export function weekStreak(plan, a, today, pauses) {
+  let start = weekStart(today);
+  const goal = weekTarget(a, start, pauses);
+  let n = goal > 0 && weekCount(plan, a.id, start) >= goal ? 1 : 0;
+  for (let i = 0; i < STREAK_LIMIT_WEEKS; i++) {
+    start = addDays(start, -7);
+    const g = weekTarget(a, start, pauses);
+    if (g === 0) continue;
+    if (weekCount(plan, a.id, start) < g) break;
+    n++;
+  }
+  return n;
+}
+
+/** Днів поспіль, коли зараховано хоч одну справу. Сьогодні додає 1, якщо вже є; дні паузи пропускаємо. */
+export function dayStreak(plan, today, pauses) {
+  const done = new Set(plan.filter((p) => counts(p.status)).map((p) => p.date));
+  let n = done.has(today) ? 1 : 0;
+  let d = today;
+  for (let i = 0; i < STREAK_LIMIT_DAYS; i++) {
+    d = addDays(d, -1);
+    if (pauseOn(d, pauses)) continue;
+    if (!done.has(d)) break;
+    n++;
+  }
+  return n;
 }
 
 // ---------- нагадування «не забудь» ----------

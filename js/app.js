@@ -1,8 +1,8 @@
 // Хобі-план: екрани «Сьогодні», «План», «Тиждень», «Заняття», «Налаштування».
 import { loadAll, write, uid, replaceAll } from './db.js';
 import * as M from './model.js';
-import { $, h, icon, toast, sheet, closeSheet, chips, swipeable, swipeStep, fold } from './ui.js';
-import { initSync, syncNow, scheduleSync, botConfig, setBotConfig, lastSync } from './sync.js';
+import { $, h, icon, toast, sheet, closeSheet, chips, swipeable, swipeStep, fold, timeField } from './ui.js';
+import { initSync, syncNow, scheduleSync, botConfig, setBotConfig, lastSync, holdSync, fetchRestore, markRestored } from './sync.js';
 
 const state = { activities: [], plan: [], meta: [], reminders: [], tombstones: [] };
 let slotsCfg = structuredClone(M.DEFAULT_SLOTS);
@@ -33,7 +33,12 @@ const itemsAt = (date, slot) => state.plan
   .sort((x, y) => (actOrder(x) - actOrder(y)) || String(x.id).localeCompare(String(y.id)));
 const traceAt = (date, slot) => state.plan.filter((p) => p.date === date && p.slot === slot && p.status === 'moved');
 const slotOf = (item) => M.slotsFor(item.date, slotsCfg).find((s) => s.id === item.slot);
-const actStyle = (a) => ({ '--c': `var(--c-${a?.color ?? 'blue'})` });
+// Свій колір — #rrggbb: на світлій темі його притемнює --own-shade, інакше світлий тоне на білому
+const isOwnColor = (c) => /^#[0-9a-f]{6}$/i.test(c ?? '');
+const colorVar = (c) => (isOwnColor(c)
+  ? `color-mix(in srgb, ${c} calc(100% - var(--own-shade)), black)`
+  : `var(--c-${c || 'blue'})`);
+const actStyle = (a) => ({ '--c': colorVar(a?.color) });
 const MISSING = { name: 'Видалене заняття', color: 'blue', icon: 'star', minutes: 0, minVersion: '', weeklyTarget: 1 };
 const pauses = () => state.meta.find((m) => m.id === 'pauses')?.list ?? [];
 const target = (a, start) => M.weekTarget(a, start, pauses());
@@ -459,7 +464,16 @@ function reminderRow(r, date, today, now) {
       'aria-label': done ? `Зняти позначку: ${r.text}` : `Зроблено: ${r.text}`, onClick: () => toggleReminder(r, date),
     }, done ? icon('check') : null),
     h('button', { type: 'button', class: 'remind-text', onClick: () => editReminder(r) },
-      h('span', {}, r.text), h('span', { class: 'muted small' }, status)));
+      h('span', {}, r.text), h('span', { class: 'muted small' }, status)),
+    r.kind === 'once' && !done ? h('button', {
+      type: 'button', class: 'remind-later', 'aria-label': `На завтра: ${r.text}`, onClick: () => reminderTomorrow(r, today),
+    }, icon('next'), 'Завтра') : null);
+}
+
+/** Разове — на завтра (і прострочене теж: завтра від сьогодні), зі «Скасувати». */
+async function reminderTomorrow(r, today) {
+  await save({ reminders: { put: [{ ...r, date: M.addDays(today, 1) }] } });
+  toast(`Нагадаю завтра: ${r.text}`, { label: 'Скасувати', run: () => save({ reminders: { put: [{ ...r }] } }) });
 }
 
 /** «Не забудь» на «Сьогодні»: нагадування дня й прострочені разові. */
@@ -494,17 +508,22 @@ function editReminder(orig) {
         chips(WEEK_DAYS, d.days.map(String), (v) => { d.days = v.map(Number); }, { multi: true }));
     } else if (d.kind === 'month') {
       const days = [...Array.from({ length: 31 }, (_, i) => [String(i + 1), String(i + 1)]), [String(M.LAST_MONTH_DAY), 'Останній']];
-      const row = chips(days, d.monthDays.map(String), (v) => { d.monthDays = v.map(Number); }, { multi: true });
+      const picked = h('span', { class: 'month-picked' });
+      const paintPicked = () => { picked.textContent = M.remindWhen(d); };
+      const row = chips(days, d.monthDays.map(String), (v) => { d.monthDays = v.map(Number); paintPicked(); }, { multi: true });
       row.classList.add('month-days');
-      when.replaceChildren(h('p', { class: 'flabel' }, 'Числа місяця'), row,
-        h('p', { class: 'muted small' }, 'Числа, якого в місяці немає (31-го в листопаді), — в останній день.'));
+      paintPicked();
+      // Обрані числа видно в заголовку, тож при правці групу можна не розгортати
+      when.replaceChildren(fold(h('span', { class: 'month-head' }, h('span', { class: 'flabel' }, 'Числа місяця'), picked),
+        [row, h('p', { class: 'muted small' }, 'Числа, якого в місяці немає (31-го в листопаді), — в останній день.')],
+        { open: !d.monthDays.length, cls: 'plain-fold month-fold' }));
     } else {
       when.replaceChildren();
     }
   };
   drawWhen();
-  const from = h('input', { type: 'time', id: 'f-rfrom', value: d.from });
-  const to = h('input', { type: 'time', id: 'f-rto', value: d.to });
+  const from = timeField({ value: d.from, id: 'f-rfrom', label: 'Нагадувати з' });
+  const to = timeField({ value: d.to, id: 'f-rto', label: 'Нагадувати до' });
   const store = async () => {
     const r = { ...d, text: text.value.trim(), from: from.value, to: to.value };
     if (!r.text) { toast('Напиши, що не забути'); return; }
@@ -561,7 +580,7 @@ function remindersSection() {
 
 // ---------- «Є кілька хвилин» ----------
 
-const QUICK_MINUTES = [10, 15, 20, 30, 45, 60];
+const QUICK_MINUTES = [10, 15, 20, 30, 45, 60, 90];
 
 /**
  * Що встигнути за min хвилин: невідмічені справи сьогоднішнього плану — першими, далі заняття,
@@ -652,11 +671,13 @@ function viewToday() {
   // Що ще попереду сьогодні: справи вікон, які не скінчились, і ще не відмічені
   const left = planMin(slots.filter((s) => now < s.to)
     .flatMap((s) => itemsAt(today, s.id).filter((p) => isOpen(M.shownStatus(p, s, today, now)))));
+  const streak = M.dayStreak(state.plan, today, pauses());
   return h('div', { class: 'stack' },
     h('div', { class: 'view-head' },
       h('div', {},
         h('div', { class: 'muted' }, M.dayTitle(today)),
-        left ? h('div', { class: 'day-left' }, icon('clock'), `Ще на сьогодні ~${minText(left)}`) : null),
+        left ? h('div', { class: 'day-left' }, icon('clock'), `Ще на сьогодні ~${minText(left)}`) : null,
+        streak >= MIN_STREAK ? h('div', { class: 'day-left streak' }, icon('flame'), `${streak} ${plural(streak, 'день', 'дні', 'днів')} поспіль`) : null),
       h('a', { class: 'week-pill', href: '#week', 'aria-label': `Тиждень: ${done} з ${target}` },
         h('span', { class: 'muted small' }, 'Тиждень'), h('b', {}, `${done} / ${target}`))),
     pauseBanner(today),
@@ -734,7 +755,8 @@ function planSlot(date, slot, wk, today, now) {
       onClick: () => togglePick(date, slot.id, a),
     },
     h('span', { class: 'pick-name' }, h('span', { class: 'dot', 'aria-hidden': 'true' }), a.name),
-    h('span', { class: 'pick-why' }, `${cnt}/${goal}${miss ? ' · був пропуск' : ''}`)));
+    h('span', { class: 'pick-why' }, [a.minutes ? `~${minText(a.minutes)}` : '', `${cnt}/${goal}`, miss ? 'був пропуск' : '']
+      .filter(Boolean).join(' · '))));
   }
   const body = h('div', { class: 'plan-body' },
     slotLoad(items, slot, date, today, now),
@@ -914,7 +936,8 @@ function viewPlan() {
       h('div', { class: 'day-nav-title' },
         rel ? h('div', { class: 'day-rel' }, rel)
           : h('button', { type: 'button', class: 'day-rel link', onClick: () => { planDate = today; render(); } }, 'До сьогодні'),
-        h('div', { class: 'day-date' }, M.dayTitle(date))),
+        h('div', { class: 'day-date' }, M.dayTitle(date),
+          M.isWeekend(date, slotsCfg.weekendDays) ? h('span', { class: 'weekend-tag' }, 'вихідний') : null)),
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Наступний день', onClick: () => shiftPlan(1) }, icon('next'))),
     h('p', { class: 'muted small lead' }, 'Тап по заняттю — додати у вікно, ще раз — прибрати; у вікні може бути кілька справ. Спершу — звичні для вікна, далі — ті, що відстають від тижневої цілі.'),
     pausedNote(date),
@@ -955,9 +978,12 @@ function viewWeek() {
     const sec = M.weekSeconds(state.plan, a.id, start);
     const goal = target(a, start);
     const pct = goal ? Math.min(100, Math.round((cnt / goal) * 100)) : 100;
+    // Серія — станом на кінець переглянутого тижня (минулий тиждень показує тодішню)
+    const streak = M.weekStreak(state.plan, a, M.addDays(start, 6) < today ? M.addDays(start, 6) : today, pauses());
     goals.append(h('div', { class: 'goal', style: actStyle(a) },
       h('div', { class: 'goal-row' },
-        h('span', {}, a.name, sec ? h('span', { class: 'muted goal-time' }, ` · ${M.duration(sec)}`) : null),
+        h('span', {}, a.name, sec ? h('span', { class: 'muted goal-time' }, ` · ${M.duration(sec)}`) : null,
+          streak >= MIN_STREAK ? h('span', { class: 'goal-streak', title: `Ціль ${streak} тижнів поспіль` }, icon('flame'), String(streak)) : null),
         h('b', {}, `${cnt} / ${goal}`)),
       h('div', { class: 'bar', role: 'img', 'aria-label': `${a.name}: ${cnt} з ${goal}` },
         h('span', { style: { width: `${pct}%` } }))));
@@ -970,7 +996,11 @@ function viewWeek() {
   const grid = h('div', { class: 'grid' }, h('span'));
   days.forEach((d, i) => {
     const paused = M.pauseOn(d, pauses());
-    grid.append(h('span', { class: `grid-day${d === today ? ' today' : ''}${paused ? ' paused' : ''}`, title: paused ? 'Пауза' : null }, M.DAY_SHORT[i]));
+    const off = M.isWeekend(d, slotsCfg.weekendDays);
+    grid.append(h('span', {
+      class: `grid-day${d === today ? ' today' : ''}${paused ? ' paused' : ''}${off ? ' weekend' : ''}`,
+      title: paused ? 'Пауза' : off ? 'Вихідний' : null,
+    }, M.DAY_SHORT[i]));
   });
   for (const sid of M.SLOT_IDS) {
     grid.append(h('span', { class: 'grid-slot' }, slotsCfg.weekday.find((s) => s.id === sid)?.label ?? sid));
@@ -981,7 +1011,7 @@ function viewWeek() {
       const label = `${M.DAY_SHORT[i]}, ${slot.label}: ${what || 'вільно'}`;
       // Кілька справ — смужка на кожну; більше трьох у клітинку 34 px не влазить, решта — у підписі
       grid.append(h('button', {
-        type: 'button', class: `cell${its.length ? ' segs' : ' c-none'}`, 'aria-label': label, title: label,
+        type: 'button', class: `cell${its.length ? ' segs' : ' c-none'}${M.isWeekend(d, slotsCfg.weekendDays) ? ' weekend' : ''}`, 'aria-label': label, title: label,
         onClick: () => { planDate = d; location.hash = '#plan'; },
       }, its.slice(0, 3).map(({ a, st }) => h('i', { class: `seg c-${st}`, style: actStyle(a) },
         its.length === 1 && (st === 'skipped' || st === 'missed') ? icon('skip') : null))));
@@ -1101,7 +1131,12 @@ const viewStats = () => (statsMode() === 'month' ? viewMonth() : viewWeek());
 const COLOR_NAMES = {
   blue: 'Синій', green: 'Зелений', olive: 'Оливковий', orange: 'Помаранчевий',
   purple: 'Фіолетовий', red: 'Червоний', teal: 'Бірюзовий', pink: 'Рожевий',
+  indigo: 'Індиго', sky: 'Блакитний', mint: "М'ятний", lime: 'Салатовий',
+  amber: 'Бурштиновий', brown: 'Коричневий', magenta: 'Пурпуровий', slate: 'Сірий',
 };
+// У виборі — веселкою, а не в порядку додавання
+const COLOR_ORDER = ['red', 'orange', 'amber', 'olive', 'lime', 'green', 'mint', 'teal',
+  'sky', 'blue', 'indigo', 'purple', 'magenta', 'pink', 'brown', 'slate'];
 
 /** Ряд кнопок-варіантів з однією вибраною (колір, іконка). */
 function optionRow(values, current, draw, onPick, label) {
@@ -1119,8 +1154,33 @@ function optionRow(values, current, draw, onPick, label) {
   return row;
 }
 
-/** Іконки групами (навчання, музика, спорт…); розгорнута та група, де поточна іконка. */
-function iconPicker(d) {
+/** Готові кольори веселкою й останнім — «Свій» (системна палітра, будь-який #rrggbb). */
+function colorPicker(d, onPick) {
+  const own = h('input', { type: 'color', class: 'own-input', tabindex: -1, 'aria-hidden': 'true', value: isOwnColor(d.color) ? d.color : '#4a90d9' });
+  const ownBtn = h('button', { type: 'button', class: 'swatch own-swatch', 'aria-label': 'Свій колір', onClick: () => own.click() }, own);
+  const row = optionRow(COLOR_ORDER, d.color, (c) => h('button', { type: 'button', class: 'swatch', style: { '--c': colorVar(c) }, 'aria-label': COLOR_NAMES[c] }),
+    (c) => { d.color = c; paintOwn(); onPick(); }, 'Колір');
+  const paintOwn = () => {
+    const on = isOwnColor(d.color);
+    ownBtn.setAttribute('aria-pressed', String(on));
+    ownBtn.style.setProperty('--c', on ? colorVar(d.color) : '');
+    ownBtn.classList.toggle('picked', on);
+  };
+  own.addEventListener('input', () => {
+    d.color = own.value;
+    for (const b of row.children) if (b !== ownBtn) b.setAttribute('aria-pressed', 'false');
+    paintOwn();
+    onPick();
+  });
+  row.append(ownBtn);
+  paintOwn();
+  return row;
+}
+
+const iconName = (key) => M.ICON_GROUPS.flatMap((g) => g.icons).find(([k]) => k === key)?.[1] ?? '';
+
+/** Усі іконки одним блоком, групи — підзаголовками (навчання, музика, спорт…). */
+function iconPicker(d, onPick) {
   const buttons = [];
   const paint = () => {
     for (const b of buttons) b.setAttribute('aria-pressed', String(b.dataset.v === d.icon));
@@ -1130,16 +1190,26 @@ function iconPicker(d) {
     for (const [key, name] of g.icons) {
       const b = h('button', {
         type: 'button', class: 'icon-opt', 'aria-label': name, title: name, 'data-v': key,
-        onClick: () => { d.icon = key; paint(); },
+        onClick: () => { d.icon = key; paint(); onPick(); },
       }, icon(key));
       buttons.push(b);
       row.append(b);
     }
-    return fold(h('span', { class: 'fold-title' }, g.title), row,
-      { open: g.icons.some(([k]) => k === d.icon), cls: 'icon-group' });
+    return h('div', { class: 'icon-group' }, h('p', { class: 'fold-title' }, g.title), row);
   });
   paint();
   return h('div', { class: 'icon-groups' }, groups);
+}
+
+/** Блок форми, що згортається: у заголовку — назва й поточний вибір. */
+function pickFold(title, value, body) {
+  return fold(h('span', { class: 'pick-head' }, h('span', { class: 'flabel' }, title), value), body,
+    { cls: 'form-box pick-fold' });
+}
+
+/** Блок форми з підписом (як рамка з заголовком). */
+function formBox(title, ...children) {
+  return h('section', { class: 'form-box' }, h('h3', { class: 'form-box-title' }, title), ...children);
 }
 
 function editActivity(orig) {
@@ -1157,22 +1227,39 @@ function editActivity(orig) {
   const minutes = h('input', { type: 'number', inputmode: 'numeric', min: 0, max: 600, value: d.minutes || '', id: 'f-min' });
   const minVersion = h('input', { type: 'text', maxlength: 60, value: d.minVersion ?? '', placeholder: 'Напр.: 5 хв гами', id: 'f-minv' });
 
-  const form = h('div', { class: 'sheet-body form' },
-    h('label', { for: 'f-name' }, 'Назва'), name,
-    h('span', { class: 'flabel' }, 'Колір'),
-    optionRow(M.COLORS, d.color, (c) => h('button', { type: 'button', class: 'swatch', style: { '--c': `var(--c-${c})` }, 'aria-label': COLOR_NAMES[c] }),
-      (c) => { d.color = c; }, 'Колір'),
-    h('span', { class: 'flabel' }, 'Іконка'),
-    iconPicker(d),
-    h('span', { class: 'flabel' }, 'Разів на тиждень'),
-    h('div', { class: 'stepper' },
-      h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Менше', onClick: () => stepTarget(-1) }, '−'),
-      out,
-      h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Більше', onClick: () => stepTarget(1) }, '+')),
-    h('label', { for: 'f-min' }, 'Скільки хвилин зазвичай'), minutes,
-    h('label', { for: 'f-minv' }, 'Мінімальна версія — на поганий день'), minVersion,
-    h('span', { class: 'flabel' }, 'Звичні вікна'),
-    chips([['m', 'Ранок'], ['n', 'Обід / день'], ['e', 'Вечір']], d.slots, (v) => { d.slots = v; }, { multi: true }),
+  // Превʼю вгорі: колір та іконку видно, навіть коли їхні блоки згорнуті
+  const previewTile = h('span', { class: 'tile' });
+  const previewName = h('span', { class: 'act-name' });
+  const colorValue = h('span', { class: 'pick-value' });
+  const iconValue = h('span', { class: 'pick-value' });
+  const paintLook = () => {
+    previewTile.style.setProperty('--c', colorVar(d.color));
+    previewTile.replaceChildren(icon(d.icon));
+    previewName.textContent = name.value.trim() || 'Нове заняття';
+    colorValue.replaceChildren(h('span', { class: 'swatch-dot', style: actStyle(d) }), COLOR_NAMES[d.color] ?? 'Свій');
+    iconValue.replaceChildren(icon(d.icon), iconName(d.icon));
+  };
+  name.addEventListener('input', paintLook);
+  paintLook();
+
+  const form = h('div', { class: 'sheet-body form act-form' },
+    h('div', { class: 'act-preview' }, previewTile, previewName),
+    formBox('Вигляд',
+      h('label', { for: 'f-name' }, 'Назва'), name,
+      pickFold('Колір', colorValue,
+        colorPicker(d, paintLook)),
+      pickFold('Іконка', iconValue, iconPicker(d, paintLook))),
+    formBox('Ціль',
+      h('span', { class: 'flabel' }, 'Разів на тиждень'),
+      h('div', { class: 'stepper' },
+        h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Менше', onClick: () => stepTarget(-1) }, '−'),
+        out,
+        h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Більше', onClick: () => stepTarget(1) }, '+')),
+      h('label', { for: 'f-min' }, 'Скільки хвилин зазвичай'), minutes,
+      h('label', { for: 'f-minv' }, 'Мінімальна версія — на поганий день'), minVersion),
+    formBox('Коли',
+      h('span', { class: 'flabel' }, 'Звичні вікна'),
+      chips([['m', 'Ранок'], ['n', 'Обід / день'], ['e', 'Вечір']], d.slots, (v) => { d.slots = v; }, { multi: true })),
     h('div', { class: 'btn-grid' },
       button('check', 'Зберегти', 'primary', () => {
         d.name = name.value.trim();
@@ -1181,12 +1268,27 @@ function editActivity(orig) {
         d.minVersion = minVersion.value.trim();
         closeSheet();
         save({ activities: { put: [d] } });
-      }),
-      orig ? button('undo', orig.archived ? 'Повернути з архіву' : 'В архів', '', () => {
+      })),
+    // Архів — окремо й нижче за «Зберегти»: поруч у них влучали випадково
+    orig ? h('div', { class: 'archive-zone' },
+      button('undo', orig.archived ? 'Повернути з архіву' : 'В архів', 'ghost', async () => {
         closeSheet();
-        save({ activities: { put: [{ ...orig, archived: !orig.archived }] } });
-      }) : null));
+        await save({ activities: { put: [{ ...orig, archived: !orig.archived }] } });
+        toast(orig.archived ? `${orig.name} — знову в заняттях` : `${orig.name} — в архіві`,
+          { label: 'Скасувати', run: () => save({ activities: { put: [{ ...orig }] } }) });
+      })) : null);
   sheet(orig ? 'Заняття' : 'Нове заняття', form);
+}
+
+// Серію показуємо з двох: «1 поспіль» нічого не каже
+const MIN_STREAK = 2;
+
+/** Тижнів поспіль із виконаною ціллю — на картці заняття й у «Тижні». */
+function weekStreakBadge(a, today = M.ymd()) {
+  const n = M.weekStreak(state.plan, a, today, pauses());
+  if (n < MIN_STREAK) return null;
+  return h('span', { class: 'streak-badge', title: `Ціль виконана ${n} ${plural(n, 'тиждень', 'тижні', 'тижнів')} поспіль` },
+    icon('flame'), `${n} ${plural(n, 'тиждень', 'тижні', 'тижнів')} поспіль`);
 }
 
 /** Рівень заняття: номер і смужка до наступного — досвід за зараховані справи. */
@@ -1208,6 +1310,7 @@ function actCard(a) {
       h('span', { class: 'act-name' }, a.name),
       h('span', { class: 'act-sub' }, meta),
       a.minVersion ? h('span', { class: 'muted small' }, `Мінімум: ${a.minVersion}`) : null,
+      a.archived ? null : weekStreakBadge(a),
       levelLine(a)));
 }
 
@@ -1257,22 +1360,40 @@ function weekendPicker() {
     }, { multi: true }));
 }
 
+/** Час і назви вікон — стандартні; які дні вихідні, лишаємо як є. */
+async function resetSlots() {
+  const before = structuredClone(slotsCfg);
+  slotsCfg = { ...structuredClone(M.DEFAULT_SLOTS), weekendDays: before.weekendDays };
+  await save({ meta: { put: [slotsCfg] } });
+  toast('Вікна — стандартні', {
+    label: 'Скасувати',
+    run: async () => { slotsCfg = before; await save({ meta: { put: [before] } }); },
+  });
+}
+
 function slotEditor(kind, title) {
   const box = h('div', { class: 'slot-edit' }, h('h3', {}, title));
   for (const slot of slotsCfg[kind]) {
-    const update = (field) => (e) => {
+    const update = (field) => (value, el) => {
       const next = structuredClone(slotsCfg);
       const s = next[kind].find((x) => x.id === slot.id);
-      s[field] = e.target.value.trim() || s[field];
-      if (s.from >= s.to) { toast('Початок має бути раніше за кінець'); e.target.value = slot[field]; return; }
+      s[field] = value.trim() || s[field];
+      if (s.from >= s.to) {
+        toast('Початок має бути раніше за кінець');
+        if (el.setTime) el.setTime(slot[field]); else el.value = slot[field];
+        return;
+      }
       slotsCfg = next;
       save({ meta: { put: [next] } }, { render: false });
     };
     box.append(h('div', { class: 'slot-row' },
       icon(M.SLOT_ICONS[slot.id]),
-      h('input', { type: 'text', value: slot.label, maxlength: 16, 'aria-label': `${title}: назва вікна`, onChange: update('label') }),
-      h('input', { type: 'time', value: slot.from, 'aria-label': `${slot.label}: початок`, onChange: update('from') }),
-      h('input', { type: 'time', value: slot.to, 'aria-label': `${slot.label}: кінець`, onChange: update('to') })));
+      h('input', {
+        type: 'text', value: slot.label, maxlength: 16, 'aria-label': `${title}: назва вікна`,
+        onChange: (e) => update('label')(e.target.value, e.target),
+      }),
+      timeField({ value: slot.from, label: `${slot.label}: початок`, onChange: update('from') }),
+      timeField({ value: slot.to, label: `${slot.label}: кінець`, onChange: update('to') })));
   }
   return box;
 }
@@ -1300,7 +1421,7 @@ async function importBackup(file) {
     return;
   }
   sheet('Відновити з копії?', h('div', { class: 'sheet-body' },
-    h('p', {}, `Занять: ${data.activities.length}, записів плану: ${data.plan.length}. Поточні дані на цьому пристрої буде замінено.`),
+    h('p', {}, `Занять: ${data.activities.length}, записів плану: ${data.plan.length}, нагадувань: ${data.reminders?.length ?? 0}. Поточні дані на цьому пристрої буде замінено.`),
     h('div', { class: 'btn-grid' },
       button('check', 'Відновити', 'danger', async () => {
         closeSheet();
@@ -1324,6 +1445,85 @@ function syncStatusText(res) {
   return `Синхронізовано ${M.ymd(d) === M.ymd() ? 'сьогодні' : M.dayTitle(M.ymd(d)).toLowerCase()} о ${M.nowHm(d)}`;
 }
 
+async function connectSync(status) {
+  status.textContent = 'Синхронізую…';
+  const res = await syncNow();
+  status.textContent = syncStatusText(res);
+  toast(res.ok ? 'Бот підключено' : res.error);
+}
+
+const restoreCounts = (data) => `Занять: ${data.activities?.length ?? 0}, справ у плані: ${data.items?.length ?? 0}, нагадувань: ${data.reminders?.length ?? 0}.`;
+
+/** Дані з бота замість цих: заняття, план, нагадування, вікна, паузи, тихі години, шаблони. */
+async function applyRestore(data) {
+  const synced = ['slots', 'pauses', 'quiet', 'templates'];
+  const meta = state.meta.filter((m) => !synced.includes(m.id));
+  if (data.slots?.weekday && data.slots?.weekend) meta.push({ ...data.slots, id: 'slots' });
+  meta.push({ id: 'pauses', list: data.pauses ?? [] });
+  if (data.quiet) meta.push({ ...data.quiet, id: 'quiet' });
+  meta.push({ id: 'templates', list: data.templates ?? [] });
+  await replaceAll({ activities: data.activities ?? [], plan: data.items ?? [], reminders: data.reminders ?? [], meta, tombstones: [] });
+  Object.assign(state, await loadAll());
+  slotsCfg = state.meta.find((m) => m.id === 'slots') ?? structuredClone(M.DEFAULT_SLOTS);
+  markRestored(data.now);
+  holdSync(false);
+  toast('Дані взято з бота');
+  render();
+}
+
+/** Підключення, а в боті вже є дані: узяти їх сюди чи залишити ці. Закрили, не обравши, — бота не підключаємо. */
+function chooseBotData(data) {
+  let chosen = false;
+  const pick = (fn) => async () => { chosen = true; closeSheet(); await fn(); };
+  sheet('У боті вже є дані', h('div', { class: 'sheet-body' },
+    h('p', {}, restoreCounts(data)),
+    h('p', { class: 'muted small' }, 'Новий телефон — бери з бота. Якщо ж правильні дані тут, бот отримає їх (заняття, вікна й паузи в боті заміняться).'),
+    h('div', { class: 'btn-grid' },
+      button('refresh', 'Взяти з бота', 'primary', pick(() => applyRestore(data))),
+      button('check', 'Залишити ці', '', pick(async () => {
+        holdSync(false);
+        await connectSync($('sync-status') ?? h('p'));
+        render();
+      })))), {
+    onClose: () => {
+      if (chosen) return;
+      setBotConfig(null, null);
+      holdSync(false);
+      toast('Бота не підключено — дані не чіпали');
+      render();
+    },
+  });
+}
+
+/** «Відновити з бота» на вже підключеному телефоні. */
+function confirmRestore(data) {
+  holdSync(true);
+  let chosen = false;
+  sheet('Відновити з бота?', h('div', { class: 'sheet-body' },
+    h('p', {}, restoreCounts(data)),
+    h('p', { class: 'muted small' }, 'Заняття, план і нагадування на цьому телефоні заміняться тими, що в боті. Зроби спершу резервну копію, якщо сумніваєшся.'),
+    h('div', { class: 'btn-grid' },
+      button('refresh', 'Відновити', 'danger', async () => { chosen = true; closeSheet(); await applyRestore(data); }),
+      button('undo', 'Скасувати', '', () => closeSheet()))), {
+    onClose: () => { if (!chosen) holdSync(false); },
+  });
+}
+
+/** Тихі години: бот нічого не пише, що настало — прийде після них. */
+function quietBlock() {
+  const q = { on: false, from: '23:00', to: '07:00', ...state.meta.find((m) => m.id === 'quiet'), id: 'quiet' };
+  const store = () => save({ meta: { put: [{ ...q }] } }, { render: false });
+  const times = h('div', { class: 'date-pair' },
+    h('label', {}, 'з', timeField({ value: q.from, label: 'Тихі години з', onChange: (v) => { q.from = v; store(); } })),
+    h('label', {}, 'до', timeField({ value: q.to, label: 'Тихі години до', onChange: (v) => { q.to = v; store(); } })));
+  times.hidden = !q.on;
+  return h('div', { class: 'form' },
+    h('span', { class: 'flabel' }, 'Тихі години'),
+    chips([['off', 'Вимкнено'], ['on', 'Увімкнено']], q.on ? 'on' : 'off', (v) => { q.on = v === 'on'; times.hidden = !q.on; store(); }),
+    times,
+    h('p', { class: 'muted small' }, 'У цей час бот мовчить — і про вікна, і «Не забудь», і вагу. Що настало, прийде одним повідомленням після них.'));
+}
+
 function botSection() {
   const cfg = botConfig();
   const url = h('input', { type: 'url', id: 'f-bot-url', value: cfg.url || BOT_WORKER, inputmode: 'url', autocomplete: 'off', spellcheck: 'false' });
@@ -1342,17 +1542,40 @@ function botSection() {
     h('div', { class: 'btn-grid' },
       button('check', 'Зберегти й синхронізувати', 'primary', async () => {
         if (!url.value.trim().startsWith('https://') || !key.value.trim()) { toast('Потрібні адреса (https://…) і ключ'); return; }
+        // Спершу дивимось, що вже є в боті: на новому телефоні перший обмін інакше затер би там заняття
+        holdSync(true);
         setBotConfig(url.value, key.value);
-        status.textContent = 'Синхронізую…';
-        const res = await syncNow();
-        status.textContent = syncStatusText(res);
-        toast(res.ok ? 'Бот підключено' : res.error);
+        status.textContent = 'Перевіряю бота…';
+        let data;
+        try {
+          data = await fetchRestore();
+        } catch (err) {
+          holdSync(false);
+          status.textContent = err.message;
+          toast(err.message);
+          return;
+        }
+        if (data.activities?.length || data.items?.length) {
+          status.textContent = '';
+          chooseBotData(data);
+          return;
+        }
+        holdSync(false);
+        await connectSync(status);
       }),
+      cfg.key ? button('refresh', 'Відновити з бота', '', async () => {
+        try {
+          confirmRestore(await fetchRestore());
+        } catch (err) {
+          toast(err.message);
+        }
+      }) : null,
       cfg.key ? button('skip', 'Від’єднати бота', '', () => {
         setBotConfig(null, null);
         toast('Бота від’єднано: нагадування для нових справ не прийдуть');
         render();
-      }) : null)), { def: !cfg.key, cls: 'card' });
+      }) : null),
+    cfg.key ? quietBlock() : null), { def: !cfg.key, cls: 'card' });
 }
 
 function viewSettings() {
@@ -1364,7 +1587,9 @@ function viewSettings() {
     h('section', { class: 'card' }, h('h2', {}, 'Тема'),
       chips(THEMES, themePref(), (v) => { remember('theme', v); applyTheme(); })),
     folded('set-slots', h('h2', {}, 'Вікна дня й вихідні'),
-      h('div', { class: 'fold-body' }, weekendPicker(), slotEditor('weekday', 'Будні'), slotEditor('weekend', 'Вихідні')),
+      h('div', { class: 'fold-body' }, weekendPicker(), slotEditor('weekday', 'Будні'), slotEditor('weekend', 'Вихідні'),
+        h('p', { class: 'muted small' }, 'Стандартні: будні — ранок 7–12, обід 12–18, вечір 18–22; вихідні — ранок 9–12, день 12–18, вечір 18–22.'),
+        button('refresh', 'Стандартні вікна', 'ghost', resetSlots)),
       { def: false, persist: true, cls: 'card' }),
     folded('set-backup', h('h2', {}, 'Резервна копія'), h('div', { class: 'fold-body' },
       h('p', { class: 'muted small' }, 'Дані живуть лише в цьому браузері. Копія — файл JSON, його можна відновити на іншому пристрої.'),
@@ -1568,6 +1793,12 @@ async function init() {
     }
   }, 1000);
   route();
+  // Ярлик «Є кілька хвилин?» з іконки застосунку: одразу шторка, а ?quick прибираємо, щоб не відкрилась знову
+  const params = new URLSearchParams(location.search);
+  if (params.has('quick')) {
+    history.replaceState(history.state, '', `${location.pathname}${location.hash}`);
+    quickSheet();
+  }
 }
 
 init();
