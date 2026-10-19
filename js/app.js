@@ -145,6 +145,46 @@ function slotName(slot) {
 
 /** «19:30» → хвилини від півночі; 23:59 — кінець доби, щоб вечір не був на хвилину коротшим. */
 const hmMin = (hm) => (hm === '23:59' ? 1440 : Number(hm.slice(0, 2)) * 60 + Number(hm.slice(3, 5)));
+
+/** Заголовок вікна; у вікні, що йде зараз, під ним — смужка: скільки вікна вже минуло. Оновлюється зі зміною хвилини. */
+function slotHead(row, slot, date, today, now) {
+  if (date !== today || now < slot.from || now >= slot.to) return row;
+  const from = hmMin(slot.from);
+  const span = Math.max(1, hmMin(slot.to) - from);
+  const share = Math.min(1, Math.max(0, (hmMin(now) - from) / span));
+  const label = `Минуло ${Math.round(share * 100)} % вікна, лишилось ${M.duration((span - (hmMin(now) - from)) * 60)}`;
+  return h('span', { class: 'slot-head-box' }, row,
+    h('span', { class: 'slot-progress', role: 'img', 'aria-label': label, title: label },
+      h('span', { style: { width: `${(share * 100).toFixed(1)}%` } })));
+}
+
+/** Ціль тижня поділками: зроблені — кольором заняття; понад ціль — «+N». Ціль понад 14 — суцільною смужкою. */
+function goalSegs(cnt, goal, cls = '') {
+  if (!(goal > 0)) return null;
+  const label = `Цього тижня ${cnt} з ${goal}`;
+  if (goal > 14) {
+    return h('span', { class: `bar segs-bar ${cls}`, role: 'img', 'aria-label': label, title: label },
+      h('span', { style: { width: `${Math.min(100, (cnt / goal) * 100)}%` } }));
+  }
+  return h('span', { class: `segs ${cls}`, role: 'img', 'aria-label': label, title: label },
+    Array.from({ length: goal }, (_, i) => h('span', { class: i < cnt ? 'on' : '' })),
+    cnt > goal ? h('b', {}, `+${cnt - goal}`) : null);
+}
+
+/** Новий рівень: картка з іконкою заняття посередині екрана й конфеті, на пів секунди довше вібрація. */
+function celebrate(a, level) {
+  vibrate([40, 60, 40, 60, 120]);
+  const colors = ['var(--c)', 'var(--c-orange)', 'var(--c-amber)', 'var(--c-green)', 'var(--c-blue)', 'var(--c-pink)'];
+  const bits = Array.from({ length: 18 }, (_, i) => h('span', {
+    class: 'confetti',
+    style: { '--a': `${i * 20 + Math.round(Math.random() * 12)}deg`, '--d': `${90 + Math.round(Math.random() * 70)}px`, background: colors[i % colors.length] },
+  }));
+  const box = h('div', { class: 'level-up', style: actStyle(a), role: 'status' },
+    h('div', { class: 'level-up-card' }, ...bits, tile(a),
+      h('div', { class: 'level-up-num' }, `Рівень ${level}`), h('div', { class: 'level-up-name' }, a.name)));
+  document.body.append(box);
+  setTimeout(() => box.remove(), 2200);
+}
 /** Звичний час справ за налаштуваннями занять. */
 const planMin = (items) => items.reduce((s, p) => s + ((act(p.activityId) ?? MISSING).minutes || 0), 0);
 const minText = (m) => M.duration(m * 60);
@@ -192,6 +232,7 @@ async function mark(item, status) {
   if (status === 'planned') return;
   const a = act(item.activityId) ?? MISSING;
   const level = levelNow(item.activityId);
+  if (level > levelBefore) celebrate(a, level);
   toast(level > levelBefore ? `🎉 ${a.name} — рівень ${level}!` : `${a.name}: ${M.STATUS[status].toLowerCase()}`,
     { label: 'Скасувати', run: () => save({ plan: { put: [prev] } }) });
 }
@@ -209,12 +250,22 @@ async function pauseTimer(item) {
   await save({ plan: { put: [{ ...item, spent: M.elapsed(item), runningSince: null }] } });
 }
 
+/** Частка звичних хвилин заняття, що вже минула: 0…1; хвилин не задано — null. */
+function timerShare(item) {
+  const min = act(item.activityId)?.minutes;
+  return min ? Math.min(1, M.elapsed(item) / (min * 60)) : null;
+}
+
+/** Кнопка таймера; якщо в занятті задано хвилини — з кільцем: повне коло — ці хвилини, кольором — скільки минуло. */
 function timerButton(item) {
   const running = Boolean(item.runningSince);
+  const share = timerShare(item);
   return h('button', {
-    type: 'button', class: `timer-btn${running ? ' on' : ''}`, 'aria-label': running ? 'Пауза' : 'Почати',
+    type: 'button', class: `timer-btn${running ? ' on' : ''}${share === null ? '' : ' ring'}`,
+    'aria-label': running ? 'Пауза' : 'Почати', 'data-ring': share === null ? null : item.id,
+    style: share === null ? null : { '--p': share.toFixed(4) },
     onClick: () => (running ? pauseTimer(item) : startTimer(item)),
-  }, icon(running ? 'pause' : 'play'));
+  }, share === null ? icon(running ? 'pause' : 'play') : h('span', { class: 'timer-core' }, icon(running ? 'pause' : 'play')));
 }
 
 /**
@@ -385,8 +436,8 @@ function slotGroup(date, slot, today, now) {
   const isNow = date === today && now >= slot.from && now < slot.to;
   const ended = date < today || (date === today && now >= slot.to);
   const hasOpen = items.some((p) => isOpen(M.shownStatus(p, slot, today, now)));
-  const head = h('span', { class: 'slot-head' },
-    slotName(slot), dots(items), slotBadge(items, slot, date, today, now, isNow));
+  const head = slotHead(h('span', { class: 'slot-head' },
+    slotName(slot), dots(items), slotBadge(items, slot, date, today, now, isNow)), slot, date, today, now);
   const body = h('div', { class: 'slot-items' },
     slotLoad(items.filter((p) => isOpen(M.shownStatus(p, slot, today, now))), slot, date, today, now),
     items.map((p) => itemCard(p, slot, date, today, now)),
@@ -769,8 +820,8 @@ function planItemRow(item, slot, today, now) {
 function planSlot(date, slot, wk, today, now) {
   const items = itemsAt(date, slot.id);
   const ended = date < today || (date === today && now >= slot.to);
-  const head = h('span', { class: 'slot-head' }, slotName(slot), dots(items),
-    badge(items.length ? 'planned' : 'free', items.length ? loadText(items) : 'Вільно'));
+  const head = slotHead(h('span', { class: 'slot-head' }, slotName(slot), dots(items),
+    badge(items.length ? 'planned' : 'free', items.length ? loadText(items) : 'Вільно')), slot, date, today, now);
   // Першими — де за історією виходить; де майже не виходить — нижче за звичайні
   const ranked = activeActs()
     .map((a) => {
@@ -793,8 +844,8 @@ function planSlot(date, slot, wk, today, now) {
       onClick: () => togglePick(date, slot.id, a),
     },
     h('span', { class: 'pick-name' }, h('span', { class: 'dot', 'aria-hidden': 'true' }), a.name),
-    h('span', { class: 'pick-why' }, [a.minutes ? `~${minText(a.minutes)}` : '', `${cnt}/${goal}`, fit, miss ? 'був пропуск' : '']
-      .filter(Boolean).join(' · '))));
+    h('span', { class: 'pick-why' }, goalSegs(cnt, goal, 'mini'),
+      [a.minutes ? `~${minText(a.minutes)}` : '', fit, miss ? 'був пропуск' : ''].filter(Boolean).join(' · '))));
   }
   const body = h('div', { class: 'plan-body' },
     slotLoad(items, slot, date, today, now),
@@ -1459,6 +1510,15 @@ function levelLine(a) {
     h('span', { class: 'muted small' }, `${have}/${need}`));
 }
 
+/** Цей тиждень поділками: скільки зараховано з цілі. */
+function weekGoalLine(a) {
+  const wk = M.weekStart(M.ymd());
+  const cnt = M.weekCount(state.plan, a.id, wk);
+  const goal = target(a, wk);
+  const segs = goalSegs(cnt, goal);
+  return segs ? h('span', { class: 'goal-line' }, segs, h('span', { class: 'muted small' }, `${cnt}/${goal} цього тижня`)) : null;
+}
+
 /** «Коли реально виходить»: найкраще вікно й вікна, де не виходить, — за останні 8 тижнів. */
 function fitLine(a) {
   const adv = a.archived ? null : slotAdvice(a.id);
@@ -1471,7 +1531,7 @@ function fitLine(a) {
   return h('span', { class: 'repeat-line' }, icon('target'), text);
 }
 
-function actCard(a) {
+function actCard(a, heat = heatIndex()) {
   const where = (a.slots ?? []).map((id) => slotsCfg.weekday.find((s) => s.id === id)?.label).filter(Boolean).join(', ');
   const meta = [`${a.weeklyTarget} ${plural(a.weeklyTarget, 'раз', 'рази', 'разів')}/тиждень`, a.minutes ? `~${a.minutes} хв` : '', where].filter(Boolean).join(' · ');
   return h('button', { type: 'button', class: `card act-card${a.archived ? ' archived' : ''}`, style: actStyle(a), onClick: () => editActivity(a) },
@@ -1480,20 +1540,127 @@ function actCard(a) {
       h('span', { class: 'act-name' }, a.name),
       h('span', { class: 'act-sub' }, meta),
       a.minVersion ? h('span', { class: 'muted small' }, `Мінімум: ${a.minVersion}`) : null,
+      a.archived ? null : weekGoalLine(a),
       M.repeatOn(a) ? h('span', { class: 'repeat-line' }, icon('refresh'), repeatText(a)) : null,
       fitLine(a),
       a.archived ? null : weekStreakBadge(a),
-      levelLine(a)));
+      levelLine(a),
+      heatMap(a, heat)));
+}
+
+// ---------- теплова карта заняття ----------
+
+const HEAT_WEEKS = 12;
+
+/** Бали по днях за останні 12 тижнів: { [заняття]: { [дата]: бали } }; повна справа — 2, мінімум — 1. Один прохід по плану на всі картки. */
+function heatIndex() {
+  const from = M.addDays(M.weekStart(M.ymd()), -7 * (HEAT_WEEKS - 1));
+  const by = {};
+  for (const p of state.plan) {
+    if (p.date < from || !M.counts(p.status)) continue;
+    const days = (by[p.activityId] ??= {});
+    days[p.date] = (days[p.date] ?? 0) + (p.status === 'done' ? 2 : 1);
+  }
+  return { from, by };
+}
+
+/** Квадратики як у GitHub: стовпчик — тиждень (пн згори), що яскравіше — то більше зроблено; дні паузи — штрихом. */
+function heatMap(a, heat) {
+  const days = heat.by[a.id] ?? {};
+  const today = M.ymd();
+  const grid = h('span', { class: 'heat', role: 'img' });
+  let active = 0;
+  for (let i = 0; i < HEAT_WEEKS * 7; i++) {
+    const date = M.addDays(heat.from, i);
+    const score = days[date] ?? 0;
+    if (score) active += 1;
+    const lvl = date > today ? 'future' : score >= 4 ? 'l3' : score >= 2 ? 'l2' : score ? 'l1' : M.pauseOn(date, pauses()) ? 'pause' : 'l0';
+    grid.append(h('span', { class: lvl, title: date > today ? null : `${M.dayMonth(date)}: ${score ? `${Math.floor(score / 2)} повн., ${score % 2} мін.` : 'нічого'}` }));
+  }
+  grid.setAttribute('aria-label', `За ${HEAT_WEEKS} тижнів — ${active} ${plural(active, 'день', 'дні', 'днів')} із заняттям`);
+  return grid;
+}
+
+// ---------- порядок занять перетягуванням ----------
+
+/** Тягнеш за ручку ⋮⋮ — картка їде за пальцем, решта розступається; відпустив — новий порядок для «Плану» й бота. */
+function startDrag(e, wrap) {
+  if (e.button !== 0) return;
+  // Не віддаємо рух свайпу між вкладками
+  e.preventDefault();
+  e.stopPropagation();
+  const handle = e.currentTarget;
+  handle.setPointerCapture(e.pointerId);
+  const rows = [...wrap.parentElement.querySelectorAll(':scope > .act-wrap')];
+  const from = rows.indexOf(wrap);
+  const scroll0 = window.scrollY;
+  const rects = rows.map((r) => { const b = r.getBoundingClientRect(); return { top: b.top + scroll0, h: b.height }; });
+  const step = rows.length > 1 ? rects[1].top - rects[0].top - rects[0].h + rects[from].h : rects[from].h;
+  const y0 = e.clientY + scroll0;
+  let to = from;
+  wrap.classList.add('dragging');
+  vibrate(15);
+  const move = (ev) => {
+    if (ev.clientY < 70) window.scrollBy(0, -12);
+    else if (ev.clientY > innerHeight - 110) window.scrollBy(0, 12);
+    const dy = ev.clientY + window.scrollY - y0;
+    wrap.style.transform = `translateY(${dy}px)`;
+    const center = rects[from].top + rects[from].h / 2 + dy;
+    to = rects.filter((r, i) => i !== from && r.top + r.h / 2 < center).length;
+    rows.forEach((r, i) => {
+      if (i === from) return;
+      const shift = from < to && i > from && i <= to ? -step : to < from && i >= to && i < from ? step : 0;
+      r.style.transform = shift ? `translateY(${shift}px)` : '';
+    });
+  };
+  const end = async (ev) => {
+    handle.removeEventListener('pointermove', move);
+    handle.removeEventListener('pointerup', end);
+    handle.removeEventListener('pointercancel', end);
+    for (const r of rows) r.style.transform = '';
+    wrap.classList.remove('dragging');
+    if (ev.type === 'pointercancel' || to === from) return;
+    await moveAct(wrap.dataset.id, to);
+  };
+  handle.addEventListener('pointermove', move);
+  handle.addEventListener('pointerup', end);
+  handle.addEventListener('pointercancel', end);
+}
+
+/** Заняття на місце index серед активних; order — підряд, зберігаємо лише змінені. */
+async function moveAct(id, index) {
+  const list = activeActs();
+  const from = list.findIndex((a) => a.id === id);
+  if (from < 0 || index === from) return;
+  const [a] = list.splice(from, 1);
+  list.splice(index, 0, a);
+  const put = list.map((x, i) => ({ x, i })).filter(({ x, i }) => x.order !== i).map(({ x, i }) => ({ ...x, order: i }));
+  if (put.length) await save({ activities: { put } });
+}
+
+function actRow(a, heat) {
+  const wrap = h('div', { class: 'act-wrap', 'data-id': a.id }, actCard(a, heat));
+  wrap.append(h('button', {
+    type: 'button', class: 'drag-handle', 'aria-label': `Перетягнути «${a.name}» (стрілки вгору/вниз)`,
+    onPointerdown: (e) => startDrag(e, wrap),
+    onKeydown: (e) => {
+      const i = activeActs().findIndex((x) => x.id === a.id);
+      if (e.key === 'ArrowUp' && i > 0) { e.preventDefault(); moveAct(a.id, i - 1); }
+      if (e.key === 'ArrowDown') { e.preventDefault(); moveAct(a.id, i + 1); }
+    },
+  }, icon('grip')));
+  return wrap;
 }
 
 function viewActs() {
   const archived = state.activities.filter((a) => a.archived).sort((a, b) => a.order - b.order);
+  const heat = heatIndex();
   return h('div', { class: 'stack' },
-    h('p', { class: 'muted small lead' }, 'Натисни на заняття, щоб змінити ціль, вікна чи мінімальну версію. «+» — нове. Рівень росте від зарахованих справ: повна — 10 досвіду, мінімум — 5, плюс 1 за кожні 10 хв таймера.'),
-    ...activeActs().map(actCard),
+    h('p', { class: 'muted small lead' }, 'Натисни на заняття, щоб змінити ціль, вікна чи мінімальну версію. «+» — нове. Порядок — тягни за ⋮⋮ праворуч. Рівень росте від зарахованих справ: повна — 10 досвіду, мінімум — 5, плюс 1 за кожні 10 хв таймера.'),
+    h('div', { class: 'stack act-list' }, activeActs().map((a) => actRow(a, heat))),
     archived.length
       ? folded('acts-archive', h('h2', { class: 'section-title' }, `Архів · ${archived.length}`),
-        h('div', { class: 'stack' }, archived.map(actCard)), { def: false, persist: true, cls: 'plain-fold' })
+        h('div', { class: 'stack' }, archived.map((a) => actCard(a, heat))), { def: false, persist: true, cls: 'plain-fold' })
       : null,
     remindersSection());
 }
@@ -2041,6 +2208,10 @@ async function init() {
     for (const el of document.querySelectorAll('[data-timer]')) {
       const item = state.plan.find((p) => p.id === el.dataset.timer);
       if (item?.runningSince) el.textContent = M.clock(M.elapsed(item));
+    }
+    for (const el of document.querySelectorAll('[data-ring]')) {
+      const item = state.plan.find((p) => p.id === el.dataset.ring);
+      if (item?.runningSince) el.style.setProperty('--p', timerShare(item).toFixed(4));
     }
     timerGoals();
   }, 1000);
