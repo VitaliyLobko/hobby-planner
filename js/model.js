@@ -96,7 +96,7 @@ export const DEFAULT_SLOTS = {
   weekend: [
     { id: 'm', label: 'Ранок', from: '09:00', to: '12:00' },
     { id: 'n', label: 'День', from: '12:00', to: '18:00' },
-    { id: 'e', label: 'Вечір', from: '18:00', to: '22:00' },
+    { id: 'e', label: 'Вечір', from: '18:00', to: '21:00' },
   ],
 };
 
@@ -413,6 +413,44 @@ export function levelOf(xp) {
     need += 20;
   }
   return { level, have, need };
+}
+
+// «Коли реально виходить»: за останні FIT_DAYS днів по вікнах — скільки разів заняття там зараховано з усіх закритих.
+// Перенесене з вікна — там не вийшло. Висновок — лише від FIT_MIN закритих разів у вікні.
+// Те саме рахує бот (slotFit у worker.js) — правити разом.
+export const FIT_DAYS = 56;
+export const FIT_MIN = 3;
+const FIT_GOOD = 0.6;
+const FIT_BAD = 0.4;
+
+/** { m: { ok, all }, n: …, e: … } — по вікнах, де заняття бувало. */
+export function slotFit(plan, activityId, slotsCfg, today, now, pauses = []) {
+  const from = addDays(today, -FIT_DAYS);
+  const by = {};
+  for (const p of plan) {
+    if (p.activityId !== activityId || p.date < from || p.date > today || pauseOn(p.date, pauses)) continue;
+    const slot = slotsFor(p.date, slotsCfg).find((s) => s.id === p.slot);
+    const st = shownStatus(p, slot, today, now);
+    if (st === 'planned' || st === 'active') continue;
+    const b = (by[p.slot] ??= { ok: 0, all: 0 });
+    b.all += 1;
+    if (counts(st)) b.ok += 1;
+  }
+  return by;
+}
+
+/**
+ * Висновок по вікнах: best — де виходить найчастіше (від 60 %), bad — вікна, де майже не виходить (до 40 %).
+ * Даних замало — null.
+ */
+export function slotAdvice(fit) {
+  const known = Object.entries(fit).filter(([, b]) => b.all >= FIT_MIN)
+    .map(([slot, b]) => ({ slot, ...b, rate: b.ok / b.all }))
+    .sort((x, y) => y.rate - x.rate || y.all - x.all);
+  if (!known.length) return null;
+  const best = known[0].rate >= FIT_GOOD ? known[0] : null;
+  const bad = known.filter((x) => x.rate <= FIT_BAD && x !== best);
+  return best || bad.length ? { best, bad } : null;
 }
 
 /**

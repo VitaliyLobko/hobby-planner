@@ -286,6 +286,10 @@ a { color: var(--accent); }
 .plan-done { display: flex; justify-content: flex-end; }
 
 .copy-btn { align-self: stretch; border: 1.5px dashed var(--line-strong); background: transparent; }
+.drive-block { display: grid; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.drive-block p { margin: 0; }
+.plan-tools { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 8px; }
+.plan-tools .btn { min-width: 0; padding-inline: 8px; white-space: normal; line-height: 1.2; text-align: center; }
 
 /* «Є кілька хвилин»: кнопка на «Сьогодні» і картки ідей у шторці */
 .quick-btn { align-self: stretch; }
@@ -457,9 +461,21 @@ input[type="text"], input[type="search"], input[type="number"], input[type="time
 .swatch { width: 40px; height: 40px; border-radius: 10px; border: 0; background: var(--c); }
 .swatch[aria-pressed="true"] { outline: 3px solid var(--text); outline-offset: 2px; }
 /* «Свій колір»: веселка, поки не обрано; далі — сам колір */
-.own-swatch { position: relative; background: conic-gradient(#e77566, #e0b24a, #72bd62, #4cc6b1, #6b9ff0, #ad8ce6, #e67bb3, #e77566); }
-.own-swatch.picked { background: var(--c); }
-.own-input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; pointer-events: none; border: 0; padding: 0; }
+/* «Свій колір»: смуга відтінків і п'ять тонів обраного */
+.color-picker { display: grid; gap: 8px; }
+.color-picker .flabel { margin: 4px 0 0; }
+.hue-strip {
+  position: relative; height: 36px; border-radius: 10px; cursor: pointer; touch-action: none;
+  background: linear-gradient(to right, hsl(0, 70%, 55%), hsl(60, 70%, 55%), hsl(120, 70%, 55%), hsl(180, 70%, 55%),
+    hsl(240, 70%, 55%), hsl(300, 70%, 55%), hsl(359, 70%, 55%));
+}
+.hue-strip:focus-visible { outline: 3px solid var(--text); outline-offset: 2px; }
+.hue-knob {
+  position: absolute; top: -5px; bottom: -5px; width: 16px; margin-left: -8px; border-radius: 9px;
+  background: var(--c); border: 3px solid #fff; box-shadow: 0 0 0 1px rgb(0 0 0 / .45); pointer-events: none;
+}
+.tone-row { flex-wrap: nowrap; }
+.tone-row .swatch { flex: 1; min-width: 0; height: 44px; }
 .icon-opt {
   width: 44px; height: 44px; border-radius: 10px; border: 1.5px solid transparent;
   background: var(--surface-2); display: inline-flex; align-items: center; justify-content: center;

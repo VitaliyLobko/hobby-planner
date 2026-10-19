@@ -107,15 +107,18 @@ export async function syncNow() {
     const reminders = (state.reminders ?? []).filter((r) => (r.updated || 0) > pushed);
     const reminderDeletes = graves('reminders');
     const slots = state.meta.find((m) => m.id === 'slots');
-    // Паузи — щоразу цілком: їх кілька, а бот має знати, коли мовчати
-    const pauses = state.meta.find((m) => m.id === 'pauses')?.list ?? [];
+    // Паузи — щоразу цілком: їх кілька, а бот має знати, коли мовчати. pausesAt — коли змінені тут:
+    // паузу ставлять і в боті (/pause), лишається новіший список
+    const pauseMeta = state.meta.find((m) => m.id === 'pauses');
+    const pauses = pauseMeta?.list ?? [];
+    const pausesAt = pauseMeta?.updated ?? 0;
     // Тихі години — теж щоразу: бот перевіряє їх щохвилини
     const quiet = state.meta.find((m) => m.id === 'quiet') ?? { on: false };
     const templates = state.meta.find((m) => m.id === 'templates')?.list ?? [];
     const data = await call('/api/sync', {
-      since: Number(get(KEYS.since) || 0), items, deletes, activities: state.activities, slots, pauses, quiet, templates, reminders, reminderDeletes,
+      since: Number(get(KEYS.since) || 0), items, deletes, activities: state.activities, slots, pauses, pausesAt, quiet, templates, reminders, reminderDeletes,
     });
-    await hooks.apply(data.items ?? [], data.deleted ?? [], data.reminders ?? [], data.reminderDeleted ?? []);
+    await hooks.apply(data.items ?? [], data.deleted ?? [], data.reminders ?? [], data.reminderDeleted ?? [], data.pauses ?? null);
     set(KEYS.pushed, startedAt);
     set(KEYS.since, data.now);
     set(KEYS.last, Date.now());

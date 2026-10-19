@@ -3,6 +3,7 @@ import { loadAll, write, uid, replaceAll } from './db.js';
 import * as M from './model.js';
 import { $, h, icon, toast, sheet, closeSheet, chips, swipeable, swipeStep, fold, timeField, vibrate } from './ui.js';
 import { initSync, syncNow, scheduleSync, botConfig, setBotConfig, lastSync, holdSync, fetchRestore, markRestored } from './sync.js';
+import * as Drive from './drive.js';
 
 const state = { activities: [], plan: [], meta: [], reminders: [], tombstones: [] };
 let slotsCfg = structuredClone(M.DEFAULT_SLOTS);
@@ -43,12 +44,15 @@ const MISSING = { name: 'Видалене заняття', color: 'blue', icon: 
 const pauses = () => state.meta.find((m) => m.id === 'pauses')?.list ?? [];
 const target = (a, start) => M.weekTarget(a, start, pauses());
 const missedLast = (id, before, today, now) => M.missedLastTime(state.plan, id, before, slotsCfg, today, now, pauses());
+const slotAdvice = (id, today = M.ymd(), now = M.nowHm()) => M.slotAdvice(M.slotFit(state.plan, id, slotsCfg, today, now, pauses()));
 
 /**
  * Записує зміни й одразу відбиває їх у state; render: false — коли перемальовка зірвала б введення.
  * remote — зміни, що приїхали з бота: зберігаємо їхній updated і не шлемо назад.
  */
 async function save(changes, { render: redraw = true, remote = false } = {}) {
+  // Копія на Диск раз на тиждень — з цього натискання, поки браузер ще пускає вікно Google; дані бере пізніше, вже нові
+  if (!remote) driveTick(true);
   await write(changes, { keep: remote });
   for (const [name, { put = [], del = [] }] of Object.entries(changes)) {
     const ids = new Set([...del, ...put.map((x) => x.id)]);
@@ -80,7 +84,7 @@ async function runRepeats({ render: redraw = false } = {}) {
 }
 
 /** Відмітки з бота: беремо лише новіші за наші. */
-async function applyRemote(items, deleted, reminders = [], reminderDeleted = []) {
+async function applyRemote(items, deleted, reminders = [], reminderDeleted = [], botPauses = null) {
   const newer = (store) => (r) => {
     const mine = state[store].find((p) => p.id === r.id);
     return !mine || (r.updated || 0) > (mine.updated || 0);
@@ -92,6 +96,11 @@ async function applyRemote(items, deleted, reminders = [], reminderDeleted = [])
   const rPut = reminders.filter(newer('reminders'));
   const rDel = reminderDeleted.filter((id) => state.reminders.some((r) => r.id === id));
   if (rPut.length || rDel.length) changes.reminders = { put: rPut, del: rDel };
+  // Паузу поставили чи завершили в боті (/pause, /resume) — його список новіший за наш
+  const mine = state.meta.find((m) => m.id === 'pauses');
+  if (Array.isArray(botPauses?.list) && botPauses.at > (mine?.updated || 0)) {
+    changes.meta = { put: [{ id: 'pauses', list: botPauses.list, updated: botPauses.at }] };
+  }
   if (!Object.keys(changes).length) return;
   // Шторка відкрита чи щось вводять — дані зберігаємо, а перемалюємо з наступним тіком годинника
   const busy = $('layer').childElementCount || document.activeElement?.matches('input, textarea');
@@ -762,21 +771,29 @@ function planSlot(date, slot, wk, today, now) {
   const ended = date < today || (date === today && now >= slot.to);
   const head = h('span', { class: 'slot-head' }, slotName(slot), dots(items),
     badge(items.length ? 'planned' : 'free', items.length ? loadText(items) : 'Вільно'));
+  // Першими — де за історією виходить; де майже не виходить — нижче за звичайні
   const ranked = activeActs()
-    .map((a) => ({ a, cnt: M.weekCount(state.plan, a.id, wk), goal: target(a, wk), pref: a.slots?.includes(slot.id) ? 1 : 0 }))
+    .map((a) => {
+      const adv = slotAdvice(a.id, today, now);
+      const best = adv?.best?.slot === slot.id ? adv.best : null;
+      const bad = adv?.bad.find((x) => x.slot === slot.id) ?? null;
+      const pref = (best ? 2 : 0) + (a.slots?.includes(slot.id) ? 1 : 0) - (bad ? 2 : 0);
+      return { a, cnt: M.weekCount(state.plan, a.id, wk), goal: target(a, wk), pref, best, bad };
+    })
     .sort((x, y) => (y.pref - x.pref)
       || (x.cnt / Math.max(1, x.goal) - y.cnt / Math.max(1, y.goal))
       || (x.a.order - y.a.order));
   const row = h('div', { class: 'pick-row', role: 'group', 'aria-label': `Заняття у вікно ${slot.label}` });
-  for (const { a, cnt, goal } of ranked) {
+  for (const { a, cnt, goal, best, bad } of ranked) {
     const on = items.some((p) => p.activityId === a.id);
     const miss = missedLast(a.id, date, today, now);
+    const fit = best ? `тут виходить ${best.ok}/${best.all}` : bad ? `тут не виходить ${bad.ok}/${bad.all}` : '';
     row.append(h('button', {
       type: 'button', class: `pick${on ? ' on' : ''}`, 'aria-pressed': String(on), style: actStyle(a),
       onClick: () => togglePick(date, slot.id, a),
     },
     h('span', { class: 'pick-name' }, h('span', { class: 'dot', 'aria-hidden': 'true' }), a.name),
-    h('span', { class: 'pick-why' }, [a.minutes ? `~${minText(a.minutes)}` : '', `${cnt}/${goal}`, miss ? 'був пропуск' : '']
+    h('span', { class: 'pick-why' }, [a.minutes ? `~${minText(a.minutes)}` : '', `${cnt}/${goal}`, fit, miss ? 'був пропуск' : '']
       .filter(Boolean).join(' · '))));
   }
   const body = h('div', { class: 'plan-body' },
@@ -931,6 +948,12 @@ function templateSheet(date) {
   sheet('Шаблони дня', body);
 }
 
+/** «Як минулого понеділка» і «Шаблони дня» — в один рядок, щоб вікна плану були вище. */
+function planTools(date, today) {
+  const buttons = [copyDayButton(date, today), templateButton(date)].filter(Boolean);
+  return buttons.length ? h('div', { class: 'plan-tools' }, buttons) : null;
+}
+
 function templateButton(date) {
   if (!templates().length && !dayShape(date).length) return null;
   return button('template', 'Шаблони дня', 'copy-btn', () => templateSheet(date));
@@ -964,12 +987,10 @@ function viewPlan() {
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Наступний день', onClick: () => shiftPlan(1) }, icon('next'))),
     h('p', { class: 'muted small lead' }, 'Тап по заняттю — додати у вікно, ще раз — прибрати; у вікні може бути кілька справ. Спершу — звичні для вікна, далі — ті, що відстають від тижневої цілі.'),
     pausedNote(date),
-    copyDayButton(date, today),
-    templateButton(date),
+    planTools(date, today),
     ...slots.map((slot) => planSlot(date, slot, wk, today, now)),
     h('div', { class: 'plan-sum' },
-      h('b', {}, `${countText(items.length)}${minutes ? ` · ~${minText(minutes)}` : ''}`),
-      date === today ? h('a', { class: 'btn primary', href: '#today' }, 'Готово') : null));
+      h('b', {}, `${countText(items.length)}${minutes ? ` · ~${minText(minutes)}` : ''}`)));
   swipeStep(root, shiftPlan);
   return root;
 }
@@ -1177,27 +1198,86 @@ function optionRow(values, current, draw, onPick, label) {
   return row;
 }
 
-/** Готові кольори веселкою й останнім — «Свій» (системна палітра, будь-який #rrggbb). */
+// Свій колір: відтінок зі смуги й один із п'яти тонів — від світлого до темного (насиченість спільна)
+const OWN_SAT = 62;
+const OWN_TONES = [78, 66, 56, 46, 36];
+const OWN_TONE_NAMES = ['Найсвітліший', 'Світлий', 'Середній', 'Темний', 'Найтемніший'];
+const OWN_DEFAULT_TONE = 2;
+
+/** HSL → #rrggbb: свій колір зберігається як hex, як і раніше. */
+function hslHex(hue, sat, light) {
+  const s = sat / 100;
+  const l = light / 100;
+  const k = (n) => (n + hue / 30) % 12;
+  const a = s * Math.min(l, 1 - l);
+  const f = (n) => Math.round(255 * (l - a * Math.max(-1, Math.min(k(n) - 3, 9 - k(n), 1))));
+  return `#${[f(0), f(8), f(4)].map((x) => x.toString(16).padStart(2, '0')).join('')}`;
+}
+
+/** #rrggbb → { hue, light }: щоб смуга й тон показали вже обраний свій колір. */
+function hexHsl(hex) {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const light = ((max + min) / 2) * 100;
+  if (max === min) return { hue: 0, light };
+  const dlt = max - min;
+  const hue = max === r ? ((g - b) / dlt + (g < b ? 6 : 0)) : max === g ? (b - r) / dlt + 2 : (r - g) / dlt + 4;
+  return { hue: hue * 60, light };
+}
+
+/**
+ * Готові кольори веселкою, під ними — свій: смуга відтінків (тягнеш — колір одразу в обраному тоні)
+ * і п'ять тонів. Без системної палітри: на Android вона дрібна й незручна.
+ */
 function colorPicker(d, onPick) {
-  const own = h('input', { type: 'color', class: 'own-input', tabindex: -1, 'aria-hidden': 'true', value: isOwnColor(d.color) ? d.color : '#4a90d9' });
-  const ownBtn = h('button', { type: 'button', class: 'swatch own-swatch', 'aria-label': 'Свій колір', onClick: () => own.click() }, own);
   const row = optionRow(COLOR_ORDER, d.color, (c) => h('button', { type: 'button', class: 'swatch', style: { '--c': colorVar(c) }, 'aria-label': COLOR_NAMES[c] }),
     (c) => { d.color = c; paintOwn(); onPick(); }, 'Колір');
-  const paintOwn = () => {
-    const on = isOwnColor(d.color);
-    ownBtn.setAttribute('aria-pressed', String(on));
-    ownBtn.style.setProperty('--c', on ? colorVar(d.color) : '');
-    ownBtn.classList.toggle('picked', on);
-  };
-  own.addEventListener('input', () => {
-    d.color = own.value;
-    for (const b of row.children) if (b !== ownBtn) b.setAttribute('aria-pressed', 'false');
+  const was = isOwnColor(d.color) ? hexHsl(d.color) : null;
+  let hue = was ? was.hue : 210;
+  let tone = was ? OWN_TONES.reduce((best, l, i) => (Math.abs(l - was.light) < Math.abs(OWN_TONES[best] - was.light) ? i : best), 0) : OWN_DEFAULT_TONE;
+  const knob = h('span', { class: 'hue-knob' });
+  const strip = h('div', {
+    class: 'hue-strip', role: 'slider', tabindex: 0, 'aria-label': 'Відтінок свого кольору', 'aria-valuemin': 0, 'aria-valuemax': 359,
+  }, knob);
+  const tones = h('div', { class: 'opt-row tone-row', role: 'group', 'aria-label': 'Тон свого кольору' });
+  const pickOwn = () => {
+    d.color = hslHex(hue, OWN_SAT, OWN_TONES[tone]);
+    for (const b of row.children) b.setAttribute('aria-pressed', 'false');
     paintOwn();
     onPick();
+  };
+  function paintOwn() {
+    knob.style.left = `${(hue / 360) * 100}%`;
+    knob.style.setProperty('--c', `hsl(${hue}, 70%, 55%)`);
+    strip.setAttribute('aria-valuenow', String(Math.round(hue)));
+    const on = isOwnColor(d.color);
+    tones.replaceChildren(...OWN_TONES.map((l, i) => h('button', {
+      type: 'button', class: 'swatch', style: { '--c': colorVar(hslHex(hue, OWN_SAT, l)) }, 'aria-label': OWN_TONE_NAMES[i],
+      'aria-pressed': String(on && i === tone),
+      onClick: () => { tone = i; pickOwn(); },
+    })));
+  }
+  // Тягнути пальцем по смузі: захоплення вказівника, щоб шторка не гортала сторінку
+  const fromPointer = (e) => {
+    const r = strip.getBoundingClientRect();
+    hue = Math.min(359, Math.max(0, ((e.clientX - r.left) / r.width) * 360));
+    pickOwn();
+  };
+  strip.addEventListener('pointerdown', (e) => {
+    try { strip.setPointerCapture(e.pointerId); } catch { /* вказівник уже відпущено */ }
+    fromPointer(e);
   });
-  row.append(ownBtn);
+  strip.addEventListener('pointermove', (e) => { if (strip.hasPointerCapture?.(e.pointerId)) fromPointer(e); });
+  strip.addEventListener('keydown', (e) => {
+    const step = { ArrowLeft: -10, ArrowRight: 10 }[e.key];
+    if (!step) return;
+    e.preventDefault();
+    hue = (hue + step + 360) % 360;
+    pickOwn();
+  });
   paintOwn();
-  return row;
+  return h('div', { class: 'color-picker' }, row, h('span', { class: 'flabel' }, 'Свій колір'), strip, tones);
 }
 
 const iconName = (key) => M.ICON_GROUPS.flatMap((g) => g.icons).find(([k]) => k === key)?.[1] ?? '';
@@ -1379,6 +1459,18 @@ function levelLine(a) {
     h('span', { class: 'muted small' }, `${have}/${need}`));
 }
 
+/** «Коли реально виходить»: найкраще вікно й вікна, де не виходить, — за останні 8 тижнів. */
+function fitLine(a) {
+  const adv = a.archived ? null : slotAdvice(a.id);
+  if (!adv) return null;
+  const name = (id) => SLOT_CHOICES.find(([v]) => v === id)?.[1].toLowerCase() ?? id;
+  const text = [
+    adv.best ? `найкраще — ${name(adv.best.slot)} ${adv.best.ok}/${adv.best.all}` : '',
+    adv.bad.length ? `не виходить — ${adv.bad.map((x) => `${name(x.slot)} ${x.ok}/${x.all}`).join(', ')}` : '',
+  ].filter(Boolean).join(' · ');
+  return h('span', { class: 'repeat-line' }, icon('target'), text);
+}
+
 function actCard(a) {
   const where = (a.slots ?? []).map((id) => slotsCfg.weekday.find((s) => s.id === id)?.label).filter(Boolean).join(', ');
   const meta = [`${a.weeklyTarget} ${plural(a.weeklyTarget, 'раз', 'рази', 'разів')}/тиждень`, a.minutes ? `~${a.minutes} хв` : '', where].filter(Boolean).join(' · ');
@@ -1389,6 +1481,7 @@ function actCard(a) {
       h('span', { class: 'act-sub' }, meta),
       a.minVersion ? h('span', { class: 'muted small' }, `Мінімум: ${a.minVersion}`) : null,
       M.repeatOn(a) ? h('span', { class: 'repeat-line' }, icon('refresh'), repeatText(a)) : null,
+      fitLine(a),
       a.archived ? null : weekStreakBadge(a),
       levelLine(a)));
 }
@@ -1484,8 +1577,10 @@ function slotEditor(kind, title) {
   return box;
 }
 
+const backupData = () => ({ app: 'hobby-planner', version: self.APP_VERSION, exported: new Date().toISOString(), ...state });
+
 function exportBackup() {
-  const data = { app: 'hobby-planner', version: self.APP_VERSION, exported: new Date().toISOString(), ...state };
+  const data = backupData();
   const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 1)], { type: 'application/json' }));
   const a = h('a', { href: url, download: `hobby-planner-${M.ymd()}.json` });
   document.body.append(a);
@@ -1502,11 +1597,17 @@ async function importBackup(file) {
     toast('Файл не читається як JSON');
     return;
   }
+  restoreSheet(data);
+}
+
+/** Підтвердити відновлення з копії — з файлу чи з Google Диска. */
+function restoreSheet(data) {
   if (data?.app !== 'hobby-planner' || !Array.isArray(data.activities) || !Array.isArray(data.plan)) {
     toast('Це не копія Хобі-плану');
     return;
   }
-  sheet('Відновити з копії?', h('div', { class: 'sheet-body' },
+  const when = data.exported ? ` від ${M.dayMonth(M.ymd(new Date(data.exported)))}` : '';
+  sheet(`Відновити з копії${when}?`, h('div', { class: 'sheet-body' },
     h('p', {}, `Занять: ${data.activities.length}, записів плану: ${data.plan.length}, нагадувань: ${data.reminders?.length ?? 0}. Поточні дані на цьому пристрої буде замінено.`),
     h('div', { class: 'btn-grid' },
       button('check', 'Відновити', 'danger', async () => {
@@ -1682,7 +1783,53 @@ function viewSettings() {
       h('div', { class: 'btn-grid' },
         button('move', 'Зберегти копію', '', exportBackup),
         button('undo', 'Відновити з файлу', '', () => file.click())),
-      file), { def: false, persist: true, cls: 'card' }));
+      file, driveBlock()), { def: false, persist: true, cls: 'card' }));
+}
+
+// ---------- копія на Google Диск ----------
+
+/** Раз на тиждень: ключ Google живий — тихо; ні — лише з натискання (gesture). */
+function driveTick(gesture = false) {
+  Drive.maybeBackup(backupData, { gesture })
+    .then((done) => { if (done) toast('Копію збережено на Google Диск'); })
+    .catch(() => { /* наступне натискання спробує ще раз */ });
+}
+
+function driveStatusText() {
+  const at = Drive.lastBackup();
+  if (!at) return 'Копії на Диску ще немає';
+  const d = new Date(at);
+  const day = M.ymd(d) === M.ymd() ? 'сьогодні' : M.dayMonth(M.ymd(d));
+  const left = Math.ceil((at + Drive.BACKUP_EVERY_DAYS * 864e5 - Date.now()) / 864e5);
+  return `Остання копія: ${day} о ${M.nowHm(d)} · ${left > 0 ? `наступна — за ${left} ${plural(left, 'день', 'дні', 'днів')}` : 'наступна — з найближчого натискання'}`;
+}
+
+/** Google Диск: підключити, зберегти зараз, відновити, відключити. Окремо від бота — на випадок, якщо з ним щось станеться. */
+function driveBlock() {
+  Drive.preload();
+  const status = h('p', { class: 'muted small' }, driveStatusText());
+  const run = (fn, done) => async () => {
+    status.textContent = 'Зачекай…';
+    try {
+      const msg = await fn();
+      if (msg ?? done) toast(msg ?? done);
+    } catch (err) {
+      toast(err.message);
+    }
+    status.textContent = driveStatusText();
+    render();
+  };
+  const about = h('p', { class: 'muted small' },
+    'Раз на тиждень застосунок сам кладе копію у файл hobby-planner-backup.json на твоєму Google Диску — окремо від бота. Попередні версії файлу Google тримає до 30 днів.');
+  if (!Drive.driveOn()) {
+    return h('div', { class: 'drive-block' }, h('h3', { class: 'form-box-title' }, 'Google Диск'), about,
+      button('plus', 'Підключити Google Диск', '', run(() => Drive.connect(backupData), 'Google Диск підключено, копію збережено')));
+  }
+  return h('div', { class: 'drive-block' }, h('h3', { class: 'form-box-title' }, 'Google Диск'), about, status,
+    h('div', { class: 'btn-grid' },
+      button('check', 'Зберегти зараз', '', run(() => Drive.backupByTap(backupData), 'Копію збережено на Google Диск')),
+      button('undo', 'Відновити з Диска', '', run(async () => { restoreSheet(await Drive.fetchBackup()); return ''; })),
+      button('skip', 'Відключити Диск', 'ghost', run(() => { Drive.disconnect(); }, 'Google Диск відключено — копія на ньому лишається'))));
 }
 
 // ---------- маршрути ----------
@@ -1898,6 +2045,7 @@ async function init() {
     timerGoals();
   }, 1000);
   await runRepeats();
+  if (Drive.driveOn()) { Drive.preload(); driveTick(); }
   route();
   // Ярлик «Є кілька хвилин?» з іконки застосунку: одразу шторка, а ?quick прибираємо, щоб не відкрилась знову
   const params = new URLSearchParams(location.search);
