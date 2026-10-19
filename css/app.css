@@ -268,6 +268,26 @@ a { color: var(--accent); }
 
 .copy-btn { align-self: stretch; border: 1.5px dashed var(--line-strong); background: transparent; }
 
+/* «Є кілька хвилин»: кнопка на «Сьогодні» і картки ідей у шторці */
+.quick-btn { align-self: stretch; }
+.quick-card { display: flex; align-items: center; gap: 12px; }
+.quick-card .act-text { flex: 1; }
+.quick-card .btn { flex: none; min-height: 40px; padding: 0 12px; }
+
+/* Рівень заняття: номер, смужка до наступного, досвід */
+.lvl { display: flex; align-items: center; gap: 6px; width: 100%; margin-top: 4px; font-size: 13px; color: var(--c); }
+.lvl .ico svg { width: 16px; height: 16px; }
+.lvl b { flex: none; }
+.lvl .muted { flex: none; }
+.lvl-bar { flex: 1; height: 6px; min-width: 40px; }
+.act-card .act-text { flex: 1; }
+
+/* Шаблони дня */
+.tpl-row { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.tpl-row:last-of-type { border-bottom: 0; }
+.tpl-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 16px; }
+.tpl-row p { margin: 2px 0 6px; }
+
 /* ---------- пауза ---------- */
 .pause-note {
   display: flex; align-items: center; gap: 8px; margin: 0; padding: 8px 10px; border-radius: 10px;

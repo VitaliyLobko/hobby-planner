@@ -199,6 +199,31 @@ export function weekCount(plan, activityId, start) {
   return plan.filter((p) => p.activityId === activityId && p.date >= start && p.date <= end && counts(p.status)).length;
 }
 
+// Рівні занять. Досвід за зараховану справу: повна — 10, мінімум — 5 (менше, але теж рахується),
+// плюс 1 за кожні 10 хв таймера, не більше 6 — довге заняття цінніше, але не в рази.
+const XP_FOR = { done: 10, min: 5 };
+const XP_TIME_MAX = 6;
+
+export const itemXp = (p) => (counts(p.status) ? XP_FOR[p.status] + Math.min(XP_TIME_MAX, Math.floor((p.spent || 0) / 600)) : 0);
+
+export const activityXp = (plan, activityId) => plan.reduce((s, p) => s + (p.activityId === activityId ? itemXp(p) : 0), 0);
+
+/**
+ * Рівень за досвідом: до 2-го — 30 (три заняття), далі кожен на 20 довший — 50, 70, 90…
+ * have / need — прогрес усередині поточного рівня.
+ */
+export function levelOf(xp) {
+  let level = 1;
+  let need = 30;
+  let have = xp;
+  while (have >= need) {
+    have -= need;
+    level += 1;
+    need += 20;
+  }
+  return { level, have, need };
+}
+
 /**
  * «Не пропускай двічі»: останній ЗАКРИТИЙ раз заняття до дати beforeDate — пропуск.
  * Перенесені записи — лише слід, ще не закриті (майбутні, поточне вікно) і дні паузи — пропускаємо.

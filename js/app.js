@@ -140,14 +140,19 @@ function button(name, text, cls, onClick) {
 
 // ---------- дії з записом плану ----------
 
+const levelNow = (activityId) => M.levelOf(M.activityXp(state.plan, activityId)).level;
+
 async function mark(item, status) {
   const prev = { ...item };
+  const levelBefore = levelNow(item.activityId);
   // Будь-яка відмітка зупиняє таймер: відрізок, що йшов, додається до витраченого
   const next = { ...item, status, doneAt: M.counts(status) ? M.nowHm() : null, spent: M.elapsed(item), runningSince: null };
   await save({ plan: { put: [next] } });
   if (status === 'planned') return;
   const a = act(item.activityId) ?? MISSING;
-  toast(`${a.name}: ${M.STATUS[status].toLowerCase()}`, { label: 'Скасувати', run: () => save({ plan: { put: [prev] } }) });
+  const level = levelNow(item.activityId);
+  toast(level > levelBefore ? `🎉 ${a.name} — рівень ${level}!` : `${a.name}: ${M.STATUS[status].toLowerCase()}`,
+    { label: 'Скасувати', run: () => save({ plan: { put: [prev] } }) });
 }
 
 /** Старт таймера. Одночасно йде лише один: інший, що йшов, стає на паузу з накопиченим часом. */
@@ -417,6 +422,90 @@ function pauseSection() {
   return folded('set-pause', head, body, { def: Boolean(cur), cls: 'card' });
 }
 
+// ---------- «Є кілька хвилин» ----------
+
+const QUICK_MINUTES = [10, 15, 20, 30, 45, 60];
+
+/**
+ * Що встигнути за min хвилин: невідмічені справи сьогоднішнього плану — першими, далі заняття,
+ * що відстають від тижневої цілі чи минулого разу пропущені. Повна версія не влазить — мінімум,
+ * мінімуму немає — частина. Зараховане сьогодні не пропонуємо.
+ */
+function quickIdeas(min) {
+  const today = M.ymd();
+  const now = M.nowHm();
+  const wk = M.weekStart(today);
+  const todays = state.plan.filter((p) => p.date === today && p.status !== 'moved');
+  const done = new Set(todays.filter((p) => M.counts(p.status)).map((p) => p.activityId));
+  const ideas = [];
+  for (const a of activeActs()) {
+    if (done.has(a.id)) continue;
+    const item = todays.find((p) => p.activityId === a.id && p.status === 'planned' && now < (slotOf(p)?.to ?? ''));
+    const cnt = M.weekCount(state.plan, a.id, wk);
+    const goal = target(a, wk);
+    const missed = missedLast(a.id, today, today, now);
+    const kind = !a.minutes || a.minutes <= min ? 'full' : a.minVersion ? 'min' : 'part';
+    const why = [
+      item ? `у плані: ${slotOf(item)?.label.toLowerCase()}` : null,
+      goal > cnt ? `тиждень ${cnt}/${goal}` : null,
+      missed ? 'минулого разу пропуск' : null,
+    ].filter(Boolean).join(' · ');
+    const score = (item ? 100 : 0) + (goal ? Math.max(0, 1 - cnt / goal) * 50 : 0) + (missed ? 20 : 0)
+      + { full: 10, min: 0, part: -30 }[kind];
+    ideas.push({ a, item, kind, why, score });
+  }
+  return ideas.sort((x, y) => y.score - x.score || x.a.order - y.a.order).slice(0, 3);
+}
+
+/** Вікно для справи «просто зараз»: те, що йде; інакше найближче попереду; інакше останнє. */
+function slotForNow(date, now) {
+  const slots = M.slotsFor(date, slotsCfg);
+  return slots.find((s) => s.from <= now && now < s.to) ?? slots.find((s) => now < s.from) ?? slots.at(-1);
+}
+
+async function quickStart({ a, item }, min) {
+  closeSheet();
+  const today = M.ymd();
+  let it = item;
+  if (!it) {
+    const slot = slotForNow(today, M.nowHm());
+    // Це заняття у вікні вже було (пропущене) — повертаємо його в план, а не робимо дубль
+    const old = itemsAt(today, slot.id).find((p) => p.activityId === a.id);
+    it = old ? { ...old, status: 'planned', doneAt: null }
+      : { id: uid(), date: today, slot: slot.id, activityId: a.id, topic: '', status: 'planned', doneAt: null };
+  }
+  if (tab !== 'today') goTab('today');
+  await startTimer(it);
+  toast(`${a.name} — таймер пішов, є ${min} хв`);
+}
+
+function quickCard(idea, min) {
+  const { a, kind, why } = idea;
+  const what = { full: a.minutes ? `~${a.minutes} хв` : 'повна версія', min: `мінімум: ${a.minVersion}`, part: `частину: ${min} з ${a.minutes} хв` }[kind];
+  return h('div', { class: 'card quick-card', style: actStyle(a) },
+    tile(a),
+    h('span', { class: 'act-text' },
+      h('span', { class: 'act-name' }, a.name),
+      h('span', { class: 'act-sub' }, what),
+      why ? h('span', { class: 'muted small' }, why) : null),
+    button('play', 'Почати', 'primary', () => quickStart(idea, min)));
+}
+
+function quickSheet() {
+  let min = Number(recall('quick-min')) || 20;
+  const list = h('div', { class: 'stack' });
+  const draw = () => {
+    const ideas = quickIdeas(min);
+    list.replaceChildren(...(ideas.length ? ideas.map((x) => quickCard(x, min))
+      : [h('p', { class: 'muted' }, 'Сьогодні все вже зараховано — можна й відпочити.')]));
+  };
+  draw();
+  sheet('Є кілька хвилин', h('div', { class: 'sheet-body' },
+    h('p', { class: 'muted small' }, 'Скільки є часу? Підберу, що встигнути: спершу сьогоднішній план, далі те, що відстає від цілі.'),
+    chips(QUICK_MINUTES.map((m) => [String(m), `${m} хв`]), String(min), (v) => { min = Number(v); remember('quick-min', v); draw(); }),
+    list));
+}
+
 function viewToday() {
   const today = M.ymd();
   const now = M.nowHm();
@@ -434,6 +523,7 @@ function viewToday() {
       h('a', { class: 'week-pill', href: '#week', 'aria-label': `Тиждень: ${done} з ${target}` },
         h('span', { class: 'muted small' }, 'Тиждень'), h('b', {}, `${done} / ${target}`))),
     pauseBanner(today),
+    button('clock', 'Є кілька хвилин?', 'quick-btn', quickSheet),
     ...cards,
     h('p', { class: 'swipe-hint' }, '← перенести · зробив →', h('br'), 'натисни на справу — усі дії, на вікно — згорнути'));
 }
@@ -565,6 +655,103 @@ function copyDayButton(date, today) {
   return button('copy', name, 'copy-btn', () => applyCopy(copyPlan([[src, date]]), name));
 }
 
+// ---------- шаблони дня ----------
+
+const templates = () => state.meta.find((m) => m.id === 'templates')?.list ?? [];
+
+const saveTemplates = (list) => save({ meta: { put: [{ id: 'templates', list }] } });
+
+/** Склад дня для шаблону: вікно й заняття — без тем і відміток, архівні й повтори відкидаємо. */
+function dayShape(date) {
+  const seen = new Set();
+  return state.plan
+    .filter((p) => p.date === date && p.status !== 'moved' && act(p.activityId) && !act(p.activityId).archived)
+    .sort((x, y) => actOrder(x) - actOrder(y))
+    .filter((p) => !seen.has(`${p.slot}|${p.activityId}`) && seen.add(`${p.slot}|${p.activityId}`))
+    .map((p) => ({ slot: p.slot, activityId: p.activityId }));
+}
+
+/** «Ранок: Англійська · Вечір: Python, Гітара» — назви вікон того дня, куди ставимо. */
+function shapeText(items, date) {
+  return M.slotsFor(date, slotsCfg)
+    .map((s) => [s, items.filter((x) => x.slot === s.id).map((x) => act(x.activityId)?.name).filter(Boolean)])
+    .filter(([, names]) => names.length)
+    .map(([s, names]) => `${s.label}: ${names.join(', ')}`)
+    .join(' · ');
+}
+
+/** Справи шаблону на дні dates — як копія плану: минулі дні, вікна, що скінчились, і заняття, що вже є у вікні, пропускаємо. */
+function templatePut(tpl, dates) {
+  const today = M.ymd();
+  const now = M.nowHm();
+  const put = [];
+  for (const date of dates) {
+    if (date < today) continue;
+    const slots = M.slotsFor(date, slotsCfg);
+    for (const x of tpl.items) {
+      const slot = slots.find((s) => s.id === x.slot);
+      const a = act(x.activityId);
+      if (!slot || !a || a.archived || (date === today && now >= slot.to)) continue;
+      const has = (p) => p.date === date && p.slot === slot.id && p.activityId === a.id;
+      if (itemsAt(date, slot.id).some(has) || put.some(has)) continue;
+      put.push({ id: uid(), date, slot: slot.id, activityId: a.id, topic: '', status: 'planned', doneAt: null });
+    }
+  }
+  return put;
+}
+
+async function deleteTemplate(tpl) {
+  const prev = templates();
+  closeSheet();
+  await saveTemplates(prev.filter((t) => t.id !== tpl.id));
+  toast(`Шаблон «${tpl.name}» видалено`, { label: 'Скасувати', run: () => saveTemplates(prev) });
+}
+
+/** Шаблони: поставити на цей день чи на всі такі дні тижня (будні / вихідні); зберегти цей день як шаблон. */
+function templateSheet(date) {
+  const today = M.ymd();
+  const list = templates();
+  const weekend = M.isWeekend(date);
+  const alike = Array.from({ length: 7 }, (_, i) => M.addDays(M.weekStart(date), i))
+    .filter((d) => M.isWeekend(d) === weekend && d >= today);
+  const body = h('div', { class: 'sheet-body' });
+  if (!list.length) {
+    body.append(h('p', { class: 'muted' }, 'Шаблонів ще немає. Сплануй день як зазвичай — і збережи його тут, щоб наступного разу поставити одним дотиком.'));
+  }
+  for (const tpl of list) {
+    const apply = (dates, what) => () => { closeSheet(); applyCopy(templatePut(tpl, dates), what); };
+    body.append(h('div', { class: 'tpl-row' },
+      h('div', { class: 'tpl-head' },
+        h('b', {}, tpl.name),
+        h('button', { type: 'button', class: 'icon-btn', 'aria-label': `Видалити шаблон ${tpl.name}`, onClick: () => deleteTemplate(tpl) }, icon('skip'))),
+      h('p', { class: 'muted small' }, shapeText(tpl.items, date) || 'Заняття шаблону в архіві'),
+      h('div', { class: 'btn-grid' },
+        date >= today ? button('template', 'На цей день', 'primary', apply([date], `«${tpl.name}»`)) : null,
+        alike.length > 1 ? button('copy', weekend ? 'На вихідні тижня' : 'На будні тижня', '', apply(alike, `«${tpl.name}» на ${alike.length} ${plural(alike.length, 'день', 'дні', 'днів')}`)) : null)));
+  }
+  const shape = dayShape(date);
+  if (shape.length) {
+    const name = h('input', { type: 'text', id: 'f-tpl', maxlength: 40, autocomplete: 'off', placeholder: weekend ? 'Вихідний' : 'Будній' });
+    body.append(
+      h('label', { class: 'flabel', for: 'f-tpl' }, 'Зберегти цей день як шаблон'),
+      name,
+      h('p', { class: 'muted small' }, shapeText(shape, date)),
+      h('div', { class: 'btn-grid' }, button('plus', 'Зберегти шаблон', '', async () => {
+        const n = name.value.trim() || name.placeholder;
+        const same = list.find((t) => t.name.toLowerCase() === n.toLowerCase());
+        await saveTemplates([...list.filter((t) => t.id !== same?.id), { id: same?.id ?? uid(), name: n, items: shape }]);
+        closeSheet();
+        toast(same ? `Шаблон «${n}» оновлено` : `Шаблон «${n}» збережено`);
+      })));
+  }
+  sheet('Шаблони дня', body);
+}
+
+function templateButton(date) {
+  if (!templates().length && !dayShape(date).length) return null;
+  return button('template', 'Шаблони дня', 'copy-btn', () => templateSheet(date));
+}
+
 /** День паузи — коротка примітка: планувати можна, але цілі й бот цей день не рахують. */
 function pausedNote(date) {
   const p = M.pauseOn(date, pauses());
@@ -593,6 +780,7 @@ function viewPlan() {
     h('p', { class: 'muted small lead' }, 'Тап по заняттю — додати у вікно, ще раз — прибрати; у вікні може бути кілька справ. Спершу — звичні для вікна, далі — ті, що відстають від тижневої цілі.'),
     pausedNote(date),
     copyDayButton(date, today),
+    templateButton(date),
     ...slots.map((slot) => planSlot(date, slot, wk, today, now)),
     h('div', { class: 'plan-sum' },
       h('b', {}, `${countText(items.length)}${minutes ? ` · ~${minText(minutes)}` : ''}`),
@@ -862,21 +1050,32 @@ function editActivity(orig) {
   sheet(orig ? 'Заняття' : 'Нове заняття', form);
 }
 
+/** Рівень заняття: номер і смужка до наступного — досвід за зараховані справи. */
+function levelLine(a) {
+  const { level, have, need } = M.levelOf(M.activityXp(state.plan, a.id));
+  return h('span', { class: 'lvl' },
+    icon('trophy'), h('b', {}, `Рівень ${level}`),
+    h('span', { class: 'bar lvl-bar', role: 'img', 'aria-label': `До рівня ${level + 1}: ${have} з ${need}` },
+      h('span', { style: { width: `${Math.round((have / need) * 100)}%` } })),
+    h('span', { class: 'muted small' }, `${have}/${need}`));
+}
+
 function actCard(a) {
   const where = (a.slots ?? []).map((id) => slotsCfg.weekday.find((s) => s.id === id)?.label).filter(Boolean).join(', ');
   const meta = [`${a.weeklyTarget} ${plural(a.weeklyTarget, 'раз', 'рази', 'разів')}/тиждень`, a.minutes ? `~${a.minutes} хв` : '', where].filter(Boolean).join(' · ');
-  return h('button', { type: 'button', class: `card act-card${a.archived ? ' archived' : ''}`, onClick: () => editActivity(a) },
+  return h('button', { type: 'button', class: `card act-card${a.archived ? ' archived' : ''}`, style: actStyle(a), onClick: () => editActivity(a) },
     tile(a),
     h('span', { class: 'act-text' },
       h('span', { class: 'act-name' }, a.name),
       h('span', { class: 'act-sub' }, meta),
-      a.minVersion ? h('span', { class: 'muted small' }, `Мінімум: ${a.minVersion}`) : null));
+      a.minVersion ? h('span', { class: 'muted small' }, `Мінімум: ${a.minVersion}`) : null,
+      levelLine(a)));
 }
 
 function viewActs() {
   const archived = state.activities.filter((a) => a.archived).sort((a, b) => a.order - b.order);
   return h('div', { class: 'stack' },
-    h('p', { class: 'muted small lead' }, 'Натисни на заняття, щоб змінити ціль, вікна чи мінімальну версію. «+» — нове.'),
+    h('p', { class: 'muted small lead' }, 'Натисни на заняття, щоб змінити ціль, вікна чи мінімальну версію. «+» — нове. Рівень росте від зарахованих справ: повна — 10 досвіду, мінімум — 5, плюс 1 за кожні 10 хв таймера.'),
     ...activeActs().map(actCard),
     archived.length
       ? folded('acts-archive', h('h2', { class: 'section-title' }, `Архів · ${archived.length}`),
