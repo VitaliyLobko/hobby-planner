@@ -536,7 +536,7 @@ async function onCommand(env, cmd, chatId) {
         'Днів поспіль із хоч однією зарахованою справою — у плані й підсумку. За 2 год до підсумку, якщо ще нічого не зараховано, — нагадаю й запропоную справи на 15 хв.',
         '',
         '<b>🔁 Постійний розклад</b>',
-        'Задається в застосунку, у занятті: дні тижня й вікно. Справи ставлю на тиждень уперед; прибрав чи переніс якусь — назад не поверну.',
+        'Задається в застосунку, у занятті: дні тижня й вікна — можна кілька (ЛФК вранці, в обід і ввечері — тричі на день). Справи ставлю на тиждень уперед; прибрав чи переніс якусь — назад не поверну.',
         '',
         '<b>🎙 Голосом чи текстом</b>',
         'Затисни 🎤 і скажи — або просто напиши. Українською чи російською, кілька справ в одній фразі.',
@@ -889,8 +889,16 @@ async function acceptItem(env, it, cfg, tz, now, acts, chatId) {
 // у js/model.js, правити разом. Прибрані справи лишаються в базі як deleted, тож за ключем назад не повертаються.
 
 const REPEAT_DAYS = 7;
-const repeatOn = (a) => Boolean(a && !a.archived && a.repeat?.days?.length && a.repeat.slot);
-const repeatId = (a, date) => `r${a.repeat.v}-${date.replaceAll('-', '')}-${a.id}`;
+/** Вікна розкладу в порядку дня; розклад до 0.7.5 — одне вікно slot без slots. */
+const repeatSlots = (a) => {
+  const list = Array.isArray(a?.repeat?.slots) ? a.repeat.slots : (a?.repeat?.slot ? [a.repeat.slot] : []);
+  return SLOT_ORDER.filter((id) => list.includes(id));
+};
+const repeatOn = (a) => Boolean(a && !a.archived && a.repeat?.days?.length && repeatSlots(a).length);
+/** Кілька вікон на день — у ключі й вікно; старий розклад (без slots) — колишній ключ, щоб не задублювати. */
+const repeatId = (a, date, slot) => (Array.isArray(a.repeat.slots)
+  ? `r${a.repeat.v}-${date.replaceAll('-', '')}-${slot}-${a.id}`
+  : `r${a.repeat.v}-${date.replaceAll('-', '')}-${a.id}`);
 
 function weekdayOf(date) {
   const [y, m, d] = date.split('-').map(Number);
@@ -928,17 +936,20 @@ async function runRepeats(env, now) {
   }
   for (const a of acts.values()) {
     if (!repeatOn(a)) continue;
-    const { days, slot: slotId, v } = a.repeat;
+    const { days, v } = a.repeat;
     for (let i = 0; i < REPEAT_DAYS; i++) {
       const date = addDays(today, i);
-      if (!days.includes(weekdayOf(date)) || pauseOn(date, pauses) || !open(date, slotId)) continue;
-      const id = repeatId(a, date);
-      const taken = live.some(({ row, it }) => !removed.has(row.id) && it.date === date && it.slot === slotId
-        && it.activityId === a.id && it.status !== 'moved');
-      if (known.has(id) || taken) continue;
-      await acceptItem(env, { id, date, slot: slotId, activityId: a.id, topic: '', status: 'planned', doneAt: null, rep: v, updated: now },
-        cfg, tz, now, acts, chatId);
-      known.add(id);
+      if (!days.includes(weekdayOf(date)) || pauseOn(date, pauses)) continue;
+      for (const slotId of repeatSlots(a)) {
+        if (!open(date, slotId)) continue;
+        const id = repeatId(a, date, slotId);
+        const taken = live.some(({ row, it }) => !removed.has(row.id) && it.date === date && it.slot === slotId
+          && it.activityId === a.id && it.status !== 'moved');
+        if (known.has(id) || taken) continue;
+        await acceptItem(env, { id, date, slot: slotId, activityId: a.id, topic: '', status: 'planned', doneAt: null, rep: v, updated: now },
+          cfg, tz, now, acts, chatId);
+        known.add(id);
+      }
     }
   }
 }
