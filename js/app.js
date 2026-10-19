@@ -1,7 +1,7 @@
 // Хобі-план: екрани «Сьогодні», «План», «Тиждень», «Заняття», «Налаштування».
 import { loadAll, write, uid, replaceAll } from './db.js';
 import * as M from './model.js';
-import { $, h, icon, toast, sheet, closeSheet, chips, swipeable, swipeStep } from './ui.js';
+import { $, h, icon, toast, sheet, closeSheet, chips, swipeable, swipeStep, fold } from './ui.js';
 import { initSync, syncNow, scheduleSync, botConfig, setBotConfig, lastSync } from './sync.js';
 
 const state = { activities: [], plan: [], meta: [], tombstones: [] };
@@ -9,6 +9,9 @@ let slotsCfg = structuredClone(M.DEFAULT_SLOTS);
 let tab = 'today';
 let planDate = M.ymd();
 let weekOffset = 0;
+let monthOffset = 0;
+// Оновлення застосунку: реєстрація service worker, нова версія, що чекає, і її номер
+const upd = { reg: null, worker: null, next: null, checked: '' };
 
 // Ключі localStorage — з префіксом: origin спільний із shooting-log і weight-log
 const PREFIX = 'hobby-planner:';
@@ -23,11 +26,18 @@ function recall(key) {
 
 const act = (id) => state.activities.find((a) => a.id === id);
 const activeActs = () => state.activities.filter((a) => !a.archived).sort((a, b) => a.order - b.order);
-// Перенесений запис — лише слід, вікно після нього вільне
-const itemAt = (date, slot) => state.plan.find((p) => p.date === date && p.slot === slot && p.status !== 'moved');
+const actOrder = (p) => act(p.activityId)?.order ?? Infinity;
+// Справи вікна в порядку занять. Перенесений запис — лише слід, його тут немає.
+const itemsAt = (date, slot) => state.plan
+  .filter((p) => p.date === date && p.slot === slot && p.status !== 'moved')
+  .sort((x, y) => (actOrder(x) - actOrder(y)) || String(x.id).localeCompare(String(y.id)));
+const traceAt = (date, slot) => state.plan.filter((p) => p.date === date && p.slot === slot && p.status === 'moved');
 const slotOf = (item) => M.slotsFor(item.date, slotsCfg).find((s) => s.id === item.slot);
 const actStyle = (a) => ({ '--c': `var(--c-${a?.color ?? 'blue'})` });
 const MISSING = { name: 'Видалене заняття', color: 'blue', icon: 'star', minutes: 0, minVersion: '', weeklyTarget: 1 };
+const pauses = () => state.meta.find((m) => m.id === 'pauses')?.list ?? [];
+const target = (a, start) => M.weekTarget(a, start, pauses());
+const missedLast = (id, before, today, now) => M.missedLastTime(state.plan, id, before, slotsCfg, today, now, pauses());
 
 /**
  * Записує зміни й одразу відбиває їх у state; render: false — коли перемальовка зірвала б введення.
@@ -54,6 +64,26 @@ async function applyRemote(items, deleted) {
   // Шторка відкрита чи щось вводять — дані зберігаємо, а перемалюємо з наступним тіком годинника
   const busy = $('layer').childElementCount || document.activeElement?.matches('input, textarea');
   await save({ plan: { put, del } }, { remote: true, render: !busy });
+}
+
+// Відкритість згорнутих груп: екран перемальовується щохвилини, тож стан живе тут, а не в DOM.
+// persist — пам'ятати між запусками (налаштування, тиждень); інакше — до перезапуску застосунку.
+const folds = new Map();
+
+function folded(key, head, body, { def = true, persist = false, cls = '' } = {}) {
+  let open = folds.get(key);
+  if (open === undefined && persist) {
+    const v = recall(`fold:${key}`);
+    if (v) open = v === '1';
+  }
+  return fold(head, body, {
+    open: open ?? def,
+    cls,
+    onToggle: (v) => {
+      folds.set(key, v);
+      if (persist) remember(`fold:${key}`, v ? '1' : '0');
+    },
+  });
 }
 
 function plural(n, one, few, many) {
@@ -117,11 +147,15 @@ function timerButton(item) {
   }, icon(running ? 'pause' : 'play'));
 }
 
-/** Куди можна перенести: наступне вільне вікно того ж дня і вільне вікно завтра (для минулого дня — сьогодні). */
+/**
+ * Куди можна перенести: наступне вікно того ж дня і вікно завтра (для минулого дня — сьогодні).
+ * У вікні може бути кілька справ — не годиться лише вікно, що скінчилось, чи де це заняття вже є.
+ */
 function moveOptions(item) {
   const today = M.ymd();
   const now = M.nowHm();
-  const open = (date, slot) => !itemAt(date, slot.id) && !(date === today && now >= slot.to);
+  const open = (date, slot) => !(date === today && now >= slot.to)
+    && !itemsAt(date, slot.id).some((p) => p.activityId === item.activityId);
   const out = [];
   if (item.date >= today) {
     const slots = M.slotsFor(item.date, slotsCfg);
@@ -157,7 +191,7 @@ async function moveTo(item, opt) {
 
 function moveButtons(item) {
   const opts = moveOptions(item);
-  if (!opts.length) return [h('p', { class: 'muted small' }, 'Вільних вікон немає — переплануй на екрані «План».')];
+  if (!opts.length) return [h('p', { class: 'muted small' }, 'Немає куди перенести — переплануй на екрані «План».')];
   return opts.map((o) => button('move', o.label, '', () => { closeSheet(); moveTo(item, o); }));
 }
 
@@ -212,39 +246,38 @@ function moveSheet(item) {
 
 function weekTotals(start) {
   const acts = activeActs();
-  const done = acts.reduce((s, a) => s + Math.min(M.weekCount(state.plan, a.id, start), a.weeklyTarget), 0);
-  const target = acts.reduce((s, a) => s + a.weeklyTarget, 0);
-  return { done, target };
+  const done = acts.reduce((s, a) => s + Math.min(M.weekCount(state.plan, a.id, start), target(a, start)), 0);
+  return { done, target: acts.reduce((s, a) => s + target(a, start), 0) };
 }
 
-function slotCard(date, slot, today, now) {
-  const item = itemAt(date, slot.id);
-  const isNow = date === today && now >= slot.from && now < slot.to;
-  if (!item) {
-    const moved = state.plan.find((p) => p.date === date && p.slot === slot.id && p.status === 'moved');
-    return h('article', { class: `card slot-card empty${isNow ? ' is-now' : ''}` },
-      h('div', { class: 'slot-head' }, slotName(slot), badge('free', isNow ? 'Зараз · вільно' : 'Вільно')),
-      moved ? h('p', { class: 'muted small' }, `${(act(moved.activityId) ?? MISSING).name} — перенесено`) : null,
-      h('a', { class: 'link-btn', href: '#plan', onClick: () => { planDate = date; } }, icon('plus'), 'Запланувати'));
-  }
+const isOpen = (st) => st === 'planned' || st === 'missed' || st === 'active';
+
+/** Кольорові крапки справ вікна — видно, що в згорнутій групі, не розгортаючи. */
+function dots(items) {
+  if (!items.length) return null;
+  return h('span', { class: 'dots', 'aria-hidden': 'true' },
+    items.map((p) => h('span', { class: 'dot', style: actStyle(act(p.activityId)) })));
+}
+
+/** Одна справа у вікні «Сьогодні»: свайп вправо — зробив, вліво — перенести, тап — усі дії. */
+function itemCard(item, slot, date, today, now) {
   const a = act(item.activityId) ?? MISSING;
   const st = M.shownStatus(item, slot, today, now);
-  const open = st === 'planned' || st === 'missed' || st === 'active';
+  const open = isOpen(st);
   const sec = M.elapsed(item);
-  let text = M.STATUS[st];
-  if (st === 'planned' && isNow) text = 'Зараз';
+  let text = st === 'planned' ? '' : M.STATUS[st];
   if (st === 'done' && item.doneAt) text = `Зроблено ${item.doneAt}`;
-  const warn = open && M.missedLastTime(state.plan, a.id, date, slotsCfg, today, now);
+  const warn = open && missedLast(a.id, date, today, now);
   const plan = open ? (a.minutes ? `~${a.minutes} хв` : '') : (sec ? `витрачено ${M.duration(sec)}` : '');
   const sub = [item.topic, plan].filter(Boolean).join(' · ');
-  const card = h('article', { class: `card slot-card st-${st}${isNow && open ? ' is-now' : ''}`, style: actStyle(a) },
+  const card = h('article', { class: `card item-card st-${st}`, style: actStyle(a) },
     h('div', { class: 'swipe-body' },
-      h('div', { class: 'slot-head' }, slotName(slot), badge(st === 'planned' && isNow ? 'now' : st, text)),
       h('div', { class: 'act-row' }, tile(a),
         h('div', { class: 'act-text' },
           h('div', { class: 'act-name' }, a.name),
           sub ? h('div', { class: 'act-sub' }, sub) : null,
-          a.minVersion && open ? h('div', { class: 'muted small' }, `Мінімум: ${a.minVersion}`) : null),
+          a.minVersion && open ? h('div', { class: 'muted small' }, `Мінімум: ${a.minVersion}`) : null,
+          text ? badge(st, text) : null),
         open ? h('div', { class: 'timer-box' },
           sec || item.runningSince ? h('span', { class: 'timer', 'data-timer': item.id }, M.clock(sec)) : null,
           timerButton(item)) : null),
@@ -260,81 +293,252 @@ function slotCard(date, slot, today, now) {
     : { onTap: () => itemSheet(item) });
 }
 
+/** Підсумок вікна для заголовка групи: що зараз найважливіше. */
+function slotBadge(items, slot, date, today, now, isNow) {
+  const ended = date < today || (date === today && now >= slot.to);
+  if (!items.length) return badge('free', isNow ? 'Зараз · вільно' : 'Вільно');
+  const sts = items.map((p) => M.shownStatus(p, slot, today, now));
+  if (sts.includes('active')) return badge('active', 'Йде');
+  if (isNow && sts.includes('planned')) return badge('now', 'Зараз');
+  const missed = sts.filter((s) => s === 'missed').length;
+  if (missed) return badge('missed', `Не відмічено${items.length > 1 ? ` ${missed}` : ''}`);
+  const cnt = sts.filter(M.counts).length;
+  if (ended || !sts.includes('planned')) {
+    return cnt ? badge('done', `Зараховано ${cnt}/${items.length}`) : badge('skipped', 'Пропущено');
+  }
+  return badge('planned', `${items.length} ${plural(items.length, 'справа', 'справи', 'справ')}`);
+}
+
+/** Вікно дня — згортана група справ. Закрите вікно (усе відмічено чи порожнє минуле) згорнуте. */
+function slotGroup(date, slot, today, now) {
+  const items = itemsAt(date, slot.id);
+  const isNow = date === today && now >= slot.from && now < slot.to;
+  const ended = date < today || (date === today && now >= slot.to);
+  const hasOpen = items.some((p) => isOpen(M.shownStatus(p, slot, today, now)));
+  const head = h('span', { class: 'slot-head' },
+    slotName(slot), dots(items), slotBadge(items, slot, date, today, now, isNow));
+  const body = h('div', { class: 'slot-items' },
+    items.map((p) => itemCard(p, slot, date, today, now)),
+    traceAt(date, slot.id).map((p) => h('p', { class: 'muted small' }, `${(act(p.activityId) ?? MISSING).name} — перенесено`)),
+    ended ? null : h('a', {
+      class: 'link-btn', href: '#plan',
+      onClick: () => { planDate = date; folds.set(`plan:${date}:${slot.id}`, true); },
+    }, icon('plus'), items.length ? 'Додати ще' : 'Запланувати'));
+  return folded(`today:${date}:${slot.id}`, head, body,
+    { def: hasOpen || !ended, cls: `card slot-group${isNow ? ' is-now' : ''}` });
+}
+
+// ---------- пауза ----------
+
+const reasonName = (p) => M.PAUSE_REASONS.find(([k]) => k === p.reason)?.[1] ?? 'Пауза';
+
+function savePauses(list) {
+  return save({ meta: { put: [{ id: 'pauses', list: [...list].sort((a, b) => (a.from < b.from ? -1 : 1)) }] } });
+}
+
+/** Завершити сьогодні: пауза, що почалась раніше, закінчується вчора; що почалась сьогодні — зникає. */
+async function endPause(p) {
+  const today = M.ymd();
+  const rest = pauses().filter((x) => x.id !== p.id);
+  await savePauses(p.from >= today ? rest : [...rest, { ...p, to: M.addDays(today, -1) }]);
+  toast('Паузу завершено — з поверненням!');
+}
+
+function pauseBanner(today) {
+  const p = M.pauseOn(today, pauses());
+  if (!p) return null;
+  return h('section', { class: 'card pause-card' },
+    h('div', {},
+      h('b', {}, `${reasonName(p)} до ${M.dayMonth(p.to)}`),
+      h('p', { class: 'small' }, 'Цілі тижня менші, «не пропускай двічі» мовчить, бот не нагадує. Захочеш — плануй як завжди.')),
+    button('check', 'Завершити', '', () => endPause(p)));
+}
+
+function pauseSection() {
+  const today = M.ymd();
+  const list = pauses();
+  const cur = M.pauseOn(today, list);
+  const draft = { reason: 'vacation' };
+  const from = h('input', { type: 'date', id: 'f-pause-from', value: today, min: today });
+  const to = h('input', { type: 'date', id: 'f-pause-to', value: M.addDays(today, 6), min: today });
+  const shown = list.filter((p) => p.to >= M.addDays(today, -30));
+  const head = h('span', { class: 'slot-head' }, h('h2', {}, 'Пауза — відпустка, хвороба'),
+    cur ? badge('min', `до ${M.dayMonth(cur.to)}`) : null);
+  const body = h('div', { class: 'form fold-body' },
+    h('p', { class: 'muted small' }, 'Дні паузи не рахуються в тижневих цілях і в «не пропускай двічі», бот у ці дні мовчить.'),
+    shown.length ? h('div', { class: 'pause-list' }, shown.map((p) => h('div', { class: 'pause-row' },
+      h('span', {}, h('b', {}, reasonName(p)), ` ${M.dayMonth(p.from)} — ${M.dayMonth(p.to)}`, p === cur ? ' · зараз' : ''),
+      p.to >= today && p.from <= today
+        ? h('button', { type: 'button', class: 'link-btn', onClick: () => endPause(p) }, 'Завершити')
+        : h('button', {
+          type: 'button', class: 'icon-btn', 'aria-label': `Видалити паузу ${M.dayMonth(p.from)} — ${M.dayMonth(p.to)}`,
+          onClick: () => savePauses(list.filter((x) => x.id !== p.id)),
+        }, icon('skip'))))) : null,
+    h('span', { class: 'flabel' }, 'Нова пауза'),
+    chips(M.PAUSE_REASONS, draft.reason, (v) => { draft.reason = v; }),
+    h('div', { class: 'date-pair' },
+      h('label', { for: 'f-pause-from' }, 'з', from),
+      h('label', { for: 'f-pause-to' }, 'по', to)),
+    h('div', { class: 'btn-grid' },
+      button('moon', 'Почати паузу', 'primary', () => {
+        const p = { id: uid(), reason: draft.reason, from: from.value, to: to.value };
+        if (!p.from || !p.to || p.from > p.to) { toast('Вкажи дати: «з» не пізніше за «по»'); return; }
+        if (p.to < today) { toast('Пауза в минулому нічого не змінить'); return; }
+        if (list.some((x) => x.from <= p.to && p.from <= x.to)) { toast('Перетинається з іншою паузою'); return; }
+        folds.set('set-pause', true);
+        savePauses([...list, p]);
+        toast(`${reasonName(p)}: ${M.dayMonth(p.from)} — ${M.dayMonth(p.to)}`);
+      })));
+  return folded('set-pause', head, body, { def: Boolean(cur), cls: 'card' });
+}
+
 function viewToday() {
   const today = M.ymd();
   const now = M.nowHm();
   const { done, target } = weekTotals(M.weekStart(today));
-  const cards = M.slotsFor(today, slotsCfg).map((slot) => slotCard(today, slot, today, now));
+  const cards = M.slotsFor(today, slotsCfg).map((slot) => slotGroup(today, slot, today, now));
   return h('div', { class: 'stack' },
     h('div', { class: 'view-head' },
       h('div', { class: 'muted' }, M.dayTitle(today)),
       h('a', { class: 'week-pill', href: '#week', 'aria-label': `Тиждень: ${done} з ${target}` },
         h('span', { class: 'muted small' }, 'Тиждень'), h('b', {}, `${done} / ${target}`))),
+    pauseBanner(today),
     ...cards,
-    h('p', { class: 'swipe-hint' }, '← перенести · зробив →', h('br'), 'натисни на картку — усі дії'));
+    h('p', { class: 'swipe-hint' }, '← перенести · зробив →', h('br'), 'натисни на справу — усі дії, на вікно — згорнути'));
 }
 
 // ---------- «План» ----------
 
-async function pick(date, slotId, a, item) {
-  if (item && item.activityId === a.id) {
-    const prev = { ...item };
-    await save({ plan: { del: [item.id] } });
-    toast(`${a.name} знято з плану`, { label: 'Скасувати', run: () => save({ plan: { put: [prev] } }) });
+async function unplan(item) {
+  const a = act(item.activityId) ?? MISSING;
+  const prev = { ...item };
+  await save({ plan: { del: [item.id] } });
+  toast(`${a.name} знято з плану`, { label: 'Скасувати', run: () => save({ plan: { put: [prev] } }) });
+}
+
+/**
+ * Тап по заняттю у вікні: немає — додати, є й ще не почате — прибрати.
+ * Відмічену справу чи ту, де вже йшов таймер, тап не видаляє — відкриває її дії.
+ */
+async function togglePick(date, slotId, a) {
+  const mine = itemsAt(date, slotId).find((p) => p.activityId === a.id);
+  if (!mine) {
+    await save({ plan: { put: [{ id: uid(), date, slot: slotId, activityId: a.id, topic: '', status: 'planned', doneAt: null }] } });
     return;
   }
-  const next = item
-    ? { ...item, activityId: a.id, topic: '', spent: 0, runningSince: null }
-    : { id: uid(), date, slot: slotId, activityId: a.id, topic: '', status: 'planned', doneAt: null };
-  await save({ plan: { put: [next] } });
+  if (mine.status === 'planned' && !M.elapsed(mine)) await unplan(mine);
+  else itemSheet(mine);
+}
+
+/** Обрана у вікні справа: назва, поле «що саме» і ×; відмічена — лише статус і тап на дії. */
+function planItemRow(item, slot, today, now) {
+  const a = act(item.activityId) ?? MISSING;
+  const st = M.shownStatus(item, slot, today, now);
+  if (item.status !== 'planned') {
+    return h('button', { type: 'button', class: 'act-row plain plan-item', onClick: () => itemSheet(item) },
+      tile(a),
+      h('span', { class: 'act-text' }, h('span', { class: 'act-name' }, a.name), badge(st, M.STATUS[st])));
+  }
+  const hint = [a.minutes ? `~${a.minutes} хв` : '', a.minVersion ? `мінімум: ${a.minVersion}` : ''].filter(Boolean).join(' · ');
+  return h('div', { class: 'act-row plan-item', style: actStyle(a) },
+    tile(a),
+    h('div', { class: 'act-text grow' },
+      h('div', { class: 'act-name' }, a.name),
+      h('input', {
+        class: 'topic', type: 'text', maxlength: 80, value: item.topic ?? '', 'aria-label': `Що саме: ${a.name}`,
+        placeholder: 'Що саме? Урок, тема',
+        onChange: (e) => {
+          const cur = state.plan.find((p) => p.id === item.id);
+          if (cur) save({ plan: { put: [{ ...cur, topic: e.target.value.trim() }] } }, { render: false });
+        },
+      }),
+      hint ? h('div', { class: 'muted small' }, hint) : null),
+    h('button', { type: 'button', class: 'icon-btn', 'aria-label': `Прибрати ${a.name}`, onClick: () => unplan(item) }, icon('skip')));
 }
 
 function planSlot(date, slot, wk, today, now) {
-  const item = itemAt(date, slot.id);
-  const sec = h('section', { class: 'card plan-slot' }, h('div', { class: 'slot-head' }, slotName(slot)));
-  if (item && item.status !== 'planned') {
-    const a = act(item.activityId) ?? MISSING;
-    sec.append(h('button', { type: 'button', class: 'act-row plain', onClick: () => itemSheet(item) },
-      tile(a),
-      h('div', { class: 'act-text' }, h('div', { class: 'act-name' }, a.name), badge(item.status, M.STATUS[item.status]))));
-    return sec;
-  }
+  const items = itemsAt(date, slot.id);
+  const ended = date < today || (date === today && now >= slot.to);
+  const head = h('span', { class: 'slot-head' }, slotName(slot), dots(items),
+    badge(items.length ? 'planned' : 'free', items.length ? `${items.length} ${plural(items.length, 'справа', 'справи', 'справ')}` : 'Вільно'));
   const ranked = activeActs()
-    .map((a) => ({ a, cnt: M.weekCount(state.plan, a.id, wk), pref: a.slots?.includes(slot.id) ? 1 : 0 }))
+    .map((a) => ({ a, cnt: M.weekCount(state.plan, a.id, wk), goal: target(a, wk), pref: a.slots?.includes(slot.id) ? 1 : 0 }))
     .sort((x, y) => (y.pref - x.pref)
-      || (x.cnt / Math.max(1, x.a.weeklyTarget) - y.cnt / Math.max(1, y.a.weeklyTarget))
+      || (x.cnt / Math.max(1, x.goal) - y.cnt / Math.max(1, y.goal))
       || (x.a.order - y.a.order));
-  const row = h('div', { class: 'pick-row' });
-  for (const { a, cnt } of ranked) {
-    const on = item?.activityId === a.id;
-    const miss = M.missedLastTime(state.plan, a.id, date, slotsCfg, today, now);
+  const row = h('div', { class: 'pick-row', role: 'group', 'aria-label': `Заняття у вікно ${slot.label}` });
+  for (const { a, cnt, goal } of ranked) {
+    const on = items.some((p) => p.activityId === a.id);
+    const miss = missedLast(a.id, date, today, now);
     row.append(h('button', {
       type: 'button', class: `pick${on ? ' on' : ''}`, 'aria-pressed': String(on), style: actStyle(a),
-      onClick: () => pick(date, slot.id, a, item),
+      onClick: () => togglePick(date, slot.id, a),
     },
     h('span', { class: 'pick-name' }, h('span', { class: 'dot', 'aria-hidden': 'true' }), a.name),
-    h('span', { class: 'pick-why' }, `${cnt}/${a.weeklyTarget}${miss ? ' · був пропуск' : ''}`)));
+    h('span', { class: 'pick-why' }, `${cnt}/${goal}${miss ? ' · був пропуск' : ''}`)));
   }
-  sec.append(row);
-  if (item) {
-    const a = act(item.activityId) ?? MISSING;
-    sec.append(h('input', {
-      class: 'topic', type: 'text', maxlength: 80, value: item.topic ?? '', 'aria-label': `Що саме: ${a.name}`,
-      placeholder: 'Що саме? Урок, тема — необов’язково',
-      onChange: (e) => {
-        const cur = itemAt(date, slot.id);
-        if (cur) save({ plan: { put: [{ ...cur, topic: e.target.value.trim() }] } }, { render: false });
-      },
-    }));
-    if (a.minVersion) sec.append(h('div', { class: 'muted small' }, `~${a.minutes} хв · мінімум: ${a.minVersion}`));
-  }
-  return sec;
+  const body = h('div', { class: 'plan-body' },
+    items.length ? h('div', { class: 'plan-items' }, items.map((p) => planItemRow(p, slot, today, now))) : null,
+    row);
+  return folded(`plan:${date}:${slot.id}`, head, body, { def: !ended, cls: 'card plan-slot' });
 }
+
+/**
+ * Копія плану з інших днів: pairs — [[звідки, куди], …]. Беремо справи (без слідів перенесень) активних занять;
+ * пропускаємо минулі дні, дні паузи, вікна, що вже скінчились, і заняття, яке в цьому вікні вже є.
+ * Тему не копіюємо — урок наступного разу інший.
+ */
+function copyPlan(pairs) {
+  const today = M.ymd();
+  const now = M.nowHm();
+  const active = new Set(activeActs().map((a) => a.id));
+  const put = [];
+  const has = (date, slot, id) => itemsAt(date, slot).some((x) => x.activityId === id)
+    || put.some((x) => x.date === date && x.slot === slot && x.activityId === id);
+  for (const [from, to] of pairs) {
+    if (to < today || M.pauseOn(to, pauses())) continue;
+    const slots = M.slotsFor(to, slotsCfg);
+    for (const p of state.plan) {
+      if (p.date !== from || p.status === 'moved' || !active.has(p.activityId)) continue;
+      const slot = slots.find((s) => s.id === p.slot);
+      if (!slot || (to === today && now >= slot.to) || has(to, p.slot, p.activityId)) continue;
+      put.push({ id: uid(), date: to, slot: p.slot, activityId: p.activityId, topic: '', status: 'planned', doneAt: null });
+    }
+  }
+  return put;
+}
+
+async function applyCopy(put, what) {
+  if (!put.length) { toast('Нічого додавати — усе вже є або ці дні минули'); return; }
+  await save({ plan: { put } });
+  toast(`${what}: +${put.length} ${plural(put.length, 'справа', 'справи', 'справ')}`, {
+    label: 'Скасувати',
+    run: () => save({ plan: { del: put.map((p) => p.id) } }),
+  });
+}
+
+const hasPlan = (date) => state.plan.some((p) => p.date === date && p.status !== 'moved');
 
 function shiftPlan(dir) {
   planDate = M.addDays(planDate, dir);
   render();
   return true;
+}
+
+/** «Як минулого понеділка»: той самий день тижня тиждень тому → цей день. */
+function copyDayButton(date, today) {
+  const src = M.addDays(date, -7);
+  if (date < today || M.pauseOn(date, pauses()) || !hasPlan(src)) return null;
+  const name = `Як ${M.LAST_DAY[M.parseYmd(date).getDay()]}`;
+  return button('copy', name, 'copy-btn', () => applyCopy(copyPlan([[src, date]]), name));
+}
+
+/** День паузи — коротка примітка: планувати можна, але цілі й бот цей день не рахують. */
+function pausedNote(date) {
+  const p = M.pauseOn(date, pauses());
+  if (!p) return null;
+  const why = M.PAUSE_REASONS.find(([k]) => k === p.reason)?.[1] ?? 'Пауза';
+  return h('div', { class: 'pause-note' }, icon('moon'), `${why} до ${M.dayMonth(p.to)} — день не рахується в цілях, бот мовчить`);
 }
 
 function viewPlan() {
@@ -344,7 +548,7 @@ function viewPlan() {
   const rel = { [today]: 'Сьогодні', [M.addDays(today, 1)]: 'Завтра', [M.addDays(today, -1)]: 'Вчора' }[date];
   const wk = M.weekStart(date);
   const slots = M.slotsFor(date, slotsCfg);
-  const items = slots.map((s) => itemAt(date, s.id)).filter(Boolean);
+  const items = slots.flatMap((s) => itemsAt(date, s.id));
   const minutes = items.reduce((s, p) => s + ((act(p.activityId) ?? MISSING).minutes || 0), 0);
   const root = h('div', { class: 'stack' },
     h('div', { class: 'day-nav' },
@@ -354,7 +558,9 @@ function viewPlan() {
           : h('button', { type: 'button', class: 'day-rel link', onClick: () => { planDate = today; render(); } }, 'До сьогодні'),
         h('div', { class: 'day-date' }, M.dayTitle(date))),
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Наступний день', onClick: () => shiftPlan(1) }, icon('next'))),
-    h('p', { class: 'muted small lead' }, 'По одній справі на вікно. Спершу — звичні для вікна, далі — ті, що відстають від тижневої цілі.'),
+    h('p', { class: 'muted small lead' }, 'Тап по заняттю — додати у вікно, ще раз — прибрати; у вікні може бути кілька справ. Спершу — звичні для вікна, далі — ті, що відстають від тижневої цілі.'),
+    pausedNote(date),
+    copyDayButton(date, today),
     ...slots.map((slot) => planSlot(date, slot, wk, today, now)),
     h('div', { class: 'plan-sum' },
       h('b', {}, `${items.length} ${plural(items.length, 'справа', 'справи', 'справ')}${minutes ? ` · ~${minutes} хв` : ''}`),
@@ -365,42 +571,61 @@ function viewPlan() {
 
 // ---------- «Тиждень» ----------
 
+const STATS_MODES = [['week', 'Тиждень'], ['month', 'Місяць']];
+const statsMode = () => (recall('stats-mode') === 'month' ? 'month' : 'week');
+
+/** Перемикач «Тиждень / Місяць» угорі вкладки; вибір пам'ятається. */
+function modeSwitch() {
+  return chips(STATS_MODES, statsMode(), (v) => { remember('stats-mode', v); render(); });
+}
+
 function viewWeek() {
   const today = M.ymd();
   const now = M.nowHm();
   const start = M.addDays(M.weekStart(today), weekOffset * 7);
   const days = M.weekDays(start);
-  const { done, target } = weekTotals(start);
+  const { done, target: total } = weekTotals(start);
   const rel = { 0: 'Цей тиждень', [-1]: 'Минулий тиждень', 1: 'Наступний тиждень' }[weekOffset] ?? '';
   const step = (dir) => { weekOffset += dir; render(); return true; };
+  const off = days.filter((d) => M.pauseOn(d, pauses())).length;
 
-  const goals = h('section', { class: 'card' }, h('h2', {}, 'Цілі тижня'));
+  const goals = h('div', { class: 'fold-body' },
+    off ? h('p', { class: 'pause-note' }, icon('moon'), `Пауза ${off} ${plural(off, 'день', 'дні', 'днів')} — цілі тижня менші`) : null);
   for (const a of activeActs()) {
     const cnt = M.weekCount(state.plan, a.id, start);
     const sec = M.weekSeconds(state.plan, a.id, start);
-    const pct = Math.min(100, Math.round((cnt / Math.max(1, a.weeklyTarget)) * 100));
+    const goal = target(a, start);
+    const pct = goal ? Math.min(100, Math.round((cnt / goal) * 100)) : 100;
     goals.append(h('div', { class: 'goal', style: actStyle(a) },
       h('div', { class: 'goal-row' },
         h('span', {}, a.name, sec ? h('span', { class: 'muted goal-time' }, ` · ${M.duration(sec)}`) : null),
-        h('b', {}, `${cnt} / ${a.weeklyTarget}`)),
-      h('div', { class: 'bar', role: 'img', 'aria-label': `${a.name}: ${cnt} з ${a.weeklyTarget}` },
+        h('b', {}, `${cnt} / ${goal}`)),
+      h('div', { class: 'bar', role: 'img', 'aria-label': `${a.name}: ${cnt} з ${goal}` },
         h('span', { style: { width: `${pct}%` } }))));
   }
 
+  // «Як минулого тижня»: кожен день попереднього тижня — у той самий день цього; минулі дні не чіпаємо
+  const pairs = days.map((d) => [M.addDays(d, -7), d]);
+  const canCopy = days[6] >= today && pairs.some(([from]) => hasPlan(from));
+
   const grid = h('div', { class: 'grid' }, h('span'));
-  days.forEach((d, i) => grid.append(h('span', { class: `grid-day${d === today ? ' today' : ''}` }, M.DAY_SHORT[i])));
+  days.forEach((d, i) => {
+    const paused = M.pauseOn(d, pauses());
+    grid.append(h('span', { class: `grid-day${d === today ? ' today' : ''}${paused ? ' paused' : ''}`, title: paused ? 'Пауза' : null }, M.DAY_SHORT[i]));
+  });
   for (const sid of M.SLOT_IDS) {
     grid.append(h('span', { class: 'grid-slot' }, slotsCfg.weekday.find((s) => s.id === sid)?.label ?? sid));
     days.forEach((d, i) => {
       const slot = M.slotsFor(d, slotsCfg).find((s) => s.id === sid);
-      const it = itemAt(d, sid);
-      const a = it ? (act(it.activityId) ?? MISSING) : null;
-      const st = it ? M.shownStatus(it, slot, today, now) : 'none';
-      const label = `${M.DAY_SHORT[i]}, ${slot.label}: ${a ? `${a.name}, ${M.STATUS[st].toLowerCase()}` : 'вільно'}`;
+      const its = itemsAt(d, sid).map((p) => ({ a: act(p.activityId) ?? MISSING, st: M.shownStatus(p, slot, today, now) }));
+      const what = its.map(({ a, st }) => `${a.name}, ${M.STATUS[st].toLowerCase()}`).join('; ');
+      const label = `${M.DAY_SHORT[i]}, ${slot.label}: ${what || 'вільно'}`;
+      // Кілька справ — смужка на кожну; більше трьох у клітинку 34 px не влазить, решта — у підписі
       grid.append(h('button', {
-        type: 'button', class: `cell c-${st}`, style: a ? actStyle(a) : null, 'aria-label': label, title: label,
+        type: 'button', class: `cell${its.length ? ' segs' : ' c-none'}`, 'aria-label': label, title: label,
         onClick: () => { planDate = d; location.hash = '#plan'; },
-      }, st === 'skipped' || st === 'missed' ? icon('skip') : null));
+      }, its.slice(0, 3).map(({ a, st }) => h('i', { class: `seg c-${st}`, style: actStyle(a) },
+        its.length === 1 && (st === 'skipped' || st === 'missed') ? icon('skip') : null))));
     });
   }
   const legend = h('div', { class: 'legend' },
@@ -408,18 +633,20 @@ function viewWeek() {
       .map(([k, t]) => h('span', {}, h('i', { class: `cell mini c-${k}`, 'aria-hidden': 'true' }), t)));
 
   const root = h('div', { class: 'stack' },
+    modeSwitch(),
     h('div', { class: 'day-nav' },
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Попередній тиждень', onClick: () => step(-1) }, icon('prev')),
       h('div', { class: 'day-nav-title' },
         rel ? h('div', { class: 'day-rel' }, rel)
           : h('button', { type: 'button', class: 'day-rel link', onClick: () => { weekOffset = 0; render(); } }, 'До цього тижня'),
-        h('div', { class: 'day-date' }, `${M.rangeTitle(start)} · ${done} / ${target}`)),
+        h('div', { class: 'day-date' }, `${M.rangeTitle(start)} · ${done} / ${total}`)),
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Наступний тиждень', onClick: () => step(1) }, icon('next'))),
-    goals,
-    h('section', { class: 'card' }, h('h2', {}, 'Дні та вікна'), grid, legend));
+    canCopy ? button('copy', 'Як минулого тижня', 'copy-btn', () => applyCopy(copyPlan(pairs), 'Як минулого тижня')) : null,
+    folded('week-goals', h('h2', {}, 'Цілі тижня'), goals, { persist: true, cls: 'card' }),
+    folded('week-grid', h('h2', {}, 'Дні та вікна'), h('div', { class: 'fold-body' }, grid, legend), { persist: true, cls: 'card' }));
 
   if (weekOffset === 0) {
-    const missed = activeActs().filter((a) => M.missedLastTime(state.plan, a.id, M.addDays(today, 1), slotsCfg, today, now));
+    const missed = activeActs().filter((a) => missedLast(a.id, M.addDays(today, 1), today, now));
     if (missed.length) {
       root.append(h('section', { class: 'card warn-card' },
         h('h2', {}, 'Не пропускай двічі'),
@@ -429,6 +656,86 @@ function viewWeek() {
   swipeStep(root, step);
   return root;
 }
+
+// ---------- «Місяць» ----------
+
+function viewMonth() {
+  const today = M.ymd();
+  const now = M.nowHm();
+  const first = M.monthStart(today, monthOffset);
+  const days = M.monthDays(first);
+  const last = days[days.length - 1];
+  const step = (dir) => { monthOffset += dir; render(); return true; };
+  const slotOfItem = (p) => M.slotsFor(p.date, slotsCfg).find((s) => s.id === p.slot);
+
+  const items = state.plan.filter((p) => p.date >= first && p.date <= last && p.status !== 'moved');
+  const counted = items.filter((p) => M.counts(p.status));
+  // Виконання — серед уже закритих справ; дні паузи не рахуємо
+  const closed = items.filter((p) => {
+    const st = M.shownStatus(p, slotOfItem(p), today, now);
+    return st !== 'planned' && st !== 'active' && !(st === 'missed' && M.pauseOn(p.date, pauses()));
+  });
+  const totalSec = counted.reduce((s, p) => s + (p.spent || 0), 0);
+  const rate = closed.length ? Math.round((counted.length / closed.length) * 100) : null;
+
+  const totals = h('section', { class: 'card stat-totals' },
+    h('div', {}, h('b', {}, String(counted.length)), h('span', { class: 'muted small' }, plural(counted.length, 'раз зараховано', 'рази зараховано', 'разів зараховано'))),
+    h('div', {}, h('b', {}, totalSec ? M.duration(totalSec) : '—'), h('span', { class: 'muted small' }, 'витрачено')),
+    h('div', {}, h('b', {}, rate == null ? '—' : `${rate}%`), h('span', { class: 'muted small' }, 'виконано з закритих')));
+
+  // По заняттях: разів і годин; смужка — частка від найбільшого часу (немає часу — від найбільшої кількості)
+  const per = state.activities
+    .map((a) => {
+      const mine = counted.filter((p) => p.activityId === a.id);
+      return { a, cnt: mine.length, sec: mine.reduce((s, p) => s + (p.spent || 0), 0) };
+    })
+    .filter((x) => x.cnt || !x.a.archived)
+    .sort((x, y) => (y.sec - x.sec) || (y.cnt - x.cnt) || (x.a.order - y.a.order));
+  const maxSec = Math.max(0, ...per.map((x) => x.sec));
+  const maxCnt = Math.max(1, ...per.map((x) => x.cnt));
+  const byAct = h('div', { class: 'fold-body' },
+    per.map(({ a, cnt, sec }) => h('div', { class: 'goal', style: actStyle(a) },
+      h('div', { class: 'goal-row' },
+        h('span', {}, a.name, sec ? h('span', { class: 'muted goal-time' }, ` · ${M.duration(sec)}`) : null),
+        h('b', {}, `${cnt} ${plural(cnt, 'раз', 'рази', 'разів')}`)),
+      h('div', { class: 'bar', role: 'img', 'aria-label': `${a.name}: ${cnt}, ${M.duration(sec)}` },
+        h('span', { style: { width: `${Math.round(100 * (maxSec ? sec / maxSec : cnt / maxCnt))}%` } })))));
+
+  // По днях: стовпчик хвилин, складений з кольорів занять; день паузи — штрихований
+  const daySec = (d) => counted.filter((p) => p.date === d);
+  const maxDay = Math.max(1, ...days.map((d) => daySec(d).reduce((s, p) => s + (p.spent || 0), 0)));
+  const chart = h('div', { class: 'month-chart', role: 'img', 'aria-label': `Хвилини по днях, ${M.monthTitle(first)}` },
+    days.map((d) => {
+      const mine = daySec(d);
+      const sec = mine.reduce((s, p) => s + (p.spent || 0), 0);
+      const label = `${M.dayMonth(d)}: ${mine.length ? `${mine.length} · ${M.duration(sec)}` : 'нічого'}`;
+      return h('div', { class: `mc-col${d === today ? ' today' : ''}${M.pauseOn(d, pauses()) ? ' paused' : ''}`, title: label },
+        h('div', { class: 'mc-bar' },
+          mine.map((p) => h('i', {
+            style: { ...actStyle(act(p.activityId)), height: `${sec ? Math.max(4, (100 * (p.spent || 0)) / maxDay) : 8}%` },
+          }))),
+        h('span', { class: 'mc-day' }, String(M.parseYmd(d).getDate())));
+    }));
+
+  const root = h('div', { class: 'stack' },
+    modeSwitch(),
+    h('div', { class: 'day-nav' },
+      h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Попередній місяць', onClick: () => step(-1) }, icon('prev')),
+      h('div', { class: 'day-nav-title' },
+        monthOffset === 0 ? h('div', { class: 'day-rel' }, 'Цей місяць')
+          : h('button', { type: 'button', class: 'day-rel link', onClick: () => { monthOffset = 0; render(); } }, 'До цього місяця'),
+        h('div', { class: 'day-date' }, M.monthTitle(first))),
+      h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Наступний місяць', onClick: () => step(1) }, icon('next'))),
+    totals,
+    folded('month-acts', h('h2', {}, 'По заняттях'), byAct, { persist: true, cls: 'card' }),
+    folded('month-days', h('h2', {}, 'По днях'), h('div', { class: 'fold-body' }, chart,
+      h('p', { class: 'muted small' }, 'Висота — хвилини за день; без таймера справа показана низьким стовпчиком. Штрих — пауза.')),
+    { persist: true, cls: 'card' }));
+  swipeStep(root, step);
+  return root;
+}
+
+const viewStats = () => (statsMode() === 'month' ? viewMonth() : viewWeek());
 
 // ---------- «Заняття» ----------
 
@@ -453,6 +760,29 @@ function optionRow(values, current, draw, onPick, label) {
   return row;
 }
 
+/** Іконки групами (навчання, музика, спорт…); розгорнута та група, де поточна іконка. */
+function iconPicker(d) {
+  const buttons = [];
+  const paint = () => {
+    for (const b of buttons) b.setAttribute('aria-pressed', String(b.dataset.v === d.icon));
+  };
+  const groups = M.ICON_GROUPS.map((g) => {
+    const row = h('div', { class: 'opt-row', role: 'group', 'aria-label': g.title });
+    for (const [key, name] of g.icons) {
+      const b = h('button', {
+        type: 'button', class: 'icon-opt', 'aria-label': name, title: name, 'data-v': key,
+        onClick: () => { d.icon = key; paint(); },
+      }, icon(key));
+      buttons.push(b);
+      row.append(b);
+    }
+    return fold(h('span', { class: 'fold-title' }, g.title), row,
+      { open: g.icons.some(([k]) => k === d.icon), cls: 'icon-group' });
+  });
+  paint();
+  return h('div', { class: 'icon-groups' }, groups);
+}
+
 function editActivity(orig) {
   const all = state.activities;
   const d = orig
@@ -474,8 +804,7 @@ function editActivity(orig) {
     optionRow(M.COLORS, d.color, (c) => h('button', { type: 'button', class: 'swatch', style: { '--c': `var(--c-${c})` }, 'aria-label': COLOR_NAMES[c] }),
       (c) => { d.color = c; }, 'Колір'),
     h('span', { class: 'flabel' }, 'Іконка'),
-    optionRow(M.ACTIVITY_ICONS, d.icon, (n) => h('button', { type: 'button', class: 'icon-opt', 'aria-label': n }, icon(n)),
-      (n) => { d.icon = n; }, 'Іконка'),
+    iconPicker(d),
     h('span', { class: 'flabel' }, 'Разів на тиждень'),
     h('div', { class: 'stepper' },
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Менше', onClick: () => stepTarget(-1) }, '−'),
@@ -517,8 +846,10 @@ function viewActs() {
   return h('div', { class: 'stack' },
     h('p', { class: 'muted small lead' }, 'Натисни на заняття, щоб змінити ціль, вікна чи мінімальну версію. «+» — нове.'),
     ...activeActs().map(actCard),
-    archived.length ? h('h2', { class: 'section-title' }, 'Архів') : null,
-    ...archived.map(actCard));
+    archived.length
+      ? folded('acts-archive', h('h2', { class: 'section-title' }, `Архів · ${archived.length}`),
+        h('div', { class: 'stack' }, archived.map(actCard)), { def: false, persist: true, cls: 'plain-fold' })
+      : null);
 }
 
 // ---------- «Налаштування» ----------
@@ -612,7 +943,9 @@ function botSection() {
   const url = h('input', { type: 'url', id: 'f-bot-url', value: cfg.url || BOT_WORKER, inputmode: 'url', autocomplete: 'off', spellcheck: 'false' });
   const key = h('input', { type: 'password', id: 'f-bot-key', value: cfg.key, autocomplete: 'off', placeholder: 'Ключ із команди /key' });
   const status = h('p', { class: 'muted small', id: 'sync-status', 'aria-live': 'polite' }, cfg.key ? syncStatusText() : '');
-  return h('section', { class: 'card form' }, h('h2', {}, 'Telegram-бот'),
+  // Бот підключено — блок згорнутий, у заголовку видно, що він працює
+  const head = h('span', { class: 'slot-head' }, h('h2', {}, 'Telegram-бот'), cfg.key ? badge('done', 'Підключено') : null);
+  return folded('set-bot', head, h('div', { class: 'form fold-body' },
     h('p', { class: 'muted small' },
       'Нагадування з кнопками приходять у Telegram, відмітки звідти повертаються сюди. Напиши ',
       h('a', { href: BOT_URL, target: '_blank', rel: 'noopener' }, '@hobby_planner_bot'),
@@ -633,24 +966,26 @@ function botSection() {
         setBotConfig(null, null);
         toast('Бота від’єднано: нагадування для нових справ не прийдуть');
         render();
-      }) : null));
+      }) : null)), { def: !cfg.key, cls: 'card' });
 }
 
 function viewSettings() {
   const file = h('input', { type: 'file', accept: 'application/json,.json', hidden: true, onChange: (e) => { const f = e.target.files[0]; if (f) importBackup(f); e.target.value = ''; } });
   return h('div', { class: 'stack' },
+    aboutSection(),
+    pauseSection(),
     botSection(),
     h('section', { class: 'card' }, h('h2', {}, 'Тема'),
       chips(THEMES, themePref(), (v) => { remember('theme', v); applyTheme(); })),
-    h('section', { class: 'card' }, h('h2', {}, 'Вікна дня'),
-      slotEditor('weekday', 'Будні'), slotEditor('weekend', 'Вихідні')),
-    h('section', { class: 'card' }, h('h2', {}, 'Резервна копія'),
+    folded('set-slots', h('h2', {}, 'Вікна дня'),
+      h('div', { class: 'fold-body' }, slotEditor('weekday', 'Будні'), slotEditor('weekend', 'Вихідні')),
+      { def: false, persist: true, cls: 'card' }),
+    folded('set-backup', h('h2', {}, 'Резервна копія'), h('div', { class: 'fold-body' },
       h('p', { class: 'muted small' }, 'Дані живуть лише в цьому браузері. Копія — файл JSON, його можна відновити на іншому пристрої.'),
       h('div', { class: 'btn-grid' },
         button('move', 'Зберегти копію', '', exportBackup),
         button('undo', 'Відновити з файлу', '', () => file.click())),
-      file),
-    h('p', { class: 'muted small about' }, `Хобі-план ${self.APP_VERSION ?? ''}`));
+      file), { def: false, persist: true, cls: 'card' }));
 }
 
 // ---------- маршрути ----------
@@ -658,14 +993,15 @@ function viewSettings() {
 const VIEWS = {
   today: { title: 'Сьогодні', render: viewToday },
   plan: { title: 'План', render: viewPlan },
-  week: { title: 'Тиждень', render: viewWeek },
+  week: { title: () => (statsMode() === 'month' ? 'Місяць' : 'Тиждень'), render: viewStats },
   acts: { title: 'Заняття', render: viewActs, fab: () => editActivity(null) },
   settings: { title: 'Налаштування', render: viewSettings },
 };
 const TAB_ORDER = ['today', 'plan', 'week', 'acts'];
 
 function render() {
-  $('title').textContent = VIEWS[tab].title;
+  const { title } = VIEWS[tab];
+  $('title').textContent = typeof title === 'function' ? title() : title;
   $('view').replaceChildren(VIEWS[tab].render());
   for (const a of document.querySelectorAll('.tabs a')) {
     const on = a.dataset.tab === tab;
@@ -688,7 +1024,7 @@ function route() {
 function goTab(key) {
   // Вкладка з панелі — завжди з «сьогодні»: день чи тиждень, відкриті раніше, вже не актуальні
   if (key === 'plan') planDate = M.ymd();
-  if (key === 'week') weekOffset = 0;
+  if (key === 'week') { weekOffset = 0; monthOffset = 0; }
   if (location.hash === `#${key}`) render();
   else location.hash = `#${key}`;
 }
@@ -700,14 +1036,81 @@ function refreshClock() {
   if (tab !== 'acts' && tab !== 'settings') render();
 }
 
+/** Номер версії, яку несе worker, що чекає; старий worker не відповідає — тоді null. */
+function askVersion(worker) {
+  return new Promise((resolve) => {
+    const ch = new MessageChannel();
+    const timer = setTimeout(() => resolve(null), 1500);
+    ch.port1.onmessage = (e) => { clearTimeout(timer); resolve(e.data); };
+    worker.postMessage('version', [ch.port2]);
+  });
+}
+
+/** Нова версія завантажена й чекає: плашка вгорі, а в налаштуваннях — її номер і кнопка. */
+async function offerUpdate(worker) {
+  upd.worker = worker;
+  $('update').hidden = false;
+  $('update-btn').onclick = () => worker.postMessage('skipWaiting');
+  upd.next = await askVersion(worker);
+  if (tab === 'settings' && !$('layer').childElementCount) render();
+}
+
+/** Чекаємо, поки щойно знайдений worker докачає файли; redundant — встановлення зірвалось. */
+function whenInstalled(worker) {
+  return new Promise((resolve) => {
+    const check = () => {
+      if (worker.state === 'installed' || worker.state === 'activated') resolve(worker);
+      else if (worker.state === 'redundant') resolve(null);
+    };
+    worker.addEventListener('statechange', check);
+    check();
+  });
+}
+
+async function checkUpdate(status) {
+  if (!upd.reg) { status.textContent = 'Перевірка недоступна: браузер не встановив офлайн-режим'; return; }
+  status.textContent = 'Перевіряю…';
+  try {
+    await upd.reg.update();
+  } catch {
+    status.textContent = 'Немає зв’язку — спробуй пізніше';
+    return;
+  }
+  const fresh = upd.reg.installing ? await whenInstalled(upd.reg.installing) : upd.reg.waiting;
+  // Без controller (перший запуск) новий worker вмикається сам — оновлювати нічого
+  if (fresh && navigator.serviceWorker.controller && fresh.state === 'installed') {
+    status.textContent = 'Знайдено нову версію';
+    await offerUpdate(fresh);
+    return;
+  }
+  upd.checked = M.nowHm();
+  status.textContent = `У тебе остання версія · перевірено о ${upd.checked}`;
+}
+
+function aboutSection() {
+  const status = h('p', { class: 'muted small', 'aria-live': 'polite' },
+    upd.worker ? 'Нова версія завантажена — оновлення займе секунду, дані залишаться'
+      : (upd.checked ? `У тебе остання версія · перевірено о ${upd.checked}` : ''));
+  const next = upd.next ? `${upd.next.version} · збірка ${upd.next.build}` : '';
+  return h('section', { class: 'card' },
+    h('div', { class: 'slot-head' },
+      h('div', {},
+        h('h2', { class: 'about-name' }, 'Хобі-план'),
+        h('div', { class: 'muted small' }, `Версія ${self.APP_VERSION ?? '?'} · збірка ${self.APP_BUILD ?? '?'}`)),
+      upd.worker ? badge('now', next ? `Є ${upd.next.version}` : 'Є оновлення') : null),
+    status,
+    h('div', { class: 'btn-grid' },
+      upd.worker
+        ? button('refresh', next ? `Оновити до ${next}` : 'Оновити', 'primary', () => upd.worker.postMessage('skipWaiting'))
+        : button('refresh', 'Перевірити оновлення', '', () => checkUpdate(status))));
+}
+
 function registerWorker() {
   if (!('serviceWorker' in navigator)) return;
-  const offer = (worker) => {
-    $('update').hidden = false;
-    $('update-btn').onclick = () => worker.postMessage('skipWaiting');
-  };
+  const offer = (worker) => { offerUpdate(worker); };
   // updateViaCache 'none' — перевірка оновлення не бере sw.js і version.js з HTTP-кешу
   navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).then((reg) => {
+    upd.reg = reg;
     if (reg.waiting && navigator.serviceWorker.controller) offer(reg.waiting);
     reg.addEventListener('updatefound', () => {
       const worker = reg.installing;

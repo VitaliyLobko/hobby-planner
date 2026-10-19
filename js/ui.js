@@ -30,6 +30,19 @@ export function icon(name, cls = 'ico') {
   return span;
 }
 
+/**
+ * Згортана група на <details>. Відкритість зберігає той, хто викликає (onToggle):
+ * екран перемальовується щохвилини, і рідний стан <details> губився б.
+ */
+export function fold(head, body, { open = false, onToggle, cls = '' } = {}) {
+  const el = h('details', { class: `fold ${cls}`.trim(), open });
+  const sum = h('summary', { class: 'fold-head' }, head, icon('chevron', 'ico fold-chev'));
+  // Клік приходить до перемикання — передаємо стан, яким група стане
+  sum.addEventListener('click', () => onToggle?.(!el.open));
+  el.append(sum, ...[body].flat().filter(Boolean));
+  return el;
+}
+
 export function vibrate() {
   try { navigator.vibrate?.(12); } catch { /* не підтримується */ }
 }

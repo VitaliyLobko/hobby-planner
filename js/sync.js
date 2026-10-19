@@ -65,10 +65,12 @@ export async function syncNow() {
       .filter((t) => t.store === 'plan' && (t.updated || 0) > pushed)
       .map((t) => ({ id: t.ref, updated: t.updated }));
     const slots = state.meta.find((m) => m.id === 'slots');
+    // Паузи — щоразу цілком: їх кілька, а бот має знати, коли мовчати
+    const pauses = state.meta.find((m) => m.id === 'pauses')?.list ?? [];
     const res = await fetch(`${url}/api/sync`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
-      body: JSON.stringify({ since: Number(get(KEYS.since) || 0), items, deletes, activities: state.activities, slots }),
+      body: JSON.stringify({ since: Number(get(KEYS.since) || 0), items, deletes, activities: state.activities, slots, pauses }),
     });
     if (res.status === 401) throw new Error('Ключ не підходить — візьми новий у бота командою /key');
     if (!res.ok) throw new Error(`Бот відповів помилкою ${res.status}`);

@@ -41,6 +41,34 @@ export function dayTitle(s) {
   return `${DAY_NAMES[d.getDay()]}, ${d.getDate()} ${MONTHS[d.getMonth()]}`;
 }
 
+/** «25 жовтня». */
+export function dayMonth(s) {
+  const d = parseYmd(s);
+  return `${d.getDate()} ${MONTHS[d.getMonth()]}`;
+}
+
+// «Як минулого понеділка» — родовий відмінок, індекс як у getDay()
+export const LAST_DAY = ['минулої неділі', 'минулого понеділка', 'минулого вівторка', 'минулої середи', 'минулого четверга', "минулої п'ятниці", 'минулої суботи'];
+
+const MONTHS_NOM = ['Січень', 'Лютий', 'Березень', 'Квітень', 'Травень', 'Червень', 'Липень', 'Серпень', 'Вересень', 'Жовтень', 'Листопад', 'Грудень'];
+
+/** Перший день місяця зі зсувом від дати: monthStart('2026-10-19', -1) → '2026-09-01'. */
+export function monthStart(s, offset = 0) {
+  const d = parseYmd(s);
+  return ymd(new Date(d.getFullYear(), d.getMonth() + offset, 1));
+}
+
+export function monthDays(first) {
+  const d = parseYmd(first);
+  const n = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+  return Array.from({ length: n }, (_, i) => addDays(first, i));
+}
+
+export function monthTitle(first) {
+  const d = parseYmd(first);
+  return `${MONTHS_NOM[d.getMonth()]} ${d.getFullYear()}`;
+}
+
 export function rangeTitle(start) {
   const a = parseYmd(start);
   const b = parseYmd(addDays(start, 6));
@@ -76,7 +104,14 @@ export function slotsFor(date, slots) {
 
 // Кольори — ключі, а не hex: справжній відтінок бере CSS (--c-*), окремо для світлої й темної теми.
 export const COLORS = ['blue', 'green', 'olive', 'orange', 'purple', 'red', 'teal', 'pink'];
-export const ACTIVITY_ICONS = ['book', 'code', 'target', 'music', 'film', 'game', 'run', 'brush', 'star'];
+// Іконки занять групами — у формі заняття кожна група згортається.
+export const ICON_GROUPS = [
+  { title: 'Навчання', icons: [['book', 'Книга'], ['globe', 'Мова'], ['code', 'Код'], ['pen', 'Письмо'], ['bulb', 'Ідея'], ['calc', 'Математика'], ['chart', 'Аналітика']] },
+  { title: 'Музика й творчість', icons: [['music', 'Музика'], ['headphones', 'Навушники'], ['piano', 'Клавішні'], ['mic', 'Спів'], ['brush', 'Малювання'], ['palette', 'Палітра'], ['camera', 'Фото']] },
+  { title: 'Спорт і рух', icons: [['run', 'Біг'], ['dumbbell', 'Зал'], ['bike', 'Велосипед'], ['swim', 'Плавання'], ['ball', "М'яч"], ['mountain', 'Гори'], ['target', 'Стрільба'], ['shield', 'Захист']] },
+  { title: 'Дозвілля й дім', icons: [['film', 'Кіно'], ['game', 'Ігри'], ['chess', 'Шахи'], ['dice', 'Настолки'], ['cook', 'Кухня'], ['coffee', 'Кава'], ['plant', 'Рослини'], ['paw', 'Тварини'], ['tool', 'Майстерня'], ['car', 'Авто'], ['map', 'Подорожі'], ['tent', 'Похід']] },
+  { title: 'Інше', icons: [['star', 'Зірка'], ['heart', "Здоров'я"]] },
+];
 
 export function seedActivities(uid) {
   const a = (order, name, color, icon, weeklyTarget, minutes, minVersion, slots) =>
@@ -134,6 +169,22 @@ export function clock(sec) {
   return hh ? `${hh}:${p(mm)}:${p(sec % 60)}` : `${mm}:${p(sec % 60)}`;
 }
 
+// Пауза (відпустка, хвороба): дні від from до to включно не рахуються в цілях і «не пропускай двічі»,
+// бот у ці дні мовчить. Зберігається в meta: { id: 'pauses', list: [{ id, from, to, reason }] }.
+export const PAUSE_REASONS = [['vacation', 'Відпустка'], ['sick', 'Хвороба'], ['other', 'Інше']];
+
+export function pauseOn(date, pauses) {
+  return (pauses ?? []).find((p) => p.from <= date && date <= p.to) ?? null;
+}
+
+export const activeDays = (start, pauses) => weekDays(start).filter((d) => !pauseOn(d, pauses)).length;
+
+/** Тижнева ціль з поправкою на паузу: 5 разів на тиждень і 2 дні відпустки — 4 рази. */
+export function weekTarget(a, start, pauses) {
+  const days = activeDays(start, pauses);
+  return days === 7 ? a.weeklyTarget : Math.round((a.weeklyTarget * days) / 7);
+}
+
 /** Хвилини, витрачені на заняття за тиждень (лише зараховані рази). */
 export function weekSeconds(plan, activityId, start) {
   const end = addDays(start, 6);
@@ -150,11 +201,11 @@ export function weekCount(plan, activityId, start) {
 
 /**
  * «Не пропускай двічі»: останній ЗАКРИТИЙ раз заняття до дати beforeDate — пропуск.
- * Перенесені записи — лише слід, ще не закриті (майбутні, поточне вікно) — пропускаємо.
+ * Перенесені записи — лише слід, ще не закриті (майбутні, поточне вікно) і дні паузи — пропускаємо.
  */
-export function missedLastTime(plan, activityId, beforeDate, slotsCfg, today, now) {
+export function missedLastTime(plan, activityId, beforeDate, slotsCfg, today, now, pauses = []) {
   const past = plan
-    .filter((p) => p.activityId === activityId && p.date < beforeDate && p.status !== 'moved')
+    .filter((p) => p.activityId === activityId && p.date < beforeDate && p.status !== 'moved' && !pauseOn(p.date, pauses))
     .sort((x, y) => (x.date === y.date ? SLOT_IDS.indexOf(y.slot) - SLOT_IDS.indexOf(x.slot) : (x.date < y.date ? 1 : -1)));
   for (const p of past) {
     const slot = slotsFor(p.date, slotsCfg).find((s) => s.id === p.slot);

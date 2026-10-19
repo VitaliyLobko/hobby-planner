@@ -18,6 +18,9 @@ const ASSETS = [
   './icons/icon-512.png',
   './icons/icon-maskable-512.png',
   './icons/apple-touch-icon.png',
+  './icons/shortcut-today.png',
+  './icons/shortcut-plan.png',
+  './icons/shortcut-week.png',
 ];
 
 // Файли — повз HTTP-кеш браузера: GitHub Pages віддає max-age=600,
@@ -37,6 +40,8 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('message', (event) => {
   if (event.data === 'skipWaiting') self.skipWaiting();
+  // Сторінка питає номер у нового worker, що чекає, — щоб показати версію ще до оновлення
+  if (event.data === 'version') event.ports[0]?.postMessage({ version: self.APP_VERSION, build: self.APP_BUILD });
 });
 
 self.addEventListener('fetch', (event) => {
