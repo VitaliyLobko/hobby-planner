@@ -102,6 +102,30 @@ function slotName(slot) {
   return h('span', { class: 'slot-name' }, icon(M.SLOT_ICONS[slot.id]), `${slot.label} · ${slot.from}–${slot.to}`);
 }
 
+/** «19:30» → хвилини від півночі; 23:59 — кінець доби, щоб вечір не був на хвилину коротшим. */
+const hmMin = (hm) => (hm === '23:59' ? 1440 : Number(hm.slice(0, 2)) * 60 + Number(hm.slice(3, 5)));
+/** Звичний час справ за налаштуваннями занять. */
+const planMin = (items) => items.reduce((s, p) => s + ((act(p.activityId) ?? MISSING).minutes || 0), 0);
+const minText = (m) => M.duration(m * 60);
+const countText = (n) => `${n} ${plural(n, 'справа', 'справи', 'справ')}`;
+
+/** Підпис заголовка вікна в плані: скільки часу займуть справи, без хвилин у заняттях — скільки їх. */
+const loadText = (items) => (planMin(items) ? `~${minText(planMin(items))}` : countText(items.length));
+
+/**
+ * Чи вміщаються справи у вікно: час справ проти довжини вікна, а для вікна, що вже почалось, — проти залишку.
+ * Лише для вікон, що не скінчились, і коли в заняттях указані хвилини.
+ */
+function slotLoad(items, slot, date, today, now) {
+  const need = planMin(items);
+  const started = date === today && now >= slot.from;
+  if (!need || date < today || (date === today && now >= slot.to)) return null;
+  const room = hmMin(slot.to) - hmMin(started ? now : slot.from);
+  const over = need > room;
+  return h('div', { class: `slot-load${over ? ' over' : ''}` }, icon('clock'),
+    `Потрібно ~${minText(need)} · ${started ? 'лишилось' : 'у вікні'} ${minText(room)}${over ? ' — не вміститься' : ''}`);
+}
+
 function badge(status, text) {
   return h('span', { class: `badge b-${status}` }, text);
 }
@@ -306,7 +330,7 @@ function slotBadge(items, slot, date, today, now, isNow) {
   if (ended || !sts.includes('planned')) {
     return cnt ? badge('done', `Зараховано ${cnt}/${items.length}`) : badge('skipped', 'Пропущено');
   }
-  return badge('planned', `${items.length} ${plural(items.length, 'справа', 'справи', 'справ')}`);
+  return badge('planned', loadText(items.filter((p) => isOpen(M.shownStatus(p, slot, today, now)))));
 }
 
 /** Вікно дня — згортана група справ. Закрите вікно (усе відмічено чи порожнє минуле) згорнуте. */
@@ -318,6 +342,7 @@ function slotGroup(date, slot, today, now) {
   const head = h('span', { class: 'slot-head' },
     slotName(slot), dots(items), slotBadge(items, slot, date, today, now, isNow));
   const body = h('div', { class: 'slot-items' },
+    slotLoad(items.filter((p) => isOpen(M.shownStatus(p, slot, today, now))), slot, date, today, now),
     items.map((p) => itemCard(p, slot, date, today, now)),
     traceAt(date, slot.id).map((p) => h('p', { class: 'muted small' }, `${(act(p.activityId) ?? MISSING).name} — перенесено`)),
     ended ? null : h('a', {
@@ -396,10 +421,16 @@ function viewToday() {
   const today = M.ymd();
   const now = M.nowHm();
   const { done, target } = weekTotals(M.weekStart(today));
-  const cards = M.slotsFor(today, slotsCfg).map((slot) => slotGroup(today, slot, today, now));
+  const slots = M.slotsFor(today, slotsCfg);
+  const cards = slots.map((slot) => slotGroup(today, slot, today, now));
+  // Що ще попереду сьогодні: справи вікон, які не скінчились, і ще не відмічені
+  const left = planMin(slots.filter((s) => now < s.to)
+    .flatMap((s) => itemsAt(today, s.id).filter((p) => isOpen(M.shownStatus(p, s, today, now)))));
   return h('div', { class: 'stack' },
     h('div', { class: 'view-head' },
-      h('div', { class: 'muted' }, M.dayTitle(today)),
+      h('div', {},
+        h('div', { class: 'muted' }, M.dayTitle(today)),
+        left ? h('div', { class: 'day-left' }, icon('clock'), `Ще на сьогодні ~${minText(left)}`) : null),
       h('a', { class: 'week-pill', href: '#week', 'aria-label': `Тиждень: ${done} з ${target}` },
         h('span', { class: 'muted small' }, 'Тиждень'), h('b', {}, `${done} / ${target}`))),
     pauseBanner(today),
@@ -460,7 +491,7 @@ function planSlot(date, slot, wk, today, now) {
   const items = itemsAt(date, slot.id);
   const ended = date < today || (date === today && now >= slot.to);
   const head = h('span', { class: 'slot-head' }, slotName(slot), dots(items),
-    badge(items.length ? 'planned' : 'free', items.length ? `${items.length} ${plural(items.length, 'справа', 'справи', 'справ')}` : 'Вільно'));
+    badge(items.length ? 'planned' : 'free', items.length ? loadText(items) : 'Вільно'));
   const ranked = activeActs()
     .map((a) => ({ a, cnt: M.weekCount(state.plan, a.id, wk), goal: target(a, wk), pref: a.slots?.includes(slot.id) ? 1 : 0 }))
     .sort((x, y) => (y.pref - x.pref)
@@ -478,6 +509,7 @@ function planSlot(date, slot, wk, today, now) {
     h('span', { class: 'pick-why' }, `${cnt}/${goal}${miss ? ' · був пропуск' : ''}`)));
   }
   const body = h('div', { class: 'plan-body' },
+    slotLoad(items, slot, date, today, now),
     items.length ? h('div', { class: 'plan-items' }, items.map((p) => planItemRow(p, slot, today, now))) : null,
     row);
   return folded(`plan:${date}:${slot.id}`, head, body, { def: !ended, cls: 'card plan-slot' });
@@ -549,7 +581,7 @@ function viewPlan() {
   const wk = M.weekStart(date);
   const slots = M.slotsFor(date, slotsCfg);
   const items = slots.flatMap((s) => itemsAt(date, s.id));
-  const minutes = items.reduce((s, p) => s + ((act(p.activityId) ?? MISSING).minutes || 0), 0);
+  const minutes = planMin(items);
   const root = h('div', { class: 'stack' },
     h('div', { class: 'day-nav' },
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Попередній день', onClick: () => shiftPlan(-1) }, icon('prev')),
@@ -563,7 +595,7 @@ function viewPlan() {
     copyDayButton(date, today),
     ...slots.map((slot) => planSlot(date, slot, wk, today, now)),
     h('div', { class: 'plan-sum' },
-      h('b', {}, `${items.length} ${plural(items.length, 'справа', 'справи', 'справ')}${minutes ? ` · ~${minutes} хв` : ''}`),
+      h('b', {}, `${countText(items.length)}${minutes ? ` · ~${minText(minutes)}` : ''}`),
       date === today ? h('a', { class: 'btn primary', href: '#today' }, 'Готово') : null));
   swipeStep(root, shiftPlan);
   return root;

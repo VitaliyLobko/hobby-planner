@@ -56,6 +56,7 @@ export const ICONS = {
   chevron: '<path d="M6 9l6 6 6-6"/>',
   copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>',
   bars: '<path d="M4 20h16M7 16v-5M12 16V6M17 16v-8"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   refresh: '<path d="M20 11a8 8 0 0 0-14.3-4.9L4 8M4 3.5V8h4.5M4 13a8 8 0 0 0 14.3 4.9L20 16M20 20.5V16h-4.5"/>',
   gear: '<circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2.6"/><path d="M19 12h2.6M16.95 16.95l1.84 1.84M12 19v2.6M7.05 16.95l-1.84 1.84M5 12H2.4M7.05 7.05L5.21 5.21M12 5V2.4M16.95 7.05l1.84-1.84"/>',
   tabToday: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3" fill="currentColor"/>',
