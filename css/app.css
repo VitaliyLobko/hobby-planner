@@ -309,16 +309,22 @@ a { color: var(--accent); }
 .heat > .pause { background: repeating-linear-gradient(45deg, var(--line-strong) 0 2px, transparent 2px 4px); }
 .heat > .future { background: transparent; }
 
-.act-wrap { position: relative; transition: transform .15s ease; }
-.act-wrap > .act-card { padding-right: 52px; }
+.act-wrap { position: relative; display: grid; gap: 6px; transition: transform .15s ease; }
+.act-box { position: relative; }
+.act-box > .act-card { padding-right: 52px; }
 .act-wrap.dragging { transition: none; z-index: 5; }
-.act-wrap.dragging > .act-card { box-shadow: 0 10px 28px rgb(0 0 0 / .35); }
-.drag-handle {
-  position: absolute; top: 0; right: 0; bottom: 0; width: 48px;
-  display: flex; align-items: center; justify-content: center;
-  background: none; border: 0; color: var(--text-2); cursor: grab; touch-action: none;
-}
+.act-wrap.dragging .act-card { box-shadow: 0 10px 28px rgb(0 0 0 / .35); }
+.act-side { position: absolute; top: 0; right: 0; bottom: 0; width: 48px; display: flex; flex-direction: column; }
+.act-side > button { display: flex; align-items: center; justify-content: center; background: none; border: 0; color: var(--text-2); }
+.heat-toggle { height: 48px; flex: none; border-radius: 12px; }
+.heat-toggle .ico svg { width: 20px; height: 20px; }
+.heat-toggle.on { color: var(--text); background: var(--surface-2); }
+.drag-handle { flex: 1; cursor: grab; touch-action: none; }
 .act-wrap.dragging .drag-handle { cursor: grabbing; }
+.heat-panel { display: grid; gap: 8px; padding: 12px 14px; border-radius: 16px; background: var(--surface); border: 1px solid var(--line); }
+.heat-panel > .heat { margin-top: 0; grid-template-rows: repeat(7, 14px); grid-auto-columns: 14px; gap: 3px; }
+.heat-legend { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.heat-legend .heat { margin-top: 0; grid-template-rows: 10px; grid-auto-columns: 10px; }
 
 .slot-head-box { display: flex; flex-direction: column; gap: 6px; }
 .slot-progress { display: block; height: 3px; border-radius: 2px; background: var(--line); overflow: hidden; }
@@ -478,36 +484,56 @@ input[type="text"], input[type="search"], input[type="number"], input[type="time
 .bar { height: 8px; border-radius: 4px; background: var(--surface-2); overflow: hidden; }
 .bar span { display: block; height: 100%; border-radius: 4px; background: var(--c); }
 
-.grid {
-  display: grid; grid-template-columns: 48px repeat(7, minmax(0, 1fr)); gap: 6px; align-items: center;
+.changes h3 { margin: 0 0 6px; font-size: 15px; }
+.changes ul { margin: 0; padding-left: 20px; display: grid; gap: 6px; line-height: 1.4; }
+
+/* «Дні та вікна»: день — рядок, вікна — стовпці */
+.wgrid {
+  display: grid; grid-template-columns: 34px repeat(3, minmax(0, 1fr)) 28px; gap: 4px; align-items: stretch;
   font-size: 11px; font-weight: 700; color: var(--muted);
 }
-.grid-day { text-align: center; }
-.grid-day.today { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
-.grid-day.paused { color: var(--move-fg); background: var(--move-bg); border-radius: 6px; }
-/* вихідні — трохи іншим тоном: і заголовок дня, і клітинки під ним */
-.grid-day.weekend:not(.paused) { color: var(--weekend-fg); }
-.cell.weekend { background: var(--weekend-bg); }
+.wslot { display: flex; align-items: center; justify-content: center; gap: 4px; padding-bottom: 2px; }
+.wslot .ico svg { width: 14px; height: 14px; }
+.wday { display: grid; place-content: center; text-align: center; line-height: 1.15; border-radius: 10px; }
+.wday b { font-size: 12px; color: var(--text-2); }
+.wday.today { background: var(--now-ring); }
+.wday.today, .wday.today b { color: #fff; }
+.wday.weekend:not(.today) b { color: var(--weekend-fg); }
+.wcell {
+  height: 44px; min-width: 0; padding: 3px; border: 0; border-radius: 10px;
+  display: flex; align-items: stretch; justify-content: stretch;
+  background: color-mix(in srgb, var(--surface-2) 60%, transparent); color: var(--text-2);
+}
+.wcell.weekend { background: var(--weekend-bg); }
+.wcell.now { box-shadow: inset 0 0 0 2px var(--now-ring); }
+.wcell.paused, .wday.paused { background: repeating-linear-gradient(45deg, var(--move-bg) 0 6px, transparent 6px 12px); }
+.wcell.past.empty { opacity: .45; }
+
+/* справи — іконками: кілька в рядок, одна — більша */
+.wicons { flex: 1; display: flex; align-items: center; justify-content: center; gap: 3px; flex-wrap: wrap; }
+.wico {
+  width: 22px; height: 22px; flex: none; border-radius: 7px; border: 1.5px dashed var(--c);
+  display: inline-flex; align-items: center; justify-content: center; color: var(--c);
+}
+.wico .ico svg { width: 14px; height: 14px; }
+.wicons.one .wico { width: 32px; height: 32px; border-radius: 9px; }
+.wicons.one .wico .ico svg { width: 19px; height: 19px; }
+.s-done { background: var(--c); border-style: solid; color: #fff; }
+.s-min { background: color-mix(in srgb, var(--c) 45%, var(--surface)); border-style: solid; color: var(--text); }
+.s-planned { background: transparent; }
+.s-active { background: color-mix(in srgb, var(--c) 14%, var(--surface)); border-style: solid; }
+.s-skipped, .s-missed { background: transparent; border-color: var(--line-strong); color: var(--text-2); opacity: .55; }
+.wmore { font-size: 11px; color: var(--text-2); }
+.wsum { display: grid; place-content: center; font-size: 11px; color: var(--text-2); }
+.wsum.full { color: var(--ok-fg); }
+.wsum.short { color: var(--bad-fg); }
+.wlegend { --c: var(--text-2); display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 12px; font-size: 12px; color: var(--text-2); }
+.wlegend span { display: inline-flex; align-items: center; gap: 6px; }
+.wlegend .wico { width: 16px; height: 12px; border-radius: 4px; }
 .weekend-tag {
   margin-left: 8px; padding: 1px 8px; border-radius: 999px; vertical-align: 1px;
   background: var(--weekend-bg); color: var(--weekend-fg); font-size: 12px; font-weight: 700;
 }
-.cell {
-  height: 34px; padding: 0; border: 0; border-radius: 8px;
-  display: flex; align-items: center; justify-content: center;
-  background: var(--surface-2);
-}
-.cell .ico svg { width: 14px; height: 14px; stroke-width: 2.6; }
-.c-done { background: var(--c); }
-.c-min { background: color-mix(in srgb, var(--c) 40%, var(--surface)); }
-.c-planned { background: transparent; border: 1.5px dashed var(--c); }
-.c-skipped, .c-missed { background: transparent; border: 1.5px solid var(--bad-fg); color: var(--bad-fg); }
-/* кілька справ у вікні — стопка смужок */
-.cell.segs { flex-direction: column; align-items: stretch; gap: 2px; background: transparent; }
-.seg { flex: 1; min-height: 0; border-radius: 5px; display: flex; align-items: center; justify-content: center; }
-.legend { --c: var(--text-2); display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 12px; font-size: 12px; color: var(--text-2); }
-.legend span { display: inline-flex; align-items: center; gap: 6px; }
-.cell.mini { display: inline-block; width: 12px; height: 12px; border-radius: 3px; }
 .warn-card { background: var(--min-bg); color: var(--min-fg); border: 0; }
 
 /* ---------- місяць ---------- */
