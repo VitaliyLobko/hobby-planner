@@ -44,8 +44,9 @@ export function fold(head, body, { open = false, onToggle, cls = '' } = {}) {
   return el;
 }
 
-export function vibrate() {
-  try { navigator.vibrate?.(12); } catch { /* не підтримується */ }
+/** Відгук пальцю: 12 мс більшість телефонів не відчуває, тож 25 мс; pattern — [вібрація, пауза, …]. */
+export function vibrate(pattern = 25) {
+  try { navigator.vibrate?.(pattern); } catch { /* не підтримується */ }
 }
 
 let toastTimer;
@@ -329,7 +330,8 @@ export function swipeable(card, { onRight, onLeft, onTap, rightLabel, leftLabel 
     const dir = dx;
     reset();
     if (wasAxis === 'x') {
-      if (wasArmed) (dir > 0 ? onRight : onLeft)?.();
+      // Друга, довша вібрація — дію виконано (перша була, коли свайп дотягнули)
+      if (wasArmed) { vibrate(40); (dir > 0 ? onRight : onLeft)?.(); }
     } else if (!wasAxis && e.type === 'pointerup') {
       tapArmed = true;
     }

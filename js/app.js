@@ -1,7 +1,7 @@
 // Хобі-план: екрани «Сьогодні», «План», «Тиждень», «Заняття», «Налаштування».
 import { loadAll, write, uid, replaceAll } from './db.js';
 import * as M from './model.js';
-import { $, h, icon, toast, sheet, closeSheet, chips, swipeable, swipeStep, fold, timeField } from './ui.js';
+import { $, h, icon, toast, sheet, closeSheet, chips, swipeable, swipeStep, fold, timeField, vibrate } from './ui.js';
 import { initSync, syncNow, scheduleSync, botConfig, setBotConfig, lastSync, holdSync, fetchRestore, markRestored } from './sync.js';
 
 const state = { activities: [], plan: [], meta: [], reminders: [], tombstones: [] };
@@ -56,6 +56,27 @@ async function save(changes, { render: redraw = true, remote = false } = {}) {
   }
   if (!remote) scheduleSync();
   if (redraw) render();
+}
+
+/**
+ * Регулярні справи без бота ставить застосунок; з ботом — бот: він пам'ятає й справи, прибрані на іншому пристрої.
+ * until у розкладі — по який день уже ставили, тож прибрана справа назад не повертається.
+ */
+async function runRepeats({ render: redraw = false } = {}) {
+  const bot = botConfig();
+  if (bot.url && bot.key) return;
+  const today = M.ymd();
+  const last = M.addDays(today, M.REPEAT_DAYS - 1);
+  const { put, del } = M.repeatPlan(state.activities, state.plan, {
+    today, now: M.nowHm(), slotsFor: (date) => M.slotsFor(date, slotsCfg), pauses: pauses(),
+    from: (a) => (a.repeat.until && a.repeat.until >= today ? M.addDays(a.repeat.until, 1) : today),
+  });
+  const acts = state.activities.filter((a) => M.repeatOn(a) && a.repeat.until !== last)
+    .map((a) => ({ ...a, repeat: { ...a.repeat, until: last } }));
+  const changes = {};
+  if (put.length || del.length) changes.plan = { put, del };
+  if (acts.length) changes.activities = { put: acts };
+  if (Object.keys(changes).length) await save(changes, { render: redraw });
 }
 
 /** Відмітки з бота: беремо лише новіші за наші. */
@@ -761,7 +782,9 @@ function planSlot(date, slot, wk, today, now) {
   const body = h('div', { class: 'plan-body' },
     slotLoad(items, slot, date, today, now),
     items.length ? h('div', { class: 'plan-items' }, items.map((p) => planItemRow(p, slot, today, now))) : null,
-    row);
+    row,
+    // «Готово» під кожним вікном, щоб не гортати до низу сторінки
+    date === today ? h('div', { class: 'plan-done' }, h('a', { class: 'btn primary', href: '#today' }, 'Готово')) : null);
   return folded(`plan:${date}:${slot.id}`, head, body, { def: !ended, cls: 'card plan-slot' });
 }
 
@@ -1238,6 +1261,27 @@ function formBox(title, ...children) {
   return h('section', { class: 'form-box' }, h('h3', { class: 'form-box-title' }, title), ...children);
 }
 
+const SLOT_CHOICES = [['m', 'Ранок'], ['n', 'Обід / день'], ['e', 'Вечір']];
+
+/**
+ * Розклад із форми. Змінився — нова версія v (і until з нуля): справи підуть за новим розкладом,
+ * незачеплені старі приберуться. v не скидаємо й при вимкненні — щоб ключі не збіглись зі старими.
+ */
+function repeatFrom(old, { days, slot }) {
+  const next = [...new Set(days.map(Number))].sort((x, y) => x - y);
+  const same = old && old.slot === slot && (old.days ?? []).join() === next.join();
+  if (same || (!old && !next.length)) return old ?? null;
+  return { days: next, slot, v: (old?.v ?? 0) + 1, until: null };
+}
+
+/** «Пн, Ср, Пт · ранок» — для картки заняття. */
+function repeatText(a) {
+  if (!M.repeatOn(a)) return '';
+  const days = WEEK_DAYS.filter(([v]) => a.repeat.days.includes(Number(v))).map(([, label]) => label);
+  const slot = SLOT_CHOICES.find(([id]) => id === a.repeat.slot)?.[1] ?? '';
+  return `${days.length === 7 ? 'Щодня' : days.join(', ')} · ${slot.toLowerCase()}`;
+}
+
 function editActivity(orig) {
   const all = state.activities;
   const d = orig
@@ -1252,6 +1296,7 @@ function editActivity(orig) {
   const stepTarget = (n) => { d.weeklyTarget = Math.min(21, Math.max(1, d.weeklyTarget + n)); out.textContent = String(d.weeklyTarget); };
   const minutes = h('input', { type: 'number', inputmode: 'numeric', min: 0, max: 600, value: d.minutes || '', id: 'f-min' });
   const minVersion = h('input', { type: 'text', maxlength: 60, value: d.minVersion ?? '', placeholder: 'Напр.: 5 хв гами', id: 'f-minv' });
+  const rep = { days: (orig?.repeat?.days ?? []).map(String), slot: orig?.repeat?.slot ?? d.slots[0] ?? 'm' };
 
   // Превʼю вгорі: колір та іконку видно, навіть коли їхні блоки згорнуті
   const previewTile = h('span', { class: 'tile' });
@@ -1285,23 +1330,30 @@ function editActivity(orig) {
       h('label', { for: 'f-minv' }, 'Мінімальна версія — на поганий день'), minVersion),
     formBox('Коли',
       h('span', { class: 'flabel' }, 'Звичні вікна'),
-      chips([['m', 'Ранок'], ['n', 'Обід / день'], ['e', 'Вечір']], d.slots, (v) => { d.slots = v; }, { multi: true })),
+      chips(SLOT_CHOICES, d.slots, (v) => { d.slots = v; }, { multi: true }),
+      h('span', { class: 'flabel' }, 'Постійний розклад'),
+      weekChips(rep.days, (v) => { rep.days = v; }),
+      chips(SLOT_CHOICES, rep.slot, (v) => { rep.slot = v; }),
+      h('p', { class: 'muted small' }, "У ці дні справа сама з'являється в плані на тиждень уперед. Прибрав чи переніс якусь — назад не повернеться. Без днів — розкладу немає.")),
     h('div', { class: 'btn-grid' },
-      button('check', 'Зберегти', 'primary', () => {
+      button('check', 'Зберегти', 'primary', async () => {
         d.name = name.value.trim();
         if (!d.name) { name.focus(); toast('Вкажи назву'); return; }
         d.minutes = Math.max(0, Math.round(Number(minutes.value) || 0));
         d.minVersion = minVersion.value.trim();
+        d.repeat = repeatFrom(orig?.repeat, rep);
         closeSheet();
-        save({ activities: { put: [d] } });
+        await save({ activities: { put: [d] } });
+        await runRepeats({ render: true });
       })),
     // Архів — окремо й нижче за «Зберегти»: поруч у них влучали випадково
     orig ? h('div', { class: 'archive-zone' },
       button('undo', orig.archived ? 'Повернути з архіву' : 'В архів', 'ghost', async () => {
         closeSheet();
         await save({ activities: { put: [{ ...orig, archived: !orig.archived }] } });
+        await runRepeats({ render: true });
         toast(orig.archived ? `${orig.name} — знову в заняттях` : `${orig.name} — в архіві`,
-          { label: 'Скасувати', run: () => save({ activities: { put: [{ ...orig }] } }) });
+          { label: 'Скасувати', run: async () => { await save({ activities: { put: [{ ...orig }] } }); await runRepeats({ render: true }); } });
       })) : null);
   sheet(orig ? 'Заняття' : 'Нове заняття', form);
 }
@@ -1336,6 +1388,7 @@ function actCard(a) {
       h('span', { class: 'act-name' }, a.name),
       h('span', { class: 'act-sub' }, meta),
       a.minVersion ? h('span', { class: 'muted small' }, `Мінімум: ${a.minVersion}`) : null,
+      M.repeatOn(a) ? h('span', { class: 'repeat-line' }, icon('refresh'), repeatText(a)) : null,
       a.archived ? null : weekStreakBadge(a),
       levelLine(a)));
 }
@@ -1523,7 +1576,7 @@ function chooseBotData(data) {
       setBotConfig(null, null);
       holdSync(false);
       toast('Бота не підключено — дані не чіпали');
-      render();
+      runRepeats().then(render);
     },
   });
 }
@@ -1606,7 +1659,7 @@ function botSection() {
       cfg.key ? button('skip', 'Від’єднати бота', '', () => {
         setBotConfig(null, null);
         toast('Бота від’єднано: нагадування для нових справ не прийдуть');
-        render();
+        runRepeats().then(render);
       }) : null),
     cfg.key ? quietBlock() : null), { def: !cfg.key, cls: 'card' });
 }
@@ -1775,6 +1828,24 @@ function registerWorker() {
   });
 }
 
+// Секунди таймера на минулому тіку: сигнал — лише в мить, коли перейшли звичні хвилини, а не при кожному запуску
+const timerSeen = new Map();
+
+/** Таймер дійшов до звичних хвилин заняття — вібрація й тост (поки застосунок відкритий; у Telegram пише бот). */
+function timerGoals() {
+  for (const item of state.plan) {
+    if (!item.runningSince) continue;
+    const sec = M.elapsed(item);
+    const prev = timerSeen.get(item.id);
+    timerSeen.set(item.id, sec);
+    const a = act(item.activityId);
+    const goal = (a?.minutes || 0) * 60;
+    if (!goal || prev === undefined || prev >= goal || sec < goal) continue;
+    vibrate([60, 80, 60]);
+    toast(`⏱ ${a.name}: ${minText(a.minutes)} минуло — можна відмітити`);
+  }
+}
+
 async function init() {
   applyTheme();
   registerWorker();
@@ -1806,7 +1877,7 @@ async function init() {
   let minute = M.nowHm();
   setInterval(() => {
     const m = M.nowHm();
-    if (m !== minute) { minute = m; refreshClock(); }
+    if (m !== minute) { minute = m; runRepeats().then(refreshClock); }
   }, 15000);
   document.addEventListener('visibilitychange', refreshClock);
   // Бот: при старті, при поверненні в застосунок і щохвилини, поки він на екрані — підтягнути відмітки з Telegram
@@ -1824,7 +1895,9 @@ async function init() {
       const item = state.plan.find((p) => p.id === el.dataset.timer);
       if (item?.runningSince) el.textContent = M.clock(M.elapsed(item));
     }
+    timerGoals();
   }, 1000);
+  await runRepeats();
   route();
   // Ярлик «Є кілька хвилин?» з іконки застосунку: одразу шторка, а ?quick прибираємо, щоб не відкрилась знову
   const params = new URLSearchParams(location.search);

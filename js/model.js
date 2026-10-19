@@ -249,6 +249,49 @@ export function pauseOn(date, pauses) {
 
 export const activeDays = (start, pauses) => weekDays(start).filter((d) => !pauseOn(d, pauses)).length;
 
+// Постійний розклад заняття: repeat = { days: [номери getDay], slot, v, until }. v росте з кожною зміною
+// розкладу — нові справи отримують нові ключі, а незачеплені справи старого розкладу прибираються.
+// Те саме робить бот (runRepeats у worker.js) — правити разом.
+export const REPEAT_DAYS = 7;
+export const repeatOn = (a) => Boolean(!a.archived && a.repeat?.days?.length && a.repeat.slot);
+/** Сталий ключ: той самий у застосунку й боті, тож дубля не буде, а прибрану справу видно за ключем. */
+export const repeatId = (a, date) => `r${a.repeat.v}-${date.replaceAll('-', '')}-${a.id}`;
+
+/**
+ * Регулярні справи на REPEAT_DAYS днів від today. put — нові (з from(a) включно), del — справи старого розкладу,
+ * яких ще не торкались (без відмітки, таймера й теми) і чиє вікно ще не скінчилось. Дні паузи пропускаємо;
+ * заняття, що вже є в тому вікні (поставлене руками), не дублюємо.
+ */
+export function repeatPlan(acts, plan, { today, now, slotsFor: slotsOf, pauses, from }) {
+  const put = [];
+  const del = [];
+  const open = (date, slot) => date > today || (date === today && now < slot.to);
+  for (const p of plan) {
+    if (p.rep == null) continue;
+    const a = acts.find((x) => x.id === p.activityId);
+    if (a && repeatOn(a) && p.rep === a.repeat.v) continue;
+    if (p.status !== 'planned' || p.spent || p.runningSince || p.topic) continue;
+    const slot = slotsOf(p.date).find((s) => s.id === p.slot);
+    if (slot && open(p.date, slot)) del.push(p.id);
+  }
+  const last = addDays(today, REPEAT_DAYS - 1);
+  for (const a of acts) {
+    if (!repeatOn(a)) continue;
+    const { days, slot: slotId, v } = a.repeat;
+    for (let date = from(a); date <= last; date = addDays(date, 1)) {
+      if (!days.includes(parseYmd(date).getDay()) || pauseOn(date, pauses)) continue;
+      const slot = slotsOf(date).find((s) => s.id === slotId);
+      if (!slot || !open(date, slot)) continue;
+      const id = repeatId(a, date);
+      const taken = (p) => p.id === id || (p.date === date && p.slot === slotId && p.activityId === a.id
+        && p.status !== 'moved' && !del.includes(p.id));
+      if (plan.some(taken)) continue;
+      put.push({ id, date, slot: slotId, activityId: a.id, topic: '', status: 'planned', doneAt: null, rep: v });
+    }
+  }
+  return { put, del };
+}
+
 /** Тижнева ціль з поправкою на паузу: 5 разів на тиждень і 2 дні відпустки — 4 рази. */
 export function weekTarget(a, start, pauses) {
   const days = activeDays(start, pauses);
