@@ -198,14 +198,14 @@ a { color: var(--accent); }
 .timer { font-size: 15px; font-weight: 800; font-variant-numeric: tabular-nums; }
 .st-active .timer { color: var(--ok-fg); }
 .timer-btn {
-  width: 44px; height: 44px; border-radius: 50%; border: 1.5px solid var(--line-strong);
+  width: 54px; height: 54px; border-radius: 50%; border: 1.5px solid var(--line-strong);
   display: inline-flex; align-items: center; justify-content: center;
   background: var(--surface-2); color: var(--text);
 }
 .timer-btn.on { background: var(--ok-solid); border-color: var(--ok-solid); color: #fff; }
-.timer-btn .ico svg { width: 20px; height: 20px; }
+.timer-btn .ico svg { width: 26px; height: 26px; }
 .timer-btn.ring {
-  border: 0; padding: 4px;
+  border: 0; padding: 5px;
   background: conic-gradient(var(--c) calc(var(--p, 0) * 360deg), var(--line-strong) 0);
 }
 .timer-core {
