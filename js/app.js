@@ -2,6 +2,7 @@
 import { loadAll, write, uid, replaceAll } from './db.js';
 import * as M from './model.js';
 import { $, h, icon, toast, sheet, closeSheet, chips, swipeable, swipeStep } from './ui.js';
+import { initSync, syncNow, scheduleSync, botConfig, setBotConfig, lastSync } from './sync.js';
 
 const state = { activities: [], plan: [], meta: [], tombstones: [] };
 let slotsCfg = structuredClone(M.DEFAULT_SLOTS);
@@ -28,14 +29,31 @@ const slotOf = (item) => M.slotsFor(item.date, slotsCfg).find((s) => s.id === it
 const actStyle = (a) => ({ '--c': `var(--c-${a?.color ?? 'blue'})` });
 const MISSING = { name: 'Видалене заняття', color: 'blue', icon: 'star', minutes: 0, minVersion: '', weeklyTarget: 1 };
 
-/** Записує зміни й одразу відбиває їх у state; render: false — коли перемальовка зірвала б введення. */
-async function save(changes, { render: redraw = true } = {}) {
-  await write(changes);
+/**
+ * Записує зміни й одразу відбиває їх у state; render: false — коли перемальовка зірвала б введення.
+ * remote — зміни, що приїхали з бота: зберігаємо їхній updated і не шлемо назад.
+ */
+async function save(changes, { render: redraw = true, remote = false } = {}) {
+  await write(changes, { keep: remote });
   for (const [name, { put = [], del = [] }] of Object.entries(changes)) {
     const ids = new Set([...del, ...put.map((x) => x.id)]);
     state[name] = [...state[name].filter((x) => !ids.has(x.id)), ...put];
   }
+  if (!remote) scheduleSync();
   if (redraw) render();
+}
+
+/** Відмітки з бота: беремо лише новіші за наші. */
+async function applyRemote(items, deleted) {
+  const put = items.filter((r) => {
+    const mine = state.plan.find((p) => p.id === r.id);
+    return !mine || (r.updated || 0) > (mine.updated || 0);
+  });
+  const del = deleted.filter((id) => state.plan.some((p) => p.id === id));
+  if (!put.length && !del.length) return;
+  // Шторка відкрита чи щось вводять — дані зберігаємо, а перемалюємо з наступним тіком годинника
+  const busy = $('layer').childElementCount || document.activeElement?.matches('input, textarea');
+  await save({ plan: { put, del } }, { remote: true, render: !busy });
 }
 
 function plural(n, one, few, many) {
@@ -578,9 +596,50 @@ async function importBackup(file) {
       button('undo', 'Скасувати', '', () => closeSheet()))));
 }
 
+const BOT_URL = 'https://t.me/hobby_planner_bot';
+const BOT_WORKER = 'https://hobby-bot.hobbyplanner338.workers.dev';
+
+function syncStatusText(res) {
+  if (res && !res.ok && res.error) return res.error;
+  const at = lastSync();
+  if (!at) return 'Ще не синхронізовано';
+  const d = new Date(at);
+  return `Синхронізовано ${M.ymd(d) === M.ymd() ? 'сьогодні' : M.dayTitle(M.ymd(d)).toLowerCase()} о ${M.nowHm(d)}`;
+}
+
+function botSection() {
+  const cfg = botConfig();
+  const url = h('input', { type: 'url', id: 'f-bot-url', value: cfg.url || BOT_WORKER, inputmode: 'url', autocomplete: 'off', spellcheck: 'false' });
+  const key = h('input', { type: 'password', id: 'f-bot-key', value: cfg.key, autocomplete: 'off', placeholder: 'Ключ із команди /key' });
+  const status = h('p', { class: 'muted small', id: 'sync-status', 'aria-live': 'polite' }, cfg.key ? syncStatusText() : '');
+  return h('section', { class: 'card form' }, h('h2', {}, 'Telegram-бот'),
+    h('p', { class: 'muted small' },
+      'Нагадування з кнопками приходять у Telegram, відмітки звідти повертаються сюди. Напиши ',
+      h('a', { href: BOT_URL, target: '_blank', rel: 'noopener' }, '@hobby_planner_bot'),
+      ' команду /key і встав ключ нижче.'),
+    h('label', { for: 'f-bot-url' }, 'Адреса бота'), url,
+    h('label', { for: 'f-bot-key' }, 'Ключ'), key,
+    status,
+    h('div', { class: 'btn-grid' },
+      button('check', 'Зберегти й синхронізувати', 'primary', async () => {
+        if (!url.value.trim().startsWith('https://') || !key.value.trim()) { toast('Потрібні адреса (https://…) і ключ'); return; }
+        setBotConfig(url.value, key.value);
+        status.textContent = 'Синхронізую…';
+        const res = await syncNow();
+        status.textContent = syncStatusText(res);
+        toast(res.ok ? 'Бот підключено' : res.error);
+      }),
+      cfg.key ? button('skip', 'Від’єднати бота', '', () => {
+        setBotConfig(null, null);
+        toast('Бота від’єднано: нагадування для нових справ не прийдуть');
+        render();
+      }) : null));
+}
+
 function viewSettings() {
   const file = h('input', { type: 'file', accept: 'application/json,.json', hidden: true, onChange: (e) => { const f = e.target.files[0]; if (f) importBackup(f); e.target.value = ''; } });
   return h('div', { class: 'stack' },
+    botSection(),
     h('section', { class: 'card' }, h('h2', {}, 'Тема'),
       chips(THEMES, themePref(), (v) => { remember('theme', v); applyTheme(); })),
     h('section', { class: 'card' }, h('h2', {}, 'Вікна дня'),
@@ -591,7 +650,7 @@ function viewSettings() {
         button('move', 'Зберегти копію', '', exportBackup),
         button('undo', 'Відновити з файлу', '', () => file.click())),
       file),
-    h('p', { class: 'muted small about' }, `Хобі-план ${self.APP_VERSION ?? ''} · нагадування в Telegram — у версії 0.2`));
+    h('p', { class: 'muted small about' }, `Хобі-план ${self.APP_VERSION ?? ''}`));
 }
 
 // ---------- маршрути ----------
@@ -703,6 +762,15 @@ async function init() {
     if (m !== minute) { minute = m; refreshClock(); }
   }, 15000);
   document.addEventListener('visibilitychange', refreshClock);
+  // Бот: при старті, при поверненні в застосунок і щохвилини, поки він на екрані — підтягнути відмітки з Telegram
+  initSync({
+    getState: () => state,
+    apply: applyRemote,
+    onStatus: (res) => { const el = $('sync-status'); if (el) el.textContent = syncStatusText(res); },
+  });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') syncNow(); });
+  setInterval(() => { if (document.visibilityState === 'visible') syncNow(); }, 60000);
+  syncNow();
   // Живий лічильник таймера: міняємо лише текст цифр, без перемальовки екрана
   setInterval(() => {
     for (const el of document.querySelectorAll('[data-timer]')) {

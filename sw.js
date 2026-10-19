@@ -13,6 +13,7 @@ const ASSETS = [
   './js/model.js',
   './js/ui.js',
   './js/icons.js',
+  './js/sync.js',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/icon-maskable-512.png',

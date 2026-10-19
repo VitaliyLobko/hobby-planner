@@ -34,7 +34,12 @@ py -m http.server 8093 --bind 127.0.0.1
 На `vitaliylobko.github.io` один origin із shooting-log і weight-log, тому все своє — з префіксом
 `hobby-planner`: база IndexedDB, ключі localStorage, кеш service worker.
 
+## Telegram-бот
+
+Нагадування з кнопками й повторами, поки не відмітиш, — [@hobby_planner_bot](https://t.me/hobby_planner_bot)
+на Cloudflare Worker. Код і налаштування — у [worker/](worker/README.md). У застосунку:
+Налаштування → Telegram-бот → адреса Worker і ключ із команди `/key`.
+
 ## Далі
 
-- 0.2 — Telegram-бот на Cloudflare Worker: нагадування з кнопками, повтор, поки не відмітиш.
 - 0.3 — список уроків для кожного заняття, шаблон «як зазвичай», статистика.

@@ -66,8 +66,11 @@ export async function loadAll() {
   return state;
 }
 
-/** changes: { store: { put: [obj], del: [id] } } — усе однією транзакцією, з відміткою часу. */
-export async function write(changes) {
+/**
+ * changes: { store: { put: [obj], del: [id] } } — усе однією транзакцією, з відміткою часу.
+ * keep — лишити updated, що вже є в записі (зміни, що приїхали з бота): інакше вони виглядали б новими.
+ */
+export async function write(changes, { keep = false } = {}) {
   const now = Date.now();
   const names = Object.keys(changes);
   const hasDel = names.some((n) => changes[n].del?.length);
@@ -76,7 +79,7 @@ export async function write(changes) {
     for (const name of names) {
       const store = tx.objectStore(name);
       for (const obj of changes[name].put ?? []) {
-        obj.updated = now;
+        if (!keep || !obj.updated) obj.updated = now;
         store.put(obj);
       }
       for (const id of changes[name].del ?? []) {

@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#121417">
-  <!-- Дані нікуди не йдуть: браузер блокує все, крім власних файлів застосунку. -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
+  <!-- Дані йдуть лише у власний бот на workers.dev, коли його підключено; решту браузер блокує. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https://*.workers.dev; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
   <meta name="description" content="План хобі на день: ранок, обід, вечір — і звичка не пропускати">
   <title>Хобі-план</title>
   <link rel="manifest" href="manifest.webmanifest">

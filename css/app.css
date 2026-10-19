@@ -235,7 +235,7 @@ a { color: var(--accent); }
 .pick-why { font-size: 11px; font-weight: 600; opacity: .8; }
 .plan-sum { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 2px 8px; }
 
-input[type="text"], input[type="number"], input[type="time"] {
+input[type="text"], input[type="number"], input[type="time"], input[type="url"], input[type="password"] {
   width: 100%; min-height: 44px; padding: 0 12px; border-radius: 10px;
   border: 1px solid var(--line); background: var(--surface-2); color: var(--text); font: inherit;
 }
