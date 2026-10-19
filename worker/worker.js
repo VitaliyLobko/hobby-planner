@@ -214,6 +214,9 @@ function duration(sec) {
 
 const MISSING = { name: 'Заняття', minutes: 0, minVersion: '' };
 
+// Для HTML-повідомлень: «<1 хв» без екранування Telegram сприймає як тег і відкидає все повідомлення
+const dur = (sec) => esc(duration(sec));
+
 const MARK = { done: '✅', min: '◐', moved: '↷', skipped: '✕' };
 const short = (s) => (s.length > 16 ? `${s.slice(0, 15)}…` : s);
 
@@ -222,13 +225,13 @@ function itemLine(it, a, tz, now) {
   const sec = elapsed(it, now);
   const topic = it.topic ? ` — ${esc(it.topic)}` : '';
   if (it.status === 'planned') {
-    if (it.runningSince) return `▶ <b>${esc(a.name)}</b>${topic} · йде з ${local(it.runningSince, tz).hm}${sec ? `, ${duration(sec)}` : ''}`;
-    if (sec) return `⏸ <b>${esc(a.name)}</b>${topic} · на паузі, ${duration(sec)}`;
+    if (it.runningSince) return `▶ <b>${esc(a.name)}</b>${topic} · йде з ${local(it.runningSince, tz).hm}${sec ? `, ${dur(sec)}` : ''}`;
+    if (sec) return `⏸ <b>${esc(a.name)}</b>${topic} · на паузі, ${dur(sec)}`;
     const plan = [a.minutes ? `~${a.minutes} хв` : '', a.minVersion ? `мінімум: ${esc(a.minVersion)}` : ''].filter(Boolean).join(' · ');
     return `• <b>${esc(a.name)}</b>${topic}${plan ? `\n   <i>${plan}</i>` : ''}`;
   }
   const when = it.doneAt ? ` о ${it.doneAt}` : '';
-  const spent = sec && (it.status === 'done' || it.status === 'min') ? ` · ${duration(sec)}` : '';
+  const spent = sec && (it.status === 'done' || it.status === 'min') ? ` · ${dur(sec)}` : '';
   const where = it.status === 'moved' && it.movedLabel ? ` ${esc(it.movedLabel)}` : '';
   return `${MARK[it.status] ?? ''} ${esc(a.name)}${topic} — ${(STATUS[it.status] ?? it.status).toLowerCase()}${where}${when}${spent}`;
 }
@@ -696,7 +699,7 @@ async function sendToday(env, chatId, now, title, morning = false) {
         const a = acts.get(it.activityId) ?? MISSING;
         const running = it.status === 'planned' && it.runningSince ? ' ▶' : '';
         const spent = elapsed(it, now);
-        lines.push(`${mark[it.status] ?? '•'} ${esc(slot.label)} — ${esc(a.name)}${it.topic ? `, ${esc(it.topic)}` : ''}${running}${spent ? ` · ${duration(spent)}` : ''}`);
+        lines.push(`${mark[it.status] ?? '•'} ${esc(slot.label)} — ${esc(a.name)}${it.topic ? `, ${esc(it.topic)}` : ''}${running}${spent ? ` · ${dur(spent)}` : ''}`);
       }
     }
     if (!morning) {
@@ -724,7 +727,7 @@ async function sendWeek(env, chatId, now) {
     const mine = items.filter((x) => x.activityId === a.id);
     const sec = mine.reduce((s, x) => s + (x.spent || 0), 0);
     const target = weekTarget(a, start, pauses);
-    lines.push(`${mine.length >= target ? '✅' : '•'} ${esc(a.name)}: ${mine.length}/${target}${sec ? ` · ${duration(sec)}` : ''}`);
+    lines.push(`${mine.length >= target ? '✅' : '•'} ${esc(a.name)}: ${mine.length}/${target}${sec ? ` · ${dur(sec)}` : ''}`);
   }
   if (!acts.length) lines.push('Заняття ще не синхронізовані — відкрий застосунок.');
   await tg(env, 'sendMessage', {
