@@ -224,6 +224,11 @@ a { color: var(--accent); }
   background: var(--min-bg); color: var(--min-fg); font-size: 13px; font-weight: 600;
 }
 .st-skipped .act-row, .st-moved .act-row { opacity: .6; }
+/* зроблене відходить на другий план: очі — на те, що ще попереду; плашка статусу лишається чіткою */
+.item-card:is(.st-done, .st-min) .tile { opacity: .45; }
+.item-card:is(.st-done, .st-min) .act-name { color: var(--muted); }
+.item-card:is(.st-done, .st-min) .act-sub { color: var(--muted); opacity: .8; }
+.slot-group .card.swipe:is(.st-done, .st-min) .swipe-body { background: color-mix(in srgb, var(--surface-2) 45%, var(--surface)); }
 
 .link-btn {
   display: inline-flex; align-items: center; gap: 6px; min-height: 44px; align-self: flex-start;
@@ -330,6 +335,8 @@ a { color: var(--accent); }
 .month-head .flabel { margin-top: 0; }
 .month-picked { font-size: 15px; font-weight: 700; }
 /* 5 у ряд — кнопки під палець; «Останній» доповнює ряд із 31 */
+.chips.week-days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
+.week-days .chip { min-height: 44px; padding: 0; font-size: 14px; }
 .chips.month-days { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
 .month-days .chip { min-height: 48px; padding: 0; justify-content: center; font-size: 17px; }
 .month-days .chip:last-child { grid-column: span 4; font-size: 15px; }
@@ -355,7 +362,7 @@ a { color: var(--accent); }
 .date-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .date-pair label { display: flex; flex-direction: column; gap: 4px; margin: 0; }
 
-input[type="text"], input[type="number"], input[type="time"], input[type="url"], input[type="password"], input[type="date"] {
+input[type="text"], input[type="search"], input[type="number"], input[type="time"], input[type="url"], input[type="password"], input[type="date"] {
   width: 100%; min-height: 44px; padding: 0 12px; border-radius: 10px;
   border: 1px solid var(--line); background: var(--surface-2); color: var(--text); font: inherit;
 }
@@ -458,6 +465,7 @@ input[type="text"], input[type="number"], input[type="time"], input[type="url"],
 .icon-opt[aria-pressed="true"] { border-color: var(--text); }
 .icon-groups { display: flex; flex-direction: column; gap: 12px; }
 .icon-group .fold-title { margin: 0 0 6px; }
+.icon-group[hidden], .icon-opt[hidden] { display: none; }
 
 /* форма заняття: превʼю й блоки з підписом */
 .act-form { gap: 12px; }

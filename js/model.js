@@ -108,13 +108,79 @@ export function slotsFor(date, slots) {
 // Перші вісім — як були (за ними нові заняття беруть колір по черзі), далі — додані
 export const COLORS = ['blue', 'green', 'olive', 'orange', 'purple', 'red', 'teal', 'pink',
   'indigo', 'sky', 'mint', 'lime', 'amber', 'brown', 'magenta', 'slate'];
-// Іконки занять групами — у формі заняття кожна група згортається.
+// Іконки занять групами. Ключ, якого немає у власному наборі (icons.js), береться з Lucide
+// (icons-lucide.js; після правки списку — перезібрати: scripts/make_lucide.py).
+// Ключ зберігається в занятті й у боті (ACT_EMOJI) — уже наявні ключі не перейменовувати.
 export const ICON_GROUPS = [
-  { title: 'Навчання', icons: [['book', 'Книга'], ['globe', 'Мова'], ['code', 'Код'], ['pen', 'Письмо'], ['bulb', 'Ідея'], ['calc', 'Математика'], ['chart', 'Аналітика']] },
-  { title: 'Музика й творчість', icons: [['music', 'Музика'], ['headphones', 'Навушники'], ['piano', 'Клавішні'], ['mic', 'Спів'], ['brush', 'Малювання'], ['palette', 'Палітра'], ['camera', 'Фото']] },
-  { title: 'Спорт і рух', icons: [['run', 'Біг'], ['dumbbell', 'Зал'], ['bike', 'Велосипед'], ['swim', 'Плавання'], ['ball', "М'яч"], ['mountain', 'Гори'], ['target', 'Стрільба'], ['shield', 'Захист']] },
-  { title: 'Дозвілля й дім', icons: [['film', 'Кіно'], ['game', 'Ігри'], ['chess', 'Шахи'], ['dice', 'Настолки'], ['cook', 'Кухня'], ['coffee', 'Кава'], ['plant', 'Рослини'], ['paw', 'Тварини'], ['tool', 'Майстерня'], ['car', 'Авто'], ['map', 'Подорожі'], ['tent', 'Похід']] },
-  { title: 'Інше', icons: [['star', 'Зірка'], ['heart', "Здоров'я"]] },
+  { title: 'Навчання', icons: [
+    ['book', 'Книга'], ['book-open', 'Читання'], ['graduation-cap', 'Навчання'], ['globe', 'Мова'],
+    ['languages', 'Переклад'], ['pen', 'Письмо'], ['notebook-pen', 'Конспект'], ['scroll', 'Історія'],
+    ['library', 'Бібліотека'], ['newspaper', 'Новини'], ['bulb', 'Ідея'], ['brain', 'Мислення'],
+    ['calc', 'Математика'], ['sigma', 'Формули'], ['chart', 'Аналітика'], ['code', 'Код'],
+    ['terminal', 'Термінал'], ['database', 'Дані'], ['cpu', 'Електроніка'], ['bot', 'Роботи'],
+    ['microscope', 'Біологія'], ['flask-conical', 'Хімія'], ['atom', 'Фізика'], ['telescope', 'Астрономія'],
+    ['presentation', 'Виступ'], ['glasses', 'Окуляри'],
+  ] },
+  { title: 'Музика й творчість', icons: [
+    ['music', 'Музика'], ['music-2', 'Ноти'], ['headphones', 'Навушники'], ['guitar', 'Гітара'],
+    ['piano', 'Клавішні'], ['drum', 'Барабани'], ['mic', 'Спів'], ['podcast', 'Подкаст'],
+    ['disc-3', 'Платівки'], ['radio', 'Радіо'], ['brush', 'Малювання'], ['palette', 'Палітра'],
+    ['pencil', 'Олівець'], ['pencil-ruler', 'Креслення'], ['pen-tool', 'Дизайн'], ['spray-can', 'Графіті'],
+    ['image', 'Картини'], ['camera', 'Фото'], ['aperture', "Об'єктив"], ['video', 'Відео'],
+    ['clapperboard', 'Монтаж'], ['drama', 'Театр'], ['feather', 'Поезія'], ['scissors', 'Рукоділля'],
+    ['shirt', 'Шиття'], ['gem', 'Прикраси'], ['origami', 'Орігамі'],
+  ] },
+  { title: 'Спорт і рух', icons: [
+    ['run', 'Біг'], ['footprints', 'Ходьба'], ['person-standing', 'Розтяжка'], ['dumbbell', 'Зал'],
+    ['biceps-flexed', 'Сила'], ['weight', 'Вага'], ['heart-pulse', 'Кардіо'], ['bike', 'Велосипед'],
+    ['swim', 'Плавання'], ['waves', 'Море'], ['sailboat', 'Вітрило'], ['ball', "М'яч"],
+    ['volleyball', 'Волейбол'], ['goal', 'Ворота'], ['medal', 'Медаль'], ['trophy', 'Кубок'],
+    ['mountain', 'Гори'], ['mountain-snow', 'Лижі'], ['snowflake', 'Зима'], ['swords', 'Фехтування'],
+  ] },
+  { title: 'Стрільба й похід', icons: [
+    ['target', 'Стрільба'], ['crosshair', 'Приціл'], ['shield', 'Захист'], ['bomb', 'Сапер'],
+    ['binoculars', 'Бінокль'], ['backpack', 'Рюкзак'], ['compass', 'Компас'], ['map', 'Подорожі'],
+    ['map-pin', 'Точка'], ['route', 'Маршрут'], ['tent', 'Похід'], ['tent-tree', 'Табір'],
+    ['trees', 'Ліс'], ['tree-pine', 'Ялина'], ['flame-kindling', 'Багаття'], ['flashlight', 'Ліхтарик'],
+    ['briefcase-medical', 'Аптечка'], ['axe', 'Сокира'], ['fish', 'Риболовля'],
+  ] },
+  { title: 'Їжа', icons: [
+    ['cook', 'Кухня'], ['chef-hat', 'Шеф'], ['cooking-pot', 'Каструля'], ['utensils', 'Обід'],
+    ['soup', 'Суп'], ['salad', 'Салат'], ['pizza', 'Піца'], ['cake', 'Випічка'],
+    ['croissant', 'Круасан'], ['egg', 'Яйця'], ['ham', "М'ясо"], ['apple', 'Фрукти'],
+    ['cherry', 'Ягоди'], ['carrot', 'Овочі'], ['coffee', 'Кава'], ['wine', 'Вино'],
+    ['beer', 'Пиво'], ['ice-cream-cone', 'Морозиво'],
+  ] },
+  { title: 'Дім і сад', icons: [
+    ['house', 'Дім'], ['sofa', 'Відпочинок'], ['bed', 'Сон'], ['bath', 'Ванна'],
+    ['washing-machine', 'Прання'], ['shopping-cart', 'Покупки'], ['tool', 'Майстерня'], ['hammer', 'Ремонт'],
+    ['wrench', 'Інструменти'], ['drill', 'Дриль'], ['paint-roller', 'Фарбування'], ['plant', 'Рослини'],
+    ['sprout', 'Розсада'], ['flower-2', 'Квіти'], ['shovel', 'Город'],
+  ] },
+  { title: 'Дозвілля й поїздки', icons: [
+    ['film', 'Кіно'], ['tv', 'Серіали'], ['popcorn', 'Попкорн'], ['game', 'Ігри'],
+    ['gamepad-2', 'Геймпад'], ['joystick', 'Ретроігри'], ['chess', 'Шахи'], ['dice', 'Настолки'],
+    ['spade', 'Карти'], ['puzzle', 'Пазли'], ['roller-coaster', 'Атракціони'], ['tickets', 'Квитки'],
+    ['party-popper', 'Свято'], ['gift', 'Подарунки'], ['car', 'Авто'], ['plane', 'Літак'],
+    ['train-front', 'Потяг'], ['caravan', 'Автодім'],
+  ] },
+  { title: "Здоров'я й люди", icons: [
+    ['heart', "Здоров'я"], ['pill', 'Ліки'], ['stethoscope', 'Лікар'], ['droplet', 'Вода'],
+    ['smile', 'Настрій'], ['flower', 'Медитація'], ['leaf', 'Природа'], ['eye', 'Зір'],
+    ['users', 'Друзі'], ['baby', 'Діти'], ['hand-heart', 'Турбота'], ['hand-helping', 'Волонтерство'],
+    ['church', 'Віра'], ['paw', 'Тварини'], ['cat', 'Кіт'], ['dog', 'Пес'], ['bird', 'Птахи'],
+  ] },
+  { title: 'Справи й гроші', icons: [
+    ['briefcase', 'Робота'], ['laptop', 'Ноутбук'], ['monitor', "Комп'ютер"], ['phone', 'Дзвінки'],
+    ['mail', 'Пошта'], ['calendar', 'Календар'], ['clipboard-list', 'Список'], ['list-checks', 'Справи'],
+    ['folder', 'Документи'], ['wallet', 'Гаманець'], ['piggy-bank', 'Скарбничка'], ['banknote', 'Гроші'],
+    ['receipt', 'Рахунки'], ['landmark', 'Установи'],
+  ] },
+  { title: 'Інше', icons: [
+    ['star', 'Зірка'], ['sparkles', 'Блиск'], ['wand-sparkles', 'Магія'], ['crown', 'Корона'],
+    ['rocket', 'Ракета'], ['flag', 'Прапор'], ['anchor', 'Якір'], ['infinity', 'Нескінченність'],
+    ['zap', 'Енергія'], ['ghost', 'Привид'],
+  ] },
 ];
 
 export function seedActivities(uid) {

@@ -1,5 +1,6 @@
 // Дрібні будівельні блоки інтерфейсу: елементи, іконки, тост, шторка, свайпи.
 import { ICONS } from './icons.js';
+import { LUCIDE } from './icons-lucide.js';
 
 export const $ = (id) => document.getElementById(id);
 
@@ -23,10 +24,10 @@ export function h(tag, attrs = {}, ...children) {
   return el;
 }
 
-/** Іконка з власного набору: розмітка SVG своя, не з даних, тому innerHTML тут безпечний. */
+/** Іконка з власного набору чи Lucide: розмітка SVG своя, не з даних, тому innerHTML тут безпечний. */
 export function icon(name, cls = 'ico') {
   const span = h('span', { class: cls, 'aria-hidden': 'true' });
-  span.innerHTML = `<svg viewBox="0 0 24 24">${ICONS[name] ?? ''}</svg>`;
+  span.innerHTML = `<svg viewBox="0 0 24 24">${ICONS[name] ?? LUCIDE[name] ?? ''}</svg>`;
   return span;
 }
 

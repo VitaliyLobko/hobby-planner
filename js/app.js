@@ -505,7 +505,7 @@ function editReminder(orig) {
         h('input', { type: 'date', id: 'f-rdate', value: d.date || today, min: today, onChange: (e) => { d.date = e.target.value; } }));
     } else if (d.kind === 'week') {
       when.replaceChildren(h('p', { class: 'flabel' }, 'Дні тижня'),
-        chips(WEEK_DAYS, d.days.map(String), (v) => { d.days = v.map(Number); }, { multi: true }));
+        weekChips(d.days.map(String), (v) => { d.days = v.map(Number); }));
     } else if (d.kind === 'month') {
       const days = [...Array.from({ length: 31 }, (_, i) => [String(i + 1), String(i + 1)]), [String(M.LAST_MONTH_DAY), 'Останній']];
       const picked = h('span', { class: 'month-picked' });
@@ -1179,7 +1179,10 @@ function colorPicker(d, onPick) {
 
 const iconName = (key) => M.ICON_GROUPS.flatMap((g) => g.icons).find(([k]) => k === key)?.[1] ?? '';
 
-/** Усі іконки одним блоком, групи — підзаголовками (навчання, музика, спорт…). */
+// Пошук без різниці між великими літерами й видами апострофа
+const searchKey = (s) => s.toLocaleLowerCase('uk').replace(/[’ʼ`]/g, "'").trim();
+
+/** Усі іконки одним блоком, групи — підзаголовками (навчання, музика, спорт…), зверху — пошук за назвою. */
 function iconPicker(d, onPick) {
   const buttons = [];
   const paint = () => {
@@ -1192,13 +1195,36 @@ function iconPicker(d, onPick) {
         type: 'button', class: 'icon-opt', 'aria-label': name, title: name, 'data-v': key,
         onClick: () => { d.icon = key; paint(); onPick(); },
       }, icon(key));
+      b.dataset.find = searchKey(name);
       buttons.push(b);
       row.append(b);
     }
-    return h('div', { class: 'icon-group' }, h('p', { class: 'fold-title' }, g.title), row);
+    const el = h('div', { class: 'icon-group' }, h('p', { class: 'fold-title' }, g.title), row);
+    el.dataset.find = searchKey(g.title);
+    return el;
+  });
+  const empty = h('p', { class: 'muted small', hidden: true }, 'Нічого не знайдено');
+  // Назва групи теж шукається: «спорт» показує всю групу
+  const filter = (q) => {
+    let shown = 0;
+    for (const g of groups) {
+      const whole = !q || g.dataset.find.includes(q);
+      let inGroup = 0;
+      for (const b of g.querySelectorAll('.icon-opt')) {
+        b.hidden = !(whole || b.dataset.find.includes(q));
+        if (!b.hidden) inGroup += 1;
+      }
+      g.hidden = inGroup === 0;
+      shown += inGroup;
+    }
+    empty.hidden = shown > 0;
+  };
+  const search = h('input', {
+    type: 'search', placeholder: 'Пошук: гітара, кава, ліс…', 'aria-label': 'Пошук іконки', enterkeyhint: 'search',
+    onInput: (e) => filter(searchKey(e.target.value)),
   });
   paint();
-  return h('div', { class: 'icon-groups' }, groups);
+  return h('div', { class: 'icon-groups' }, search, empty, groups);
 }
 
 /** Блок форми, що згортається: у заголовку — назва й поточний вибір. */
@@ -1353,11 +1379,18 @@ function weekendPicker() {
   const days = (slotsCfg.weekendDays ?? M.DEFAULT_WEEKEND).map(String);
   return h('div', { class: 'slot-edit' }, h('h3', {}, 'Вихідні дні'),
     h('p', { class: 'muted small' }, 'У ці дні — час вікон «Вихідні», у решту — «Будні». Наприклад, змінний графік: вихідні вівторок і середа.'),
-    chips(WEEK_DAYS, days, (v) => {
+    weekChips(days, (v) => {
       const next = { ...structuredClone(slotsCfg), weekendDays: v.map(Number) };
       slotsCfg = next;
       save({ meta: { put: [next] } }, { render: false });
-    }, { multi: true }));
+    }));
+}
+
+/** Пн…Нд одним рядом: сітка на 7, а не перенос, як у звичайних чипів. */
+function weekChips(value, onChange) {
+  const row = chips(WEEK_DAYS, value, onChange, { multi: true });
+  row.classList.add('week-days');
+  return row;
 }
 
 /** Час і назви вікон — стандартні; які дні вихідні, лишаємо як є. */
