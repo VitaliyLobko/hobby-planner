@@ -249,13 +249,24 @@ export function pauseOn(date, pauses) {
 
 export const activeDays = (start, pauses) => weekDays(start).filter((d) => !pauseOn(d, pauses)).length;
 
-// Постійний розклад заняття: repeat = { days: [номери getDay], slot, v, until }. v росте з кожною зміною
-// розкладу — нові справи отримують нові ключі, а незачеплені справи старого розкладу прибираються.
+// Постійний розклад заняття: repeat = { days: [номери getDay], slots: [вікна], slot, v, until }. v росте з кожною
+// зміною розкладу — нові справи отримують нові ключі, а незачеплені справи старого розкладу прибираються.
+// Розклад до 0.7.5 мав одне вікно (slot, без slots) — такий читається як одне вікно з колишнім ключем.
 // Те саме робить бот (runRepeats у worker.js) — правити разом.
 export const REPEAT_DAYS = 7;
-export const repeatOn = (a) => Boolean(!a.archived && a.repeat?.days?.length && a.repeat.slot);
-/** Сталий ключ: той самий у застосунку й боті, тож дубля не буде, а прибрану справу видно за ключем. */
-export const repeatId = (a, date) => `r${a.repeat.v}-${date.replaceAll('-', '')}-${a.id}`;
+/** Вікна розкладу в порядку дня; старий розклад — його єдине вікно. */
+export const repeatSlots = (a) => {
+  const list = Array.isArray(a.repeat?.slots) ? a.repeat.slots : (a.repeat?.slot ? [a.repeat.slot] : []);
+  return SLOT_IDS.filter((id) => list.includes(id));
+};
+export const repeatOn = (a) => Boolean(!a.archived && a.repeat?.days?.length && repeatSlots(a).length);
+/**
+ * Сталий ключ: той самий у застосунку й боті, тож дубля не буде, а прибрану справу видно за ключем.
+ * Кілька вікон на день — у ключі й вікно; старий розклад (без slots) — колишній ключ, щоб його справи не задублювались.
+ */
+export const repeatId = (a, date, slot) => (Array.isArray(a.repeat.slots)
+  ? `r${a.repeat.v}-${date.replaceAll('-', '')}-${slot}-${a.id}`
+  : `r${a.repeat.v}-${date.replaceAll('-', '')}-${a.id}`);
 
 /**
  * Регулярні справи на REPEAT_DAYS днів від today. put — нові (з from(a) включно), del — справи старого розкладу,
@@ -277,16 +288,18 @@ export function repeatPlan(acts, plan, { today, now, slotsFor: slotsOf, pauses, 
   const last = addDays(today, REPEAT_DAYS - 1);
   for (const a of acts) {
     if (!repeatOn(a)) continue;
-    const { days, slot: slotId, v } = a.repeat;
+    const { days, v } = a.repeat;
     for (let date = from(a); date <= last; date = addDays(date, 1)) {
       if (!days.includes(parseYmd(date).getDay()) || pauseOn(date, pauses)) continue;
-      const slot = slotsOf(date).find((s) => s.id === slotId);
-      if (!slot || !open(date, slot)) continue;
-      const id = repeatId(a, date);
-      const taken = (p) => p.id === id || (p.date === date && p.slot === slotId && p.activityId === a.id
-        && p.status !== 'moved' && !del.includes(p.id));
-      if (plan.some(taken)) continue;
-      put.push({ id, date, slot: slotId, activityId: a.id, topic: '', status: 'planned', doneAt: null, rep: v });
+      for (const slotId of repeatSlots(a)) {
+        const slot = slotsOf(date).find((s) => s.id === slotId);
+        if (!slot || !open(date, slot)) continue;
+        const id = repeatId(a, date, slotId);
+        const taken = (p) => p.id === id || (p.date === date && p.slot === slotId && p.activityId === a.id
+          && p.status !== 'moved' && !del.includes(p.id));
+        if (plan.some(taken)) continue;
+        put.push({ id, date, slot: slotId, activityId: a.id, topic: '', status: 'planned', doneAt: null, rep: v });
+      }
     }
   }
   return { put, del };

@@ -1457,22 +1457,24 @@ function formBox(title, ...children) {
 const SLOT_CHOICES = [['m', 'Ранок'], ['n', 'Обід / день'], ['e', 'Вечір']];
 
 /**
- * Розклад із форми. Змінився — нова версія v (і until з нуля): справи підуть за новим розкладом,
- * незачеплені старі приберуться. v не скидаємо й при вимкненні — щоб ключі не збіглись зі старими.
+ * Розклад із форми: дні й вікна (кілька — справа в кожному, напр. ЛФК тричі на день). Змінився — нова версія v
+ * (і until з нуля): справи підуть за новим розкладом, незачеплені старі приберуться. v не скидаємо й при вимкненні —
+ * щоб ключі не збіглись зі старими. slot — перше вікно, для сумісності.
  */
-function repeatFrom(old, { days, slot }) {
-  const next = [...new Set(days.map(Number))].sort((x, y) => x - y);
-  const same = old && old.slot === slot && (old.days ?? []).join() === next.join();
-  if (same || (!old && !next.length)) return old ?? null;
-  return { days: next, slot, v: (old?.v ?? 0) + 1, until: null };
+function repeatFrom(old, { days, slots }) {
+  const nextDays = [...new Set(days.map(Number))].sort((x, y) => x - y);
+  const nextSlots = M.SLOT_IDS.filter((id) => slots.includes(id));
+  const same = old && M.repeatSlots({ repeat: old }).join() === nextSlots.join() && (old.days ?? []).join() === nextDays.join();
+  if (same || (!old && (!nextDays.length || !nextSlots.length))) return old ?? null;
+  return { days: nextDays, slots: nextSlots, slot: nextSlots[0] ?? null, v: (old?.v ?? 0) + 1, until: null };
 }
 
-/** «Пн, Ср, Пт · ранок» — для картки заняття. */
+/** «Пн, Ср, Пт · ранок» чи «Щодня · ранок, обід / день, вечір» — для картки заняття. */
 function repeatText(a) {
   if (!M.repeatOn(a)) return '';
   const days = WEEK_DAYS.filter(([v]) => a.repeat.days.includes(Number(v))).map(([, label]) => label);
-  const slot = SLOT_CHOICES.find(([id]) => id === a.repeat.slot)?.[1] ?? '';
-  return `${days.length === 7 ? 'Щодня' : days.join(', ')} · ${slot.toLowerCase()}`;
+  const slots = M.repeatSlots(a).map((id) => SLOT_CHOICES.find(([v]) => v === id)?.[1].toLowerCase() ?? id);
+  return `${days.length === 7 ? 'Щодня' : days.join(', ')} · ${slots.join(', ')}${slots.length > 1 ? ` (${slots.length} рази на день)` : ''}`;
 }
 
 function editActivity(orig) {
@@ -1489,7 +1491,10 @@ function editActivity(orig) {
   const stepTarget = (n) => { d.weeklyTarget = Math.min(21, Math.max(1, d.weeklyTarget + n)); out.textContent = String(d.weeklyTarget); };
   const minutes = h('input', { type: 'number', inputmode: 'numeric', min: 0, max: 600, value: d.minutes || '', id: 'f-min' });
   const minVersion = h('input', { type: 'text', maxlength: 60, value: d.minVersion ?? '', placeholder: 'Напр.: 5 хв гами', id: 'f-minv' });
-  const rep = { days: (orig?.repeat?.days ?? []).map(String), slot: orig?.repeat?.slot ?? d.slots[0] ?? 'm' };
+  const rep = {
+    days: (orig?.repeat?.days ?? []).map(String),
+    slots: orig?.repeat ? M.repeatSlots(orig) : [d.slots[0] ?? 'm'],
+  };
 
   // Превʼю вгорі: колір та іконку видно, навіть коли їхні блоки згорнуті
   const previewTile = h('span', { class: 'tile' });
@@ -1526,8 +1531,8 @@ function editActivity(orig) {
       chips(SLOT_CHOICES, d.slots, (v) => { d.slots = v; }, { multi: true }),
       h('span', { class: 'flabel' }, 'Постійний розклад'),
       weekChips(rep.days, (v) => { rep.days = v; }),
-      chips(SLOT_CHOICES, rep.slot, (v) => { rep.slot = v; }),
-      h('p', { class: 'muted small' }, "У ці дні справа сама з'являється в плані на тиждень уперед. Прибрав чи переніс якусь — назад не повернеться. Без днів — розкладу немає.")),
+      chips(SLOT_CHOICES, rep.slots, (v) => { rep.slots = v; }, { multi: true }),
+      h('p', { class: 'muted small' }, "У ці дні справа сама з'являється в плані на тиждень уперед — у кожному обраному вікні (усі три — тричі на день). Прибрав чи переніс якусь — назад не повернеться. Без днів чи вікон — розкладу немає.")),
     h('div', { class: 'btn-grid' },
       button('check', 'Зберегти', 'primary', async () => {
         d.name = name.value.trim();
@@ -1535,6 +1540,7 @@ function editActivity(orig) {
         d.minutes = Math.max(0, Math.round(Number(minutes.value) || 0));
         d.minVersion = minVersion.value.trim();
         d.repeat = repeatFrom(orig?.repeat, rep);
+        if (rep.days.length && !rep.slots.length) toast('Розклад без вікон не діє — обери хоч одне вікно');
         closeSheet();
         await save({ activities: { put: [d] } });
         await runRepeats({ render: true });
