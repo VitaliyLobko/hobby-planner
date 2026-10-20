@@ -68,10 +68,17 @@ const slotAdvice = (id, today = M.ymd(), now = M.nowHm()) => M.slotAdvice(M.slot
 async function save(changes, { render: redraw = true, remote = false } = {}) {
   // Копія на Диск раз на тиждень — з цього натискання, поки браузер ще пускає вікно Google; дані бере пізніше, вже нові
   if (!remote) driveTick(true);
-  await write(changes, { keep: remote });
+  const at = await write(changes, { keep: remote });
   for (const [name, { put = [], del = [] }] of Object.entries(changes)) {
     const ids = new Set([...del, ...put.map((x) => x.id)]);
     state[name] = [...state[name].filter((x) => !ids.has(x.id)), ...put];
+    // Надгробки — і в state, як у базі: з них синхронізація бере, що видалити в боті (без цього видалене тут
+    // до перезапуску застосунку в бот не йшло зовсім)
+    if (del.length) {
+      const graves = new Set(del.map((id) => `${name}:${id}`));
+      state.tombstones = [...state.tombstones.filter((t) => !graves.has(t.id)),
+        ...del.map((id) => ({ id: `${name}:${id}`, store: name, ref: id, updated: remote ? 0 : at }))];
+    }
   }
   if (!remote) scheduleSync();
   if (redraw) render();
@@ -98,6 +105,15 @@ async function runRepeats({ render: redraw = false } = {}) {
   if (Object.keys(changes).length) await save(changes, { render: redraw });
 }
 
+/** Надгробки справ — зі свіжою міткою: синхронізація ще раз скаже боту, що їх видалено. */
+async function reburyPlan(ids) {
+  const graves = state.tombstones.filter((t) => t.store === 'plan' && ids.includes(t.ref)).map((t) => ({ ...t }));
+  const at = await write({ tombstones: { put: graves } });
+  const touched = new Set(graves.map((t) => t.id));
+  state.tombstones = [...state.tombstones.filter((t) => !touched.has(t.id)), ...graves.map((t) => ({ ...t, updated: at }))];
+  scheduleSync();
+}
+
 /** Відмітки з бота: беремо лише новіші за наші. */
 async function applyRemote(items, deleted, reminders = [], reminderDeleted = [], botPauses = null, activities = [], botMeta = {}) {
   const newer = (store) => (r) => {
@@ -105,7 +121,12 @@ async function applyRemote(items, deleted, reminders = [], reminderDeleted = [],
     return !mine || (r.updated || 0) > (mine.updated || 0);
   };
   const changes = {};
-  const put = items.filter(newer('plan'));
+  // Видалене тут пізніше, ніж бот востаннє міняв справу, назад не беремо — а видалення шлемо ще раз:
+  // до 0.7.7 видалене тут до перезапуску застосунку в бот не йшло, і звірка інакше воскресила б його
+  const graveAt = new Map(state.tombstones.filter((t) => t.store === 'plan' && t.updated).map((t) => [t.ref, t.updated]));
+  const buried = (r) => (graveAt.get(r.id) ?? -1) >= (r.updated || 0);
+  const rebury = items.filter(buried).map((r) => r.id);
+  const put = items.filter((r) => !buried(r) && newer('plan')(r));
   const del = deleted.filter((id) => state.plan.some((p) => p.id === id));
   if (put.length || del.length) changes.plan = { put, del };
   const rPut = reminders.filter(newer('reminders'));
@@ -127,6 +148,7 @@ async function applyRemote(items, deleted, reminders = [], reminderDeleted = [],
   if (Array.isArray(templates?.v) && templates.at > metaAt('templates')) metaPut.push({ id: 'templates', list: templates.v, updated: templates.at });
   if (Array.isArray(groups?.v) && groups.at > metaAt('groups')) metaPut.push({ id: 'groups', list: groups.v, updated: groups.at });
   if (metaPut.length) changes.meta = { put: metaPut };
+  if (rebury.length) await reburyPlan(rebury);
   if (!Object.keys(changes).length) return;
   const nextSlots = metaPut.find((m) => m.id === 'slots');
   if (nextSlots) slotsCfg = nextSlots;
@@ -909,12 +931,23 @@ function slotPickSheet(date, slot) {
   };
   const box = pickRows(acts.map((a) => ({ a })), draw, { top: ({ a }) => a.slots?.includes(slot.id), label: `Заняття у вікно ${slot.label}` });
   const picks = () => box.querySelectorAll('.pick');
+  // Під кнопками — справи вікна з полем «Що саме?»: тему вписуєш одразу, не йдучи в «План»
+  const chosen = h('div');
   function sync() {
+    const mine = itemsAt(date, slot.id);
     for (const b of picks()) {
-      const on = itemsAt(date, slot.id).some((p) => p.activityId === b.dataset.id);
+      const on = mine.some((p) => p.activityId === b.dataset.id);
       b.classList.toggle('on', on);
       b.setAttribute('aria-pressed', String(on));
     }
+    const open = mine.filter((p) => p.status === 'planned');
+    chosen.replaceChildren(...(open.length ? [h('fieldset', { class: 'pick-group pick-chosen' },
+      h('legend', { class: 'pick-group-title' }, 'У вікні — що саме?'),
+      open.map((p) => {
+        const a = act(p.activityId) ?? MISSING;
+        return h('div', { class: 'act-row plan-item', style: actStyle(a) }, tile(a),
+          h('div', { class: 'act-text grow' }, h('div', { class: 'act-name' }, a.name), topicInput(p, a)));
+      }))] : []));
   }
   sync();
   const empty = h('p', { class: 'muted small', hidden: true }, 'Нічого не знайшлося');
@@ -928,14 +961,16 @@ function slotPickSheet(date, slot) {
     },
   }) : null;
   sheet(`${M.DAY_SHORT[(new Date(`${date}T12:00:00`).getDay() + 6) % 7]}, ${M.dayMonth(date)} · ${slot.label} ${slot.from}–${slot.to}`,
-    h('div', { class: 'stack' }, search, empty, box,
+    h('div', { class: 'stack' }, search, empty, box, chosen,
       h('div', { class: 'btn-grid' },
         button('check', 'Готово', 'primary', () => closeSheet()),
         // Шторка закривається через history.back() — день відкриваємо вже після нього
         button('next', 'Увесь день', '', () => {
           window.addEventListener('popstate', () => setTimeout(() => openPlanDay(date)), { once: true });
           closeSheet();
-        }))));
+        }))),
+  // Тема зберігається без перемальовування — щоб поле не губило фокус; екран під шторкою оновлюємо при закритті
+  { onClose: () => render() });
 }
 
 async function togglePick(date, slotId, a) {
@@ -946,6 +981,18 @@ async function togglePick(date, slotId, a) {
   }
   if (mine.status === 'planned' && !M.elapsed(mine)) await unplan(mine);
   else itemSheet(mine);
+}
+
+/** Поле «Що саме?» справи: урок, тема — бачиш на «Сьогодні» й у повідомленнях бота. */
+function topicInput(item, a) {
+  return h('input', {
+    class: 'topic', type: 'text', maxlength: 80, value: item.topic ?? '', 'aria-label': `Що саме: ${a.name}`,
+    placeholder: 'Що саме? Урок, тема',
+    onChange: (e) => {
+      const cur = state.plan.find((p) => p.id === item.id);
+      if (cur) save({ plan: { put: [{ ...cur, topic: e.target.value.trim() }] } }, { render: false });
+    },
+  });
 }
 
 /** Обрана у вікні справа: назва, поле «що саме» і ×; відмічена — лише статус і тап на дії. */
@@ -962,14 +1009,7 @@ function planItemRow(item, slot, today, now) {
     tile(a),
     h('div', { class: 'act-text grow' },
       h('div', { class: 'act-name' }, a.name),
-      h('input', {
-        class: 'topic', type: 'text', maxlength: 80, value: item.topic ?? '', 'aria-label': `Що саме: ${a.name}`,
-        placeholder: 'Що саме? Урок, тема',
-        onChange: (e) => {
-          const cur = state.plan.find((p) => p.id === item.id);
-          if (cur) save({ plan: { put: [{ ...cur, topic: e.target.value.trim() }] } }, { render: false });
-        },
-      }),
+      topicInput(item, a),
       hint ? h('div', { class: 'muted small' }, hint) : null),
     h('button', { type: 'button', class: 'icon-btn', 'aria-label': `Прибрати ${a.name}`, onClick: () => unplan(item) }, icon('skip')));
 }
@@ -1588,6 +1628,14 @@ function colorPicker(d, onPick) {
     pickOwn(v);
   });
   hex.addEventListener('blur', paintOwn);
+  // Тап по коду — одразу в буфер: свій колір легко перенести на інше заняття чи групу
+  hex.addEventListener('focus', async () => {
+    if (!isOwnColor(hex.value)) return;
+    try {
+      await navigator.clipboard.writeText(hex.value);
+      toast(`${hex.value} скопійовано`);
+    } catch { /* буфер недоступний — поле лишається для ручного копіювання */ }
+  });
   paintOwn();
   return h('div', { class: 'color-picker' }, row,
     h('div', { class: 'own-head' }, h('span', { class: 'flabel' }, 'Свій колір'), preview, hex),
@@ -2181,17 +2229,36 @@ function weekendPicker() {
   const days = (slotsCfg.weekendDays ?? M.DEFAULT_WEEKEND).map(String);
   return h('div', { class: 'slot-edit' }, h('h3', {}, 'Вихідні дні'),
     h('p', { class: 'muted small' }, 'У ці дні — час вікон «Вихідні», у решту — «Будні». Наприклад, змінний графік: вихідні вівторок і середа.'),
+    // Перемальовуємо: дні в заголовках «Будні» / «Вихідні» нижче мають змінитись
     weekChips(days, (v) => {
       const next = { ...structuredClone(slotsCfg), weekendDays: v.map(Number) };
       slotsCfg = next;
-      save({ meta: { put: [next] } }, { render: false });
-    }));
+      save({ meta: { put: [next] } });
+    }, 'weekend-days'));
+}
+
+// Дні тижня від понеділка (getDay: 0 — неділя)
+const MON_FIRST = [1, 2, 3, 4, 5, 6, 0];
+
+/** «Пн–Пт», «Сб, Нд», «Вт, Ср» — дні, підряд від трьох — проміжком. */
+function daysText(list) {
+  const on = MON_FIRST.map((d) => list.includes(d));
+  const parts = [];
+  for (let i = 0; i < 7; i++) {
+    if (!on[i]) continue;
+    let j = i;
+    while (j + 1 < 7 && on[j + 1]) j += 1;
+    const name = (k) => M.DAY_SHORT[k];
+    parts.push(j - i >= 2 ? `${name(i)}–${name(j)}` : [i, j].filter((k, n, a) => a.indexOf(k) === n).map(name).join(', '));
+    i = j;
+  }
+  return parts.join(', ') || 'жодного дня';
 }
 
 /** Пн…Нд одним рядом: сітка на 7, а не перенос, як у звичайних чипів. */
-function weekChips(value, onChange) {
+function weekChips(value, onChange, cls = '') {
   const row = chips(WEEK_DAYS, value, onChange, { multi: true });
-  row.classList.add('week-days');
+  row.classList.add('week-days', ...cls.split(' ').filter(Boolean));
   return row;
 }
 
@@ -2207,7 +2274,10 @@ async function resetSlots() {
 }
 
 function slotEditor(kind, title) {
-  const box = h('div', { class: 'slot-edit' }, h('h3', {}, title));
+  // Будні й вихідні — окремими рамками з днями в заголовку; вихідні — кольором вихідних, як у «Плані»
+  const off = slotsCfg.weekendDays ?? M.DEFAULT_WEEKEND;
+  const days = kind === 'weekend' ? off : MON_FIRST.filter((d) => !off.includes(d));
+  const box = h('fieldset', { class: `slot-edit slot-set ${kind}` }, h('legend', {}, `${title} · ${daysText(days)}`));
   for (const slot of slotsCfg[kind]) {
     const update = (field) => (value, el) => {
       const next = structuredClone(slotsCfg);
@@ -2433,7 +2503,7 @@ function viewSettings() {
       chips(THEMES, themePref(), (v) => { remember('theme', v); applyTheme(); })),
     folded('set-slots', h('h2', {}, 'Вікна дня й вихідні'),
       h('div', { class: 'fold-body' }, weekendPicker(), slotEditor('weekday', 'Будні'), slotEditor('weekend', 'Вихідні'),
-        h('p', { class: 'muted small' }, 'Стандартні: будні — ранок 7–12, обід 12–18, вечір 18–22; вихідні — ранок 9–12, день 12–18, вечір 18–22.'),
+        h('p', { class: 'muted small' }, 'Стандартні: будні — ранок 7–12, обід 12–18, вечір 18–21; вихідні — ранок 9–12, день 12–18, вечір 18–21.'),
         button('refresh', 'Стандартні вікна', 'ghost', resetSlots)),
       { def: false, persist: true, cls: 'card' }),
     folded('set-backup', h('h2', {}, 'Резервна копія'), h('div', { class: 'fold-body' },
@@ -2756,11 +2826,27 @@ async function init() {
   initSync({
     getState: () => state,
     apply: applyRemote,
+    // Справ, яких бот не знає, — нова мітка updated: поїдуть із наступною синхронізацією
+    resend: async (ids) => {
+      const at = Date.now();
+      const put = state.plan.filter((p) => ids.includes(p.id)).map((p) => ({ ...p, updated: at }));
+      if (!put.length) return;
+      await save({ plan: { put } }, { render: false, remote: true });
+      scheduleSync();
+    },
     onStatus: (res) => { const el = $('sync-status'); if (el) el.textContent = syncStatusText(res); },
   });
   // Згорнули — одразу шлемо боту, що змінилось (почав, переніс, відмітив): інакше він нагадує за старим планом
-  document.addEventListener('visibilitychange', () => syncNow({ keepalive: document.visibilityState === 'hidden' }));
-  setInterval(() => { if (document.visibilityState === 'visible') syncNow(); }, 60000);
+  // Згорнули — шлемо, лише якщо щось змінили; відкрили — забираємо нове, якщо обміну не було щойно
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') syncNow({ keepalive: true, onlyPending: true });
+    else if (Date.now() - lastSync() > 15000) syncNow();
+  });
+  // Поки застосунок на екрані — раз на 2 хв, і не одразу після обміну, що вже був (тап, відкриття)
+  const SYNC_EVERY = 2 * 60 * 1000;
+  setInterval(() => {
+    if (document.visibilityState === 'visible' && Date.now() - lastSync() > SYNC_EVERY / 2) syncNow();
+  }, SYNC_EVERY);
   syncNow();
   // Живий лічильник таймера: міняємо лише текст цифр, без перемальовки екрана
   setInterval(() => {

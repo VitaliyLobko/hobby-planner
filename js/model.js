@@ -91,7 +91,7 @@ export const DEFAULT_SLOTS = {
   weekday: [
     { id: 'm', label: 'Ранок', from: '07:00', to: '12:00' },
     { id: 'n', label: 'Обід', from: '12:00', to: '18:00' },
-    { id: 'e', label: 'Вечір', from: '18:00', to: '22:00' },
+    { id: 'e', label: 'Вечір', from: '18:00', to: '21:00' },
   ],
   weekend: [
     { id: 'm', label: 'Ранок', from: '09:00', to: '12:00' },

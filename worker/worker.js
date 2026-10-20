@@ -25,7 +25,7 @@ const DEFAULT_SLOTS = {
   weekday: [
     { id: 'm', label: 'Ранок', from: '07:00', to: '12:00' },
     { id: 'n', label: 'Обід', from: '12:00', to: '18:00' },
-    { id: 'e', label: 'Вечір', from: '18:00', to: '22:00' },
+    { id: 'e', label: 'Вечір', from: '18:00', to: '21:00' },
   ],
   weekend: [
     { id: 'm', label: 'Ранок', from: '09:00', to: '12:00' },
@@ -92,9 +92,20 @@ async function getMeta(env, k) {
   return (await env.DB.prepare('SELECT v FROM meta WHERE k = ?').bind(k).first('v')) ?? null;
 }
 
+const META_UPSERT = 'INSERT INTO meta (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v';
+
 function setMeta(env, k, v) {
-  return env.DB.prepare('INSERT INTO meta (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v')
-    .bind(k, String(v)).run();
+  return env.DB.prepare(META_UPSERT).bind(k, String(v)).run();
+}
+
+/** Уся meta одним запитом — для синхронізації, де потрібні майже всі ключі. */
+async function metaAll(env) {
+  const { results } = await env.DB.prepare('SELECT k, v FROM meta').all();
+  return new Map(results.map((r) => [r.k, r.v]));
+}
+
+function parseJson(raw, fallback) {
+  try { return raw ? JSON.parse(raw) : fallback; } catch { return fallback; }
 }
 
 async function owner(env) {
@@ -102,8 +113,7 @@ async function owner(env) {
 }
 
 async function slotsCfg(env) {
-  const raw = await getMeta(env, 'slots');
-  try { return raw ? JSON.parse(raw) : DEFAULT_SLOTS; } catch { return DEFAULT_SLOTS; }
+  return parseJson(await getMeta(env, 'slots'), DEFAULT_SLOTS);
 }
 
 /** Паузи з застосунку (відпустка, хвороба): у ці дні бот мовчить, тижневі цілі менші. */
@@ -328,27 +338,52 @@ function progressBar(done, target) {
   return '▰'.repeat(full) + '▱'.repeat(n - full);
 }
 
+const byOrder = (acts) => (x, y) => (acts.get(x.activityId)?.order ?? 99) - (acts.get(y.activityId)?.order ?? 99);
+const topicOf = (it) => (it.topic ? ` — ${esc(it.topic)}` : '');
+
 /**
- * Справа у повідомленні: перший рядок — стан і назва, другий («└») — подробиці.
- * Відкрита — емодзі заняття; йде — ▶; відмічена — ✅ ◐ ✕ ↷.
+ * Відкрита справа: назва жирним, подробиці (таймер, хвилини, мінімум) курсивом — рядком нижче
+ * чи, в compact, у тому ж рядку. Відкрита — емодзі заняття, йде — ▶.
  */
-function itemLines(it, a, tz, now) {
+function openLines(it, a, tz, now, compact = false) {
   const sec = elapsed(it, now);
-  const name = esc(a.name);
-  const topic = it.topic ? ` — ${esc(it.topic)}` : '';
-  if (it.status === 'planned') {
-    if (it.runningSince) return [`▶️ <b>${name}</b>${topic}`, `   └ йде з ${local(it.runningSince, tz).hm}${sec ? ` · ${dur(sec)}` : ''}`];
-    const plan = [a.minutes ? `~${a.minutes} хв` : '', a.minVersion ? `мінімум: ${esc(a.minVersion)}` : ''].filter(Boolean).join(' · ');
-    const pausedAt = sec ? `⏸ на паузі, ${dur(sec)}` : '';
-    const details = [pausedAt, plan].filter(Boolean).join(' · ');
-    return [`${actEmoji(a)} <b>${name}</b>${topic}`, ...(details ? [`   └ <i>${details}</i>`] : [])];
-  }
-  const parts = [(STATUS[it.status] ?? it.status).toLowerCase()];
-  if (it.status === 'moved' && it.movedLabel) parts[0] += ` ${esc(it.movedLabel)}`;
+  const head = `${it.runningSince ? '▶️' : actEmoji(a)} <b>${esc(a.name)}</b>${topicOf(it)}`;
+  const details = (it.runningSince
+    ? [`йде з ${local(it.runningSince, tz).hm}`, sec ? dur(sec) : '']
+    : [sec ? `⏸ на паузі, ${dur(sec)}` : '', a.minutes ? `~${a.minutes} хв` : '',
+      compact || !a.minVersion ? '' : `мінімум: ${esc(a.minVersion)}`]).filter(Boolean).join(' · ');
+  if (!details) return [head];
+  return compact ? [`${head} · <i>${details}</i>`] : [head, `      <i>${details}</i>`];
+}
+
+/**
+ * Відмічена справа одним рядком: назва закреслена й курсивом — кольору Telegram не дає,
+ * тож «сірою» її робить це й цитата, в якій стоять усі відмічені. Поряд — що сталось і коли.
+ */
+function closedLine(it, a, now) {
+  const sec = elapsed(it, now);
+  const parts = [];
+  if (it.status === 'moved') parts.push(`перенесено${it.movedLabel ? ` ${esc(it.movedLabel)}` : ''}`);
+  else if (it.status !== 'done') parts.push((STATUS[it.status] ?? it.status).toLowerCase());
   if (it.doneAt) parts.push(`о ${it.doneAt}`);
   if (sec && (it.status === 'done' || it.status === 'min')) parts.push(dur(sec));
-  // Закрита — закреслена, щоб відкриті було видно з першого погляду
-  return [`${MARK[it.status] ?? '•'} <s>${name}</s>${topic}`, `   └ <i>${parts.join(' · ')}</i>`];
+  return `${MARK[it.status] ?? '•'} <s><i>${esc(a.name)}${topicOf(it)}</i></s>${parts.length ? ` · <i>${parts.join(' · ')}</i>` : ''}`;
+}
+
+/** Справи вікна: спершу відкриті (gap — порожній рядок між ними), нижче відмічені — разом однією цитатою. */
+function itemsBlock(list, acts, tz, now, { gap = false, compact = false } = {}) {
+  const sorted = [...list].sort(byOrder(acts));
+  const lines = [];
+  for (const it of sorted.filter((x) => x.status === 'planned')) {
+    if (gap && lines.length) lines.push('');
+    lines.push(...openLines(it, acts.get(it.activityId) ?? MISSING, tz, now, compact));
+  }
+  const closed = sorted.filter((x) => x.status !== 'planned');
+  if (closed.length) {
+    if (gap && lines.length) lines.push('');
+    lines.push(`<blockquote>${closed.map((it) => closedLine(it, acts.get(it.activityId) ?? MISSING, now)).join('\n')}</blockquote>`);
+  }
+  return lines;
 }
 
 /** «1 год 20 хв» до кінця вікна — щоб було видно, скільки ще є часу. */
@@ -374,22 +409,20 @@ function fullKeyboard(it, now) {
  * more — id справи, для якої зараз розгорнуто «⋯».
  */
 function windowMessage(list, acts, slot, tz, now, { prefix = '', more = null, moving = null } = {}) {
-  const sorted = [...list].sort((x, y) => (acts.get(x.activityId)?.order ?? 99) - (acts.get(y.activityId)?.order ?? 99));
+  const sorted = [...list].sort(byOrder(acts));
   const open = sorted.filter((it) => it.status === 'planned');
   const lines = [];
   if (prefix) lines.push(`<i>${prefix}</i>`);
-  lines.push(slotHead(slot), '');
-  // Спершу відкриті, нижче окремо — закриті
-  const closed = sorted.filter((it) => it.status !== 'planned');
-  for (const it of open) lines.push(...itemLines(it, acts.get(it.activityId) ?? MISSING, tz, now));
-  if (open.length && closed.length) lines.push('');
-  for (const it of closed) lines.push(...itemLines(it, acts.get(it.activityId) ?? MISSING, tz, now));
-  // Підсумок унизу: скільки відмічено й скільки часу ще у вікні
+  lines.push(slotHead(slot));
+  // Під заголовком — стан вікна: скільки відмічено й скільки часу ще є; закрите — підсумок
   const real = sorted.filter((it) => it.status !== 'moved');
   const counted = real.filter((it) => it.status === 'done' || it.status === 'min').length;
   const left = open.length && sorted[0] ? timeLeft(sorted[0].date, slot, tz, now) : '';
-  if (open.length && real.length > 1) lines.push('', `Зроблено ${counted} з ${real.length}${left ? ` · ⏳ до кінця вікна ${left}` : ''}`);
-  else if (open.length && left) lines.push('', `⏳ До кінця вікна ${left}`);
+  const state = open.length
+    ? [left ? `⏳ до кінця ${left}` : '', real.length > 1 ? `зроблено ${counted} з ${real.length}` : ''].filter(Boolean).join(' · ')
+    : sorted.length && (counted ? `🎉 Вікно закрите: зараховано ${counted} з ${real.length}` : 'Вікно закрите — наступного разу вийде');
+  if (state) lines.push(`<i>${state}</i>`);
+  lines.push('', ...itemsBlock(sorted, acts, tz, now, { gap: true }));
   let keyboard = [];
   const picked = open.find((it) => it.id === more);
   const movingIt = moving && open.find((it) => it.id === moving.id);
@@ -415,8 +448,6 @@ function windowMessage(list, acts, slot, tz, now, { prefix = '', more = null, mo
       btn('⋯', 'more', it),
     ]);
     if (!open.some((it) => it.runningSince)) keyboard.push([btn('⏰ +30 хв — усе вікно', 'snooze', open[0])]);
-  } else if (sorted.length) {
-    lines.push('', counted ? `🎉 Вікно закрите: зараховано ${counted} з ${real.length}` : 'Вікно закрите — наступного разу вийде');
   }
   return { text: lines.join('\n'), reply_markup: { inline_keyboard: keyboard } };
 }
@@ -843,55 +874,65 @@ async function onSync(request, env) {
     slots: Number(body.slots?.updated) || 0, quiet: Number(body.quiet?.updated) || 0,
     templates: Number(body.templatesAt) || 0, groups: Number(body.groupsAt) || 0,
   };
-  const botAt = async (k) => Number(await getMeta(env, `${k}_at`)) || 0;
-  const fresher = async (k) => appAt[k] >= await botAt(k);
-  if (body.slots?.weekday && body.slots?.weekend && await fresher('slots')) {
+  // Уся meta — одним запитом; пишемо лише те, що справді змінилось, одним пакетом (застосунок шле це щоразу)
+  const mm = await metaAll(env);
+  const writes = [];
+  const put = (k, v) => {
+    const s = String(v);
+    if (mm.get(k) === s) return false;
+    mm.set(k, s);
+    writes.push(env.DB.prepare(META_UPSERT).bind(k, s));
+    return true;
+  };
+  const botAt = (k) => Number(mm.get(`${k}_at`)) || 0;
+  const fresher = (k) => appAt[k] >= botAt(k);
+  let newSlots = null;
+  if (body.slots?.weekday && body.slots?.weekend && fresher('slots')) {
     const days = Array.isArray(body.slots.weekendDays)
       ? [...new Set(body.slots.weekendDays.filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))] : undefined;
     const next = JSON.stringify({ weekday: body.slots.weekday, weekend: body.slots.weekend, weekendDays: days });
-    if (next !== await getMeta(env, 'slots')) {
-      await setMeta(env, 'slots', next);
-      await reschedule(env, JSON.parse(next), tz, now);
-    }
-    await setMeta(env, 'slots_at', appAt.slots);
+    if (put('slots', next)) newSlots = JSON.parse(next);
+    put('slots_at', appAt.slots);
   }
   // Паузу могли поставити й у боті (/pause) — лишається новіший список: мітка застосунку проти pauses_at бота
   const appPausesAt = Number(body.pausesAt) || 0;
-  if (Array.isArray(body.pauses) && appPausesAt >= (Number(await getMeta(env, 'pauses_at')) || 0)) {
+  let pausesChanged = false;
+  if (Array.isArray(body.pauses) && appPausesAt >= (Number(mm.get('pauses_at')) || 0)) {
     const list = body.pauses.filter((p) => /^\d{4}-\d{2}-\d{2}$/.test(p?.from) && /^\d{4}-\d{2}-\d{2}$/.test(p?.to));
-    await setMeta(env, 'pauses', JSON.stringify(list.map(({ id, from, to, reason }) => ({ id: id || `p-${from}-${to}`, from, to, reason }))));
-    await setMeta(env, 'pauses_at', appPausesAt);
+    pausesChanged = put('pauses', JSON.stringify(list.map(({ id, from, to, reason }) => ({ id: id || `p-${from}-${to}`, from, to, reason }))));
+    put('pauses_at', appPausesAt);
   }
-  if (body.quiet && typeof body.quiet === 'object' && await fresher('quiet')) {
+  if (body.quiet && typeof body.quiet === 'object' && fresher('quiet')) {
     const { on, from, to } = body.quiet;
     const hm = /^\d{2}:\d{2}$/;
-    await setMeta(env, 'quiet', JSON.stringify({ on: Boolean(on), from: hm.test(from) ? from : '', to: hm.test(to) ? to : '' }));
-    await setMeta(env, 'quiet_at', appAt.quiet);
+    put('quiet', JSON.stringify({ on: Boolean(on), from: hm.test(from) ? from : '', to: hm.test(to) ? to : '' }));
+    put('quiet_at', appAt.quiet);
   }
   // Шаблони дня боту не потрібні — зберігаємо для інших пристроїв і нового телефона
-  if (Array.isArray(body.templates) && await fresher('templates')) {
-    await setMeta(env, 'templates', JSON.stringify(body.templates));
-    await setMeta(env, 'templates_at', appAt.templates);
+  if (Array.isArray(body.templates) && fresher('templates')) {
+    put('templates', JSON.stringify(body.templates));
+    put('templates_at', appAt.templates);
   }
   // Групи занять — теж лише зберігаємо: група в занятті їде разом із ним, а назви й іконки — тут
-  if (Array.isArray(body.groups) && await fresher('groups')) {
+  if (Array.isArray(body.groups) && fresher('groups')) {
     const list = body.groups.filter((g) => g?.id && typeof g.name === 'string')
       .map(({ id, name, icon }) => ({ id: String(id), name: name.slice(0, 60), icon: typeof icon === 'string' ? icon : '' }));
-    await setMeta(env, 'groups', JSON.stringify(list));
-    await setMeta(env, 'groups_at', appAt.groups);
+    put('groups', JSON.stringify(list));
+    put('groups_at', appAt.groups);
   }
   // Заняття — по одному, новіше перемагає: пристрій, давно не відкритий, не затре змінене на іншому
-  if (Array.isArray(body.activities)) {
-    const known = await actsMap(env);
-    const fresh = body.activities.filter((a) => a?.id && (a.updated || 0) > (known.get(a.id)?.updated ?? -1));
-    if (fresh.length) {
-      await env.DB.batch(fresh.map((a) => env.DB.prepare('INSERT OR REPLACE INTO acts (id, data) VALUES (?, ?)').bind(a.id, JSON.stringify(a))));
-      await setMeta(env, 'acts_at', now);
-    }
-  }
-  const cfg = await slotsCfg(env);
   const acts = await actsMap(env);
-  const chatId = await owner(env);
+  const fresh = (Array.isArray(body.activities) ? body.activities : [])
+    .filter((a) => a?.id && (a.updated || 0) > (acts.get(a.id)?.updated ?? -1));
+  if (fresh.length) {
+    writes.push(...fresh.map((a) => env.DB.prepare('INSERT OR REPLACE INTO acts (id, data) VALUES (?, ?)').bind(a.id, JSON.stringify(a))));
+    for (const a of fresh) acts.set(a.id, a);
+    put('acts_at', now);
+  }
+  if (writes.length) await env.DB.batch(writes);
+  if (newSlots) await reschedule(env, newSlots, tz, now);
+  const cfg = parseJson(mm.get('slots'), DEFAULT_SLOTS);
+  const chatId = env.OWNER_ID ? String(env.OWNER_ID) : (mm.get('owner') ?? null);
 
   for (const it of body.items) {
     if (!it?.id || !it.date || !it.slot) continue;
@@ -914,8 +955,10 @@ async function onSync(request, env) {
     await env.DB.prepare('UPDATE reminders SET deleted = 1, updated = ?, srv = ? WHERE id = ? AND updated <= ?')
       .bind(d.updated || now, now, d.id, d.updated || now).run();
   }
-  // Розклад занять міг змінитись — нові справи підуть у цю ж відповідь
-  if (Array.isArray(body.activities)) await runRepeats(env, now);
+  // Розклад занять, вікна чи паузи змінились — справи за розкладом переставляємо (підуть у цю ж відповідь);
+  // інакше лише дублі й сліди перенесень від щойно прийнятих справ. Новий день розклад бере з щоденного тіку
+  if (fresh.length || newSlots || pausesChanged) await runRepeats(env, now);
+  else if (body.items.length) await sweepDuplicates(env, local(now, tz).date, now, cfg, acts, tz, chatId);
 
   // Із запасом 10 с: запис іншого пристрою в ту саму мить (чи паралельним запитом) інакше загубився б.
   // Повтор нешкідливий — застосунок бере лише новіше за своє
@@ -923,24 +966,82 @@ async function onSync(request, env) {
   const { results } = await env.DB.prepare('SELECT data, deleted, id FROM items WHERE srv > ? AND date >= ?')
     .bind(since, addDays(local(now, tz).date, -60)).all();
   const rem = (await env.DB.prepare('SELECT data, deleted, id FROM reminders WHERE srv > ?').bind(since).all()).results;
-  const botPausesAt = Number(await getMeta(env, 'pauses_at')) || 0;
+  const botPausesAt = Number(mm.get('pauses_at')) || 0;
   // Новіше за пристрій — йому назад: вікна, тихі години, шаблони; заняття — усі, якщо мінялись після since
   const meta = {};
   for (const k of ['slots', 'quiet', 'templates', 'groups']) {
-    const at = await botAt(k);
-    if (at > appAt[k]) meta[k] = { v: JSON.parse(await getMeta(env, k) || 'null'), at };
+    const at = botAt(k);
+    if (at > appAt[k]) meta[k] = { v: parseJson(mm.get(k), null), at };
   }
-  const actsAt = Number(await getMeta(env, 'acts_at')) || 0;
+  const actsAt = Number(mm.get('acts_at')) || 0;
+  // Звірка — після прийому справ і видалень пристрою, інакше щойно надіслане виглядало б відсутнім
+  const check = await reconcile(env, body, results);
   return json({
-    pauses: botPausesAt > appPausesAt ? { list: await pausesOf(env), at: botPausesAt } : null,
+    pauses: botPausesAt > appPausesAt ? { list: parseJson(mm.get('pauses'), []), at: botPausesAt } : null,
     meta,
-    activities: actsAt > since ? [...(await actsMap(env)).values()] : [],
+    activities: actsAt > since ? [...acts.values()] : [],
     now,
-    items: results.filter((r) => !r.deleted).map((r) => JSON.parse(r.data)),
-    deleted: results.filter((r) => r.deleted).map((r) => r.id),
+    items: [...results.filter((r) => !r.deleted).map((r) => JSON.parse(r.data)), ...check.items],
+    deleted: [...results.filter((r) => r.deleted).map((r) => r.id), ...check.deleted],
     reminders: rem.filter((r) => !r.deleted).map((r) => JSON.parse(r.data)),
     reminderDeleted: rem.filter((r) => r.deleted).map((r) => r.id),
+    planDigest: check.digest,
+    unknown: check.unknown,
   });
+}
+
+/**
+ * Відбиток плану: скільки справ і хеш FNV-1a їхніх id (відсортованих звичайним sort, через \n).
+ * Те саме — planDigest у js/sync.js: правити разом, інакше звірка вважатиме розбіжністю все.
+ */
+function planDigest(ids) {
+  const s = [...ids].sort().join('\n');
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193) >>> 0;
+  return `${ids.length}:${h.toString(16)}`;
+}
+
+// D1 приймає до 100 параметрів у запиті
+const IN_CHUNK = 90;
+
+async function rowsByIds(env, sql, ids) {
+  const out = [];
+  for (let i = 0; i < ids.length; i += IN_CHUNK) {
+    const part = ids.slice(i, i + IN_CHUNK);
+    const { results } = await env.DB.prepare(sql.replace('(?)', `(${part.map(() => '?').join(',')})`)).bind(...part).all();
+    out.push(...results);
+  }
+  return out;
+}
+
+/**
+ * Звірка плану з пристроєм (справи від knownFrom — дату дає пристрій). Щоразу — лише відбиток живих справ:
+ * пристрій порівнює зі своїм. Не збіглось — наступний запит несе known (усі id пристрою від knownFrom), і тоді:
+ * живе тут, а там немає — у відповідь; там є, а тут прибране — у deleted; тут немає зовсім — в unknown
+ * (пристрій надішле ще раз). sent — те, що вже йде у відповідь за since, щоб не дублювати.
+ */
+async function reconcile(env, body, sent) {
+  const none = { items: [], deleted: [], unknown: [], digest: null };
+  const from = String(body.knownFrom ?? '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from)) return none;
+  const live = (await env.DB.prepare('SELECT id FROM items WHERE deleted = 0 AND date >= ?').bind(from).all()).results.map((r) => r.id);
+  const digest = planDigest(live);
+  if (!Array.isArray(body.known)) return { ...none, digest };
+  const known = new Set(body.known.map(String));
+  const got = new Set(sent.map((r) => r.id));
+  const liveSet = new Set(live);
+  const missing = live.filter((id) => !known.has(id) && !got.has(id));
+  const items = (await rowsByIds(env, 'SELECT data FROM items WHERE id IN (?)', missing)).map((r) => JSON.parse(r.data));
+  // Відомі пристрою, але не живі тут від knownFrom: прибрані — видалити там; яких немає взагалі — надіслати ще раз
+  const rest = [...known].filter((id) => !liveSet.has(id) && !got.has(id));
+  const found = await rowsByIds(env, 'SELECT id, deleted FROM items WHERE id IN (?)', rest);
+  const seen = new Set(found.map((r) => r.id));
+  return {
+    items,
+    deleted: found.filter((r) => r.deleted).map((r) => r.id),
+    unknown: rest.filter((id) => !seen.has(id)),
+    digest,
+  };
 }
 
 /**
@@ -1036,6 +1137,9 @@ async function dropDuplicates(env, date, slot, activityId, now) {
   for (const r of drop) {
     await env.DB.prepare('UPDATE items SET deleted = 1, next_at = NULL, updated = ?, srv = ? WHERE id = ?').bind(now, now, r.id).run();
   }
+  // Лишену справу — знову пристроям: пристрій міг її загубити (відновлення копії), і тоді його нова справа
+  // просто зникла б, а лишена в боті лишилась би невидимою. Так нова підміняється лишеною у тій самій відповіді
+  if (drop.length) await env.DB.prepare('UPDATE items SET srv = ? WHERE id = ?').bind(now, rows[0].id).run();
   return drop;
 }
 
@@ -1266,26 +1370,25 @@ async function sendToday(env, chatId, now, title, morning = false) {
   // «Не забудь» дня — окремим блоком під вікнами
   const reminders = await remindersFor(env, date);
   const remindLines = reminders.length ? ['', '📌 <b>Не забудь</b>',
-    ...reminders.map((r) => `${r.done?.[date] ? '✅' : '▫️'} ${esc(r.text)} · <i>${esc(r.from)}–${esc(r.to)}</i>`)] : [];
+    ...reminders.map((r) => (r.done?.[date]
+      ? `✅ <s><i>${esc(r.text)}</i></s>`
+      : `▫️ ${esc(r.text)} · <i>${esc(r.from)}–${esc(r.to)}</i>`))] : [];
   if (!items.length) {
     lines.push('', morning ? 'План на сьогодні ще порожній — дві хвилини, і готово.' : 'На сьогодні нічого не заплановано.');
     lines.push(...remindLines);
   } else {
-    // По вікнах: заголовок вікна, під ним справи; порожнє вікно — «вільно»
+    // По вікнах: заголовок, під ним справи рядком кожна, відмічені — цитатою; порожнє вікно — «вільно» в заголовку
     for (const slot of slotsFor(date, cfg)) {
-      const mine = items.filter((x) => x.slot === slot.id)
-        .sort((x, y) => (acts.get(x.activityId)?.order ?? 99) - (acts.get(y.activityId)?.order ?? 99));
-      lines.push('', slotHead(slot));
-      if (!mine.length) lines.push('   <i>вільно</i>');
-      for (const it of mine) lines.push(...itemLines(it, acts.get(it.activityId) ?? MISSING, tz, now));
+      const mine = items.filter((x) => x.slot === slot.id);
+      lines.push('', `${slotHead(slot)}${mine.length ? '' : ' · <i>вільно</i>'}`, ...itemsBlock(mine, acts, tz, now, { compact: true }));
     }
     const done = items.filter((x) => x.status === 'done' || x.status === 'min');
     const sec = done.reduce((s, x) => s + (x.spent || 0), 0);
     lines.push(...remindLines);
     const minutes = items.reduce((s, x) => s + ((acts.get(x.activityId) ?? MISSING).minutes || 0), 0);
     lines.push('', morning
-      ? `Сьогодні ${items.length} ${plural(items.length, 'справа', 'справи', 'справ')}${minutes ? ` · ~${minutes} хв` : ''}. Гарного дня!`
-      : `Зараховано ${done.length} з ${items.length}${sec ? ` · ${dur(sec)}` : ''}`);
+      ? `<b>Сьогодні ${items.length} ${plural(items.length, 'справа', 'справи', 'справ')}</b>${minutes ? ` · ~${minutes} хв` : ''}. Гарного дня!`
+      : `<b>Зараховано ${done.length} з ${items.length}</b>${sec ? ` · ${dur(sec)}` : ''}`);
   }
   const streak = streakLine(await dayStreak(env, date, await pausesOf(env)), morning);
   if (streak) lines.push('', streak);
@@ -2223,7 +2326,7 @@ async function acceptReminder(env, r, now, tz, chatId) {
   }
 }
 
-const reminderDoneText = (r, hm) => `✅ <s>${esc(r.text)}</s>\n<i>зроблено о ${esc(hm)}</i>`;
+const reminderDoneText = (r, hm) => `✅ <s><i>${esc(r.text)}</i></s>\n<i>зроблено о ${esc(hm)}</i>`;
 
 async function sendReminders(env, chatId, tz, now) {
   const { date } = local(now, tz);

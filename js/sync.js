@@ -34,6 +34,32 @@ export function setBotConfig(url, key) {
 
 export const lastSync = () => Number(get(KEYS.last) || 0);
 
+// Звірка плану з ботом — справи за останні 14 днів і наперед
+const KNOWN_DAYS = 14;
+// Розбіжність лишилась і після повної звірки — повторюємо не раніше ніж за 10 хв, а не щоразу
+const KNOWN_RETRY = 10 * 60 * 1000;
+let needKnown = false;
+let knownAt = 0;
+
+function knownFrom() {
+  const d = new Date();
+  d.setDate(d.getDate() - KNOWN_DAYS);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/**
+ * Відбиток плану: скільки справ і хеш FNV-1a їхніх id (відсортованих звичайним sort, через \n).
+ * Те саме — planDigest у worker/worker.js: правити разом, інакше звірка вважатиме розбіжністю все.
+ */
+export function planDigest(ids) {
+  const s = [...ids].sort().join('\n');
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193) >>> 0;
+  return `${ids.length}:${h.toString(16)}`;
+}
+
+const planIds = (plan, from) => plan.filter((p) => p.date >= from).map((p) => p.id);
+
 let hooks = null;
 let timer;
 let running = false;
@@ -83,17 +109,30 @@ export function initSync(h) {
   hooks = h;
 }
 
-export function scheduleSync(delay = 1500) {
+// Кілька тапів поспіль (обрав три заняття у вікно) — один запит, а не три
+export function scheduleSync(delay = 3000) {
   clearTimeout(timer);
   timer = setTimeout(() => { syncNow(); }, delay);
 }
 
-/** keepalive — запит доживе, навіть якщо застосунок згорнули чи закрили. */
-export async function syncNow({ keepalive = false } = {}) {
+/** Чи є тут зміни, яких бот ще не отримав. */
+function hasPending() {
+  const pushed = Number(get(KEYS.pushed) || 0);
+  const s = hooks.getState();
+  const newer = (x) => (x.updated || 0) > pushed;
+  return [s.plan, s.tombstones, s.activities, s.reminders ?? [], s.meta].some((list) => list.some(newer));
+}
+
+/**
+ * keepalive — запит доживе, навіть якщо застосунок згорнули чи закрили.
+ * onlyPending — лише коли є що відправити (згорнули застосунок, нічого не змінивши, — запиту немає).
+ */
+export async function syncNow({ keepalive = false, onlyPending = false } = {}) {
   clearTimeout(timer);
   const { url, key } = botConfig();
   if (!hooks || !url || !key) return { ok: false, off: true };
   if (held) return { ok: false, held: true };
+  if (onlyPending && !running && !hasPending()) return { ok: true, idle: true };
   if (running) { again = true; return { ok: false, busy: true }; }
   running = true;
   let result;
@@ -123,13 +162,25 @@ export async function syncNow({ keepalive = false } = {}) {
     const grp = state.meta.find((m) => m.id === 'groups');
     // Заняття — лише змінені: бот бере новіше за updated, решту віддає з іншого пристрою
     const activities = state.activities.filter((a) => (a.updated || 0) > pushed);
+    // Звірка: зазвичай бот віддає лише відбиток плану; повний список id — тільки коли відбитки розійшлись
+    const from = knownFrom();
+    const sendKnown = needKnown && !keepalive;
+    if (sendKnown) knownAt = Date.now();
     const data = await call('/api/sync', {
       since: Number(get(KEYS.since) || 0), items, deletes, activities, slots, pauses, pausesAt, quiet,
       templates: tpl?.list, templatesAt: tpl?.updated ?? 0, groups: grp?.list, groupsAt: grp?.updated ?? 0,
-      reminders, reminderDeletes,
+      reminders, reminderDeletes, knownFrom: from, known: sendKnown ? planIds(state.plan, from) : undefined,
     }, keepalive);
     await hooks.apply(data.items ?? [], data.deleted ?? [], data.reminders ?? [], data.reminderDeleted ?? [], data.pauses ?? null,
       data.activities ?? [], data.meta ?? {});
+    // Бот не знає цих справ зовсім — пристрій надішле їх ще раз
+    if (data.unknown?.length) await hooks.resend?.(data.unknown);
+    // Старий бот відбитка не дає — тоді й не звіряємо
+    if (data.planDigest) {
+      const same = planDigest(planIds(hooks.getState().plan, from)) === data.planDigest;
+      needKnown = !same && !sendKnown && Date.now() - knownAt > KNOWN_RETRY;
+      if (needKnown) again = true;
+    }
     set(KEYS.pushed, startedAt);
     set(KEYS.since, data.now);
     set(KEYS.last, Date.now());

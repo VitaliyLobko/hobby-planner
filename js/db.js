@@ -68,15 +68,17 @@ export async function loadAll() {
 }
 
 /**
- * changes: { store: { put: [obj], del: [id] } } — усе однією транзакцією, з відміткою часу.
+ * changes: { store: { put: [obj], del: [id] } } — усе однією транзакцією, з відміткою часу (її й повертає).
  * keep — лишити updated, що вже є в записі (зміни, що приїхали з бота): інакше вони виглядали б новими.
+ * Видалення з бота лишають надгробок з updated 0: бот про них уже знає, слати назад нічого.
  */
 export async function write(changes, { keep = false } = {}) {
   const now = Date.now();
+  const graveAt = keep ? 0 : now;
   const names = Object.keys(changes);
   const hasDel = names.some((n) => changes[n].del?.length);
   const stores = hasDel ? [...names, 'tombstones'] : names;
-  return run(stores, 'readwrite', (tx) => {
+  await run(stores, 'readwrite', (tx) => {
     for (const name of names) {
       const store = tx.objectStore(name);
       for (const obj of changes[name].put ?? []) {
@@ -85,10 +87,11 @@ export async function write(changes, { keep = false } = {}) {
       }
       for (const id of changes[name].del ?? []) {
         store.delete(id);
-        tx.objectStore('tombstones').put({ id: `${name}:${id}`, store: name, ref: id, updated: now });
+        tx.objectStore('tombstones').put({ id: `${name}:${id}`, store: name, ref: id, updated: graveAt });
       }
     }
   });
+  return now;
 }
 
 /** Повна заміна вмісту з резервної копії. */

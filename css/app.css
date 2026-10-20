@@ -362,14 +362,16 @@ button.link-btn { padding: 0; border: 0; background: none; color: var(--accent);
 .group-new > .btn { flex: none; }
 
 /* Вибір занять у вікно — групами з підписами */
-.pick-groups { display: grid; gap: 14px; }
+/* Від назви групи до її занять і від занять до назви наступної — однаково: padding-top = gap */
+.pick-groups { display: grid; gap: 16px; }
 /* Група — лише верхня лінія з назвою на ній, без рамки довкола */
-.pick-group { min-width: 0; margin: 0; padding: 2px 0 0; border: 0; border-top: 1px solid var(--line-strong); }
+.pick-group { min-width: 0; margin: 0; padding: 16px 0 0; border: 0; border-top: 1px solid var(--line-strong); }
 .pick-group-title {
   display: flex; align-items: center; gap: 6px; padding: 0 8px 0 0;
   font-size: 12px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; color: var(--muted);
 }
 .pick-group-title .ico svg { width: 16px; height: 16px; }
+.pick-chosen { display: grid; gap: 10px; }
 .heat-panel { display: grid; gap: 8px; padding: 12px 14px; border-radius: 16px; background: var(--surface); border: 1px solid var(--line); }
 .heat-panel > .heat { margin-top: 0; grid-template-rows: repeat(7, 14px); grid-auto-columns: 14px; gap: 3px; }
 .heat-legend { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
@@ -710,13 +712,23 @@ input[type="text"], input[type="search"], input[type="number"], input[type="time
 
 /* ---------- налаштування ---------- */
 .slot-edit h3 { margin: 12px 0 8px; font-size: 13px; font-weight: 700; color: var(--muted); }
-.slot-row { display: grid; grid-template-columns: 20px minmax(0, 1fr) 92px 92px; gap: 8px; align-items: center; margin-bottom: 8px; }
+/* Будні й вихідні — окремими рамками з назвою на лінії; вихідні — кольором вихідних */
+.slot-set { min-width: 0; margin: 14px 0 0; padding: 8px 10px 2px; border: 1px solid var(--line-strong); border-radius: 14px; }
+.slot-set > legend { padding: 0 6px; font-size: 13px; font-weight: 800; color: var(--text-2); }
+.slot-set.weekend { background: var(--weekend-bg); border-color: color-mix(in srgb, var(--weekend-fg) 50%, transparent); }
+.slot-set.weekend > legend { color: var(--weekend-fg); }
+.slot-set.weekend .ico { color: var(--weekend-fg); }
+.week-days.weekend-days .chip.on { background: var(--weekend-bg); color: var(--weekend-fg); border-color: var(--weekend-fg); }
+.slot-row { display: grid; grid-template-columns: 20px minmax(0, 1fr) 78px 78px; gap: 8px; align-items: center; margin-bottom: 8px; }
 .time-field {
   width: 100%; min-height: 44px; padding: 0 12px; border-radius: 10px; text-align: left;
   border: 1px solid var(--line); background: var(--surface-2); color: var(--text);
   font: inherit; font-weight: 700; font-variant-numeric: tabular-nums;
 }
 .slot-row .time-field { padding: 0; text-align: center; }
+/* Назва вікна («Ранок», «Вечір») має влазити цілком і на вузькому телефоні */
+.slot-row { grid-template-columns: 18px minmax(0, 1fr) 70px 70px; gap: 6px; }
+.slot-row input[type=text] { padding: 0 8px; }
 
 /* вибір часу — над шторкою */
 .picker-backdrop { z-index: 50; }
