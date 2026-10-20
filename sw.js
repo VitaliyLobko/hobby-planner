@@ -25,6 +25,7 @@ const ASSETS = [
   './icons/shortcut-plan.png',
   './icons/shortcut-week.png',
   './icons/shortcut-quick.png',
+  './icons/author.jpg',
 ];
 
 // Файли — повз HTTP-кеш браузера: GitHub Pages віддає max-age=600,

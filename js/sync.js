@@ -45,10 +45,12 @@ export function holdSync(on) {
   held = on;
 }
 
-async function call(path, body) {
+// ponytail: keepalive обмежує тіло 64 КБ — більший запит падає як «немає зв'язку» й піде при наступному відкритті
+async function call(path, body, keepalive = false) {
   const { url, key } = botConfig();
   const res = await fetch(`${url}${path}`, {
     method: 'POST',
+    keepalive,
     headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
     body: JSON.stringify(body),
   });
@@ -86,7 +88,9 @@ export function scheduleSync(delay = 1500) {
   timer = setTimeout(() => { syncNow(); }, delay);
 }
 
-export async function syncNow() {
+/** keepalive — запит доживе, навіть якщо застосунок згорнули чи закрили. */
+export async function syncNow({ keepalive = false } = {}) {
+  clearTimeout(timer);
   const { url, key } = botConfig();
   if (!hooks || !url || !key) return { ok: false, off: true };
   if (held) return { ok: false, held: true };
@@ -112,13 +116,20 @@ export async function syncNow() {
     const pauseMeta = state.meta.find((m) => m.id === 'pauses');
     const pauses = pauseMeta?.list ?? [];
     const pausesAt = pauseMeta?.updated ?? 0;
-    // Тихі години — теж щоразу: бот перевіряє їх щохвилини
-    const quiet = state.meta.find((m) => m.id === 'quiet') ?? { on: false };
-    const templates = state.meta.find((m) => m.id === 'templates')?.list ?? [];
+    // Вікна, тихі години, шаблони, групи занять — щоразу з міткою updated: на кількох пристроях лишається новіше.
+    // Чого тут ще не задавали — не шлемо, щоб не затерти задане на іншому
+    const quiet = state.meta.find((m) => m.id === 'quiet');
+    const tpl = state.meta.find((m) => m.id === 'templates');
+    const grp = state.meta.find((m) => m.id === 'groups');
+    // Заняття — лише змінені: бот бере новіше за updated, решту віддає з іншого пристрою
+    const activities = state.activities.filter((a) => (a.updated || 0) > pushed);
     const data = await call('/api/sync', {
-      since: Number(get(KEYS.since) || 0), items, deletes, activities: state.activities, slots, pauses, pausesAt, quiet, templates, reminders, reminderDeletes,
-    });
-    await hooks.apply(data.items ?? [], data.deleted ?? [], data.reminders ?? [], data.reminderDeleted ?? [], data.pauses ?? null);
+      since: Number(get(KEYS.since) || 0), items, deletes, activities, slots, pauses, pausesAt, quiet,
+      templates: tpl?.list, templatesAt: tpl?.updated ?? 0, groups: grp?.list, groupsAt: grp?.updated ?? 0,
+      reminders, reminderDeletes,
+    }, keepalive);
+    await hooks.apply(data.items ?? [], data.deleted ?? [], data.reminders ?? [], data.reminderDeleted ?? [], data.pauses ?? null,
+      data.activities ?? [], data.meta ?? {});
     set(KEYS.pushed, startedAt);
     set(KEYS.since, data.now);
     set(KEYS.last, Date.now());

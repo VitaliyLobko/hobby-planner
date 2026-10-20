@@ -220,7 +220,7 @@ export function sheet(title, content, { onClose } = {}) {
     onClose?.();
   };
   const api = { close };
-  const panel = h('div', { class: 'sheet', role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
+  const panel = h('div', { class: 'sheet', role: 'dialog', 'aria-modal': 'true', 'aria-label': title, tabindex: '-1' },
     h('div', { class: 'sheet-grip', 'aria-hidden': 'true' }),
     h('h2', { class: 'sheet-title' }, title),
     content);
@@ -229,7 +229,8 @@ export function sheet(title, content, { onClose } = {}) {
   layer.replaceChildren(backdrop, panel);
   openSheet = api;
   history.pushState({ sheet: true }, '');
-  panel.querySelector('button, input, select, textarea')?.focus({ preventScroll: true });
+  // Фокус на саму шторку, не на поле: інакше на телефоні одразу вискакує клавіатура
+  panel.focus({ preventScroll: true });
   return close;
 }
 

@@ -2,7 +2,7 @@
 <rect width="512" height="512" fill="#16302b"/>
 <g transform="translate(0 8)">
   <path d="M96 370 A160 160 0 0 1 416 370" fill="none" stroke="rgba(255,255,255,.16)" stroke-width="34" stroke-linecap="round"/>
-  <path d="M96 370 A160 160 0 0 1 256 210" fill="none" stroke="#ffd166" stroke-width="34" stroke-linecap="round"/>
+  <path d="M96 370 A160 160 0 0 1 256 210" fill="none" stroke="#5fd0b4" stroke-width="34" stroke-linecap="round"/>
   <path d="M256 106V78M152 210H124M360 210H388M182.5 136.5L162.7 116.7M329.5 136.5L349.3 116.7M182.5 283.5L162.7 303.3M329.5 283.5L349.3 303.3" stroke="#ffd166" stroke-width="24" stroke-linecap="round"/>
   <circle cx="256" cy="210" r="72" fill="#ffd166"/>
   <circle cx="96" cy="370" r="46" fill="#5fd0b4"/>
