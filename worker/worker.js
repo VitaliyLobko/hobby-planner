@@ -1367,21 +1367,18 @@ async function sendToday(env, chatId, now, title, morning = false) {
   const acts = await actsMap(env);
   const items = await todayItems(env, date);
   const lines = [`<b>${esc(title)}</b>`, `<i>${dayTitle(date)}</i>`];
-  // «Не забудь» дня — окремим блоком під вікнами
+  // «Не забудь» дня — під вікнами, згорнутою цитатою: лічильник видно одразу, список — дотиком
   const reminders = await remindersFor(env, date);
-  const remindLines = reminders.length ? ['', '📌 <b>Не забудь</b>',
-    ...reminders.map((r) => (r.done?.[date]
+  const ticked = reminders.filter((r) => r.done?.[date]).length;
+  const remindLines = reminders.length ? ['', `📌 <b>Не забудь</b> · ${reminders.length}${ticked ? ` (${ticked} ✅)` : ''}`,
+    `<blockquote expandable>${reminders.map((r) => (r.done?.[date]
       ? `✅ <s><i>${esc(r.text)}</i></s>`
-      : `▫️ ${esc(r.text)} · <i>${esc(r.from)}–${esc(r.to)}</i>`))] : [];
+      : `▫️ ${esc(r.text)} · <i>${esc(r.from)}–${esc(r.to)}</i>`)).join('\n')}</blockquote>`] : [];
   if (!items.length) {
     lines.push('', morning ? 'План на сьогодні ще порожній — дві хвилини, і готово.' : 'На сьогодні нічого не заплановано.');
     lines.push(...remindLines);
   } else {
-    // По вікнах: заголовок, під ним справи рядком кожна, відмічені — цитатою; порожнє вікно — «вільно» в заголовку
-    for (const slot of slotsFor(date, cfg)) {
-      const mine = items.filter((x) => x.slot === slot.id);
-      lines.push('', `${slotHead(slot)}${mine.length ? '' : ' · <i>вільно</i>'}`, ...itemsBlock(mine, acts, tz, now, { compact: true }));
-    }
+    lines.push(...planLines(date, items, cfg, acts, tz, now));
     const done = items.filter((x) => x.status === 'done' || x.status === 'min');
     const sec = done.reduce((s, x) => s + (x.spent || 0), 0);
     lines.push(...remindLines);
@@ -2049,12 +2046,15 @@ async function tomorrowOptions(env, now) {
   return { day, have, list, again, cfg, acts, tz };
 }
 
-/** «🌅 Ранок: Англійська, Python» — по рядку на непорожнє вікно. */
-function planLines(date, items, cfg, acts) {
-  return slotsFor(date, cfg)
-    .map((s) => [s, items.filter((x) => x.slot === s.id).map((x) => (acts.get(x.activityId) ?? MISSING).name)])
-    .filter(([, names]) => names.length)
-    .map(([s, names]) => `${SLOT_EMOJI[s.id] ?? '🕒'} ${esc(s.label)}: ${names.map(esc).join(', ')}`);
+/**
+ * План дня по вікнах — і для підсумку, і для «Плану на завтра»: заголовок, під ним справи рядком кожна,
+ * відмічені — цитатою; порожнє вікно — «вільно» в заголовку.
+ */
+function planLines(date, items, cfg, acts, tz, now) {
+  return slotsFor(date, cfg).flatMap((slot) => {
+    const mine = items.filter((x) => x.slot === slot.id);
+    return ['', `${slotHead(slot)}${mine.length ? '' : ' · <i>вільно</i>'}`, ...itemsBlock(mine, acts, tz, now, { compact: true })];
+  });
 }
 
 /**
@@ -2062,12 +2062,12 @@ function planLines(date, items, cfg, acts) {
  * always (/tomorrow, «що на завтра?») — завжди: хоча б що вже стоїть.
  */
 async function sendTomorrowOffer(env, chatId, now, { always = false } = {}) {
-  const { day, have, list, again, cfg, acts } = await tomorrowOptions(env, now);
+  const { day, have, list, again, cfg, acts, tz } = await tomorrowOptions(env, now);
   const paused = pauseOn(day, await pausesOf(env));
   if (!always && (paused || (!list.length && !again.length))) return;
-  const lines = ['🌙 <b>План на завтра</b>', `<i>${dayTitle(day)}</i>`, ''];
-  if (paused) lines.push('🌴 Завтра пауза — нагадувань не буде.', '');
-  lines.push(...(have.length ? ['Уже є:', ...planLines(day, have, cfg, acts)] : ['Поки порожньо.']));
+  const lines = ['🌙 <b>План на завтра</b>', `<i>${dayTitle(day)}</i>`];
+  if (paused) lines.push('', '🌴 Завтра пауза — нагадувань не буде.');
+  lines.push(...(have.length ? planLines(day, have, cfg, acts, tz, now) : ['', 'Поки порожньо.']));
   for (const o of again) lines.push('', `⚠️ ${actEmoji(o.a)} <b>${esc(o.a.name)}</b> — пропущено двічі поспіль. Утретє не пропускай?`);
   if (list.length || again.length) lines.push('', 'Поставити одним дотиком?');
   await tg(env, 'sendMessage', {
@@ -2114,7 +2114,7 @@ async function onTomorrowButton(env, cb, chatId) {
   if (msgId) {
     await tg(env, 'editMessageText', {
       chat_id: chatId, message_id: msgId, parse_mode: 'HTML',
-      text: ['🗓 <b>План на завтра</b>', `<i>${dayTitle(day)}</i>`, '', ...planLines(day, await todayItems(env, day), cfg, acts), '',
+      text: ['🗓 <b>План на завтра</b>', `<i>${dayTitle(day)}</i>`, ...planLines(day, await todayItems(env, day), cfg, acts, tz, now), '',
         `<i>${esc(opt.label)}: +${n}</i>`].join('\n'),
       reply_markup: { inline_keyboard: [[{ text: '↩️ Скасувати', callback_data: `u:${token}` }]] },
     });
@@ -2258,6 +2258,12 @@ async function onWeights(request, env) {
       ON CONFLICT(date) DO UPDATE SET kg = excluded.kg, note = excluded.note, updated = excluded.updated, srv = excluded.srv
       WHERE excluded.updated > weights.updated`)
       .bind(w.date, w.kg, String(w.note ?? '').slice(0, 200), Number(w.updated) || 0, now)));
+    // Зважився в «Вазі» — нагадування за сьогодні більше не потрібне
+    const st = await weighState(env);
+    if (st.date && put.some((w) => w.date === st.date) && (st.next || st.msg)) {
+      await closeWeighMessage(env, await owner(env), st.msg);
+      await setWeighState(env, { ...st, next: null, msg: null });
+    }
   }
   const since = Number(body.since) || 0;
   const { results } = await env.DB.prepare('SELECT date, kg, note, updated FROM weights WHERE srv > ? ORDER BY date')
