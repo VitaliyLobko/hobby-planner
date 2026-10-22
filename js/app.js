@@ -54,7 +54,9 @@ const isOwnColor = (c) => /^#[0-9a-f]{6}$/i.test(c ?? '');
 const colorVar = (c) => (isOwnColor(c)
   ? `color-mix(in srgb, ${c} calc(100% - var(--own-shade)), black)`
   : `var(--c-${c || 'blue'})`);
-const actStyle = (a) => ({ '--c': colorVar(a?.color) });
+// Без свого кольору (color — '') заняття бере колір групи
+const colorOf = (a) => a?.color || groupOf(a)?.color || 'blue';
+const actStyle = (a) => ({ '--c': colorVar(colorOf(a)) });
 const MISSING = { name: 'Видалене заняття', color: 'blue', icon: 'star', minutes: 0, minVersion: '', weeklyTarget: 1 };
 const pauses = () => state.meta.find((m) => m.id === 'pauses')?.list ?? [];
 const target = (a, start) => M.weekTarget(a, start, pauses());
@@ -391,7 +393,9 @@ function itemSheet(item) {
         window.addEventListener('popstate', () => setTimeout(() => moveSheet(item)), { once: true });
         closeSheet();
       }) : null,
-      button('skip', 'Пропустити', 'danger', () => { closeSheet(); mark(item, 'skipped'); })));
+      button('skip', 'Пропустити', 'danger', () => { closeSheet(); mark(item, 'skipped'); }),
+      // Поставив помилково — прибрати зовсім: не пропуск і не рахується; «Скасувати» в тості поверне
+      button('trash', 'Прибрати з плану', 'ghost', () => { closeSheet(); unplan(current()); })));
   } else {
     const when = item.status === 'done' && item.doneAt ? ` о ${item.doneAt}` : '';
     box.append(h('p', {}, `${M.STATUS[item.status]}${when}.`));
@@ -1597,10 +1601,21 @@ function colorStrip(label, min, max, step, get, set) {
 /**
  * Готові кольори веселкою, під ними — свій: відтінок, насиченість (від сірого до найяскравішого)
  * і яскравість смугами та поле #rrggbb. Без системної палітри: на Android вона дрібна й незручна.
+ * inherit — колір групи (функція: група в формі може змінитись): тоді згори «Як у групи», він ставить color = ''.
+ * refresh() на результаті — перемалювати після зміни групи.
  */
-function colorPicker(d, onPick) {
+function colorPicker(d, onPick, inherit = null) {
   const row = optionRow(COLOR_ORDER, d.color, (c) => h('button', { type: 'button', class: 'swatch', style: { '--c': colorVar(c) }, 'aria-label': COLOR_NAMES[c] }),
     (c) => { d.color = c; paintOwn(); onPick(); }, 'Колір');
+  const sameAsGroup = inherit && h('button', {
+    type: 'button', class: 'chip',
+    onClick: () => {
+      d.color = '';
+      for (const b of row.children) b.setAttribute('aria-pressed', 'false');
+      paintOwn();
+      onPick();
+    },
+  });
   const own = isOwnColor(d.color) ? hexHsl(d.color) : { ...OWN_DEFAULT };
   own.light = Math.min(OWN_LIGHT_MAX, Math.max(OWN_LIGHT_MIN, own.light));
   const hsl = (o = {}) => `hsl(${o.hue ?? own.hue}, ${o.sat ?? own.sat}%, ${o.light ?? own.light}%)`;
@@ -1629,6 +1644,13 @@ function colorPicker(d, onPick) {
     preview.style.setProperty('--c', on ? colorVar(d.color) : 'transparent');
     preview.classList.toggle('empty', !on);
     if (document.activeElement !== hex) hex.value = on ? d.color : '';
+    if (sameAsGroup) {
+      const gc = inherit();
+      sameAsGroup.hidden = !gc;
+      sameAsGroup.classList.toggle('on', !d.color);
+      sameAsGroup.setAttribute('aria-pressed', String(!d.color));
+      sameAsGroup.replaceChildren(h('span', { class: 'swatch-dot', style: { '--c': colorVar(gc) } }), 'Як у групи');
+    }
   }
   hex.addEventListener('input', () => {
     let v = hex.value.trim().toLowerCase();
@@ -1647,11 +1669,13 @@ function colorPicker(d, onPick) {
     } catch { /* буфер недоступний — поле лишається для ручного копіювання */ }
   });
   paintOwn();
-  return h('div', { class: 'color-picker' }, row,
+  const box = h('div', { class: 'color-picker' }, sameAsGroup || null, row,
     h('div', { class: 'own-head' }, h('span', { class: 'flabel' }, 'Свій колір'), preview, hex),
     h('span', { class: 'flabel sub' }, 'Відтінок'), hue.strip,
     h('span', { class: 'flabel sub' }, 'Насиченість — від сірого до яскравого'), sat.strip,
     h('span', { class: 'flabel sub' }, 'Яскравість — від темного до світлого'), light.strip);
+  box.refresh = paintOwn;
+  return box;
 }
 
 const iconName = (key) => M.ICON_GROUPS.flatMap((g) => g.icons).find(([k]) => k === key)?.[1] ?? '';
@@ -1744,23 +1768,52 @@ function groupPicker(d, onPick, fresh) {
   return box;
 }
 
-/** Група: назва й іконка; видалити — заняття лишаються, просто без групи («Скасувати» поверне). */
+/**
+ * Група: назва, іконка й колір; колір беруть заняття групи без свого. «Усім заняттям» — скинути їм свій колір.
+ * Видалити — заняття лишаються, просто без групи («Скасувати» поверне).
+ */
 function editGroup(g) {
   const d = { ...g };
   const name = h('input', { type: 'text', value: g.name, maxlength: 30, id: 'f-gname' });
   const iconValue = h('span', { class: 'pick-value' });
-  const paint = () => iconValue.replaceChildren(icon(d.icon), iconName(d.icon));
+  const colorValue = h('span', { class: 'pick-value' });
+  const members = activeActs().filter((a) => a.group === g.id);
+  const own = members.filter((a) => a.color);
+  // Перемикач-чип: увімкнений — при збереженні заняття зі своїм кольором переходять на колір групи
+  const toAll = h('button', {
+    type: 'button', class: 'chip', 'aria-pressed': 'false', hidden: true,
+    onClick: () => {
+      const on = toAll.getAttribute('aria-pressed') !== 'true';
+      toAll.setAttribute('aria-pressed', String(on));
+      toAll.classList.toggle('on', on);
+    },
+  }, icon('palette'), `Перефарбувати й заняття зі своїм кольором · ${own.length}`);
+  const paint = () => {
+    iconValue.replaceChildren(icon(d.icon), iconName(d.icon));
+    colorValue.replaceChildren(d.color ? h('span', { class: 'swatch-dot', style: { '--c': colorVar(d.color) } }) : '',
+      d.color ? COLOR_NAMES[d.color] ?? 'Свій' : 'Без кольору');
+    toAll.hidden = !d.color || !own.length;
+  };
   paint();
-  const n = activeActs().filter((a) => a.group === g.id).length;
+  const n = members.length;
   sheet('Група', h('div', { class: 'sheet-body form' },
     h('label', { for: 'f-gname' }, 'Назва'), name,
     pickFold('Іконка', iconValue, iconPicker(d, paint)),
+    pickFold('Колір', colorValue, h('div', { class: 'stack' },
+      h('p', { class: 'muted small' }, 'Його беруть заняття групи, де в кольорі обрано «Як у групи». Свій колір заняття лишається своїм.'),
+      colorPicker(d, paint))),
+    toAll,
     h('div', { class: 'btn-grid' },
       button('check', 'Зберегти', 'primary', async () => {
         d.name = name.value.trim();
         if (!d.name) { name.focus(); toast('Вкажи назву'); return; }
+        const all = !toAll.hidden && toAll.getAttribute('aria-pressed') === 'true';
         closeSheet();
         await saveGroups(actGroups().map((x) => (x.id === g.id ? d : x)));
+        if (!all) return;
+        await save({ activities: { put: own.map((a) => ({ ...a, color: '' })) } });
+        toast(`Колір групи — ще ${own.length} ${plural(own.length, 'заняттю', 'заняттям', 'заняттям')}`,
+          { label: 'Скасувати', run: () => save({ activities: { put: own.map((a) => ({ ...a })) } }) });
       })),
     h('div', { class: 'archive-zone' },
       h('p', { class: 'muted small' }, `У групі ${n} ${plural(n, 'заняття', 'заняття', 'занять')}. Видалиш групу — вони лишаться, просто без групи.`),
@@ -1841,24 +1894,30 @@ function editActivity(orig) {
   const groupValue = h('span', { class: 'pick-value' });
   // Нова група з цієї форми — збережеться разом із заняттям
   const fresh = { g: null };
+  const groupColor = () => groupOf(d)?.color ?? null;
+  let colors = null;
   const paintLook = () => {
-    previewTile.style.setProperty('--c', colorVar(d.color));
+    // Зняли групу чи в неї немає кольору — «як у групи» вже нічого не значить: лишаємо видимий колір своїм
+    if (!d.color && !groupColor()) d.color = colorOf(d);
+    colors?.refresh();
+    previewTile.style.setProperty('--c', colorVar(colorOf(d)));
     previewTile.replaceChildren(icon(d.icon));
     previewName.textContent = name.value.trim() || 'Нове заняття';
-    colorValue.replaceChildren(h('span', { class: 'swatch-dot', style: actStyle(d) }), COLOR_NAMES[d.color] ?? 'Свій');
+    colorValue.replaceChildren(h('span', { class: 'swatch-dot', style: actStyle(d) }),
+      d.color ? COLOR_NAMES[d.color] ?? 'Свій' : 'Як у групи');
     iconValue.replaceChildren(icon(d.icon), iconName(d.icon));
     const g = groupOf(d) ?? (fresh.g?.id === d.group ? fresh.g : null);
     groupValue.replaceChildren(g ? icon(g.icon) : '', g ? g.name : 'Без групи');
   };
   name.addEventListener('input', paintLook);
+  colors = colorPicker(d, paintLook, groupColor);
   paintLook();
 
   const form = h('div', { class: 'sheet-body form act-form' },
     h('div', { class: 'act-preview' }, previewTile, previewName),
     formBox('Вигляд',
       h('label', { for: 'f-name' }, 'Назва'), name,
-      pickFold('Колір', colorValue,
-        colorPicker(d, paintLook)),
+      pickFold('Колір', colorValue, colors),
       pickFold('Іконка', iconValue, iconPicker(d, paintLook)),
       pickFold('Група', groupValue, groupPicker(d, paintLook, fresh))),
     formBox('Ціль',
@@ -2155,7 +2214,7 @@ function sortActs(list, mode) {
 /** Заголовок групи: іконка, назва, скільки занять і олівець — змінити назву чи іконку. */
 function groupHead(g, n) {
   return h('span', { class: 'group-head' },
-    g ? h('span', { class: 'group-ico' }, icon(g.icon)) : null,
+    g ? h('span', { class: `group-ico${g.color ? ' tinted' : ''}`, style: g.color ? { '--c': colorVar(g.color) } : null }, icon(g.icon)) : null,
     h('span', { class: 'group-name' }, g ? g.name : 'Без групи'),
     h('span', { class: 'group-count' }, String(n)),
     g ? h('button', {

@@ -195,6 +195,18 @@ export const ICON_GROUPS = [
     ['gitlab', 'GitLab'], ['codepen', 'CodePen'], ['figma', 'Figma'], ['dribbble', 'Dribbble'],
     ['slack', 'Slack'], ['trello', 'Trello'], ['chrome', 'Браузер'], ['novaposhta', 'Нова пошта'],
   ] },
+  { title: 'Прикольні', icons: [
+    ['hand-metal', 'Рок'], ['skull', 'Череп'], ['laugh', 'Сміх'], ['rainbow', 'Веселка'],
+    ['castle', 'Замок'], ['sword', 'Меч'], ['wand', 'Чарівна паличка'], ['diamond', 'Діамант'],
+    ['rabbit', 'Кролик'], ['turtle', 'Черепаха'], ['snail', 'Равлик'], ['squirrel', 'Білка'],
+    ['rat', 'Щур'], ['bone', 'Кістка'], ['shell', 'Мушля'], ['clover', 'Конюшина'],
+    ['tree-palm', 'Пальма'], ['donut', 'Пончик'], ['cookie', 'Печиво'], ['candy', 'Цукерка'],
+    ['lollipop', 'Льодяник'], ['popsicle', 'Ескімо'], ['banana', 'Банан'], ['grape', 'Виноград'],
+    ['citrus', 'Цитрус'], ['sandwich', 'Сендвіч'], ['drumstick', 'Курка'], ['cup-soda', 'Газування'],
+    ['milk', 'Молоко'], ['ferris-wheel', 'Оглядове колесо'], ['orbit', 'Орбіта'], ['satellite', 'Супутник'],
+    ['moon-star', 'Нічне небо'], ['cloud-lightning', 'Гроза'], ['tornado', 'Торнадо'], ['dices', 'Кубики'],
+    ['tractor', 'Трактор'], ['anvil', 'Ковальство'], ['heart-handshake', 'Угода'], ['brain-circuit', 'ШІ'],
+  ] },
   { title: 'Інше', icons: [
     ['star', 'Зірка'], ['sparkles', 'Блиск'], ['wand-sparkles', 'Магія'], ['crown', 'Корона'],
     ['rocket', 'Ракета'], ['flag', 'Прапор'], ['anchor', 'Якір'], ['infinity', 'Нескінченність'],

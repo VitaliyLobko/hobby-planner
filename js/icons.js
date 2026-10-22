@@ -48,6 +48,7 @@ export const ICONS = {
   half: '<circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/>',
   move: '<path d="M5 12h12M13 7l5 5-5 5"/>',
   skip: '<path d="M6 6l12 12M18 6L6 18"/>',
+  trash: '<path d="M4 7h16M10 11v6M14 11v6"/><path d="M6 7l1 13h10l1-13M9 7V4h6v3"/>',
   play: '<path d="M8 5.5v13l10.5-6.5z"/>',
   pause: '<path d="M9 5.5v13M15 5.5v13"/>',
   undo:'<path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>',
