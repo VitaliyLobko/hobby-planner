@@ -702,19 +702,29 @@ function reminderCard(r) {
       h('span', { class: 'act-sub' }, `${M.remindWhen(r)} · ${r.from}–${r.to}`)));
 }
 
-/** Список нагадувань у вкладці «Заняття»: чинні, нижче згорнуті минулі разові. */
+/**
+ * Нагадування у вкладці «Заняття» — групами за тим, коли спрацюють: сьогодні, попереду разові,
+ * повторювані (що не сьогодні), минулі разові. Кожна група згортається, порожні не показуємо.
+ */
 function remindersSection() {
   const today = M.ymd();
   const byTime = (a, b) => (a.date || '').localeCompare(b.date || '') || a.from.localeCompare(b.from);
-  const past = state.reminders.filter((r) => r.kind === 'once' && r.date < today).sort(byTime).reverse();
-  const live = state.reminders.filter((r) => !past.includes(r)).sort(byTime);
+  const all = [...state.reminders].sort(byTime);
+  const now = all.filter((r) => M.remindOn(r, today)).sort((a, b) => a.from.localeCompare(b.from));
+  const ahead = all.filter((r) => r.kind === 'once' && r.date > today);
+  const repeat = all.filter((r) => r.kind !== 'once' && !now.includes(r));
+  const past = all.filter((r) => r.kind === 'once' && r.date < today).reverse();
+  const group = (key, title, list, def) => (list.length ? folded(`reminders-${key}`,
+    h('h2', { class: 'section-title' }, `${title} · ${list.length}`),
+    h('div', { class: 'stack' }, list.map(reminderCard)), { def, persist: true, cls: 'plain-fold' }) : null);
   return h('div', { class: 'stack' },
     h('h2', { class: 'section-title' }, 'Нагадування'),
     h('p', { class: 'muted small lead' }, 'Окремо від хобі: не рахуються в цілях. Разові й повторювані — щодня, у дні тижня чи в числа місяця.'),
-    ...live.map(reminderCard),
+    group('today', 'Сьогодні', now, true),
+    group('ahead', 'Попереду', ahead, true),
+    group('repeat', 'Повторювані', repeat, true),
     button('plus', 'Нове нагадування', 'copy-btn', () => editReminder()),
-    past.length ? folded('reminders-past', h('h2', { class: 'section-title' }, `Минулі разові · ${past.length}`),
-      h('div', { class: 'stack' }, past.map(reminderCard)), { def: false, persist: true, cls: 'plain-fold' }) : null);
+    group('past', 'Минулі разові', past, false));
 }
 
 // ---------- «Є кілька хвилин» ----------
@@ -1982,7 +1992,7 @@ function heatMap(a, heat) {
     const score = days[date] ?? 0;
     if (score) active += 1;
     const lvl = date > today ? 'future' : score >= 4 ? 'l3' : score >= 2 ? 'l2' : score ? 'l1' : M.pauseOn(date, pauses()) ? 'pause' : 'l0';
-    grid.append(h('span', { class: lvl, title: date > today ? null : `${M.dayMonth(date)}: ${score ? `${Math.floor(score / 2)} повн., ${score % 2} мін.` : 'нічого'}` }));
+    grid.append(h('span', { class: date === today ? `${lvl} today` : lvl, title: date > today ? null : `${M.dayMonth(date)}: ${score ? `${Math.floor(score / 2)} повн., ${score % 2} мін.` : 'нічого'}` }));
   }
   grid.setAttribute('aria-label', `За ${HEAT_WEEKS} тижнів — ${active} ${plural(active, 'день', 'дні', 'днів')} із заняттям`);
   return grid;
@@ -2058,11 +2068,24 @@ async function moveAmong(wrap, to) {
 // Заняття з розгорнутою тепловою картою — пам'ятаємо між запусками
 const heatOpen = new Set((recall('heat-open') ?? '').split(',').filter(Boolean));
 
-/** Під карткою: теплова карта з підписом і легендою «менше — більше». */
+/**
+ * Під карткою: підсумок, теплова карта з місяцями згори й днями тижня ліворуч, легенда «менше — більше».
+ * Дотик до квадратика пише його день у підсумок — на телефоні підказки title не видно.
+ */
 function heatPanel(a, heat) {
+  const grid = heatMap(a, heat);
+  const total = grid.getAttribute('aria-label');
+  const info = h('div', { class: 'heat-info' }, total);
+  grid.addEventListener('click', (e) => { info.textContent = e.target.title || total; });
+  const months = h('span', { class: 'heat-months', 'aria-hidden': 'true' }, Array.from({ length: HEAT_WEEKS }, (_, w) => {
+    const d = M.addDays(heat.from, 7 * w);
+    const first = w === 0 || d.slice(5, 7) !== M.addDays(d, -7).slice(5, 7);
+    return h('span', {}, first ? M.parseYmd(d).toLocaleDateString('uk', { month: 'short' }) : '');
+  }));
+  const days = h('span', { class: 'heat-days', 'aria-hidden': 'true' }, M.DAY_SHORT.map((d, i) => h('span', {}, i % 2 ? '' : d)));
   return h('div', { class: 'heat-panel', style: actStyle(a) },
-    h('div', { class: 'muted small' }, `${HEAT_WEEKS} тижнів · стовпчик — тиждень`),
-    heatMap(a, heat),
+    info,
+    h('div', { class: 'heat-frame' }, h('span', {}), months, days, grid),
     h('div', { class: 'heat-legend muted small' }, 'менше',
       h('span', { class: 'heat' }, ['l0', 'l1', 'l2', 'l3'].map((c) => h('span', { class: c }))), 'більше',
       h('span', { class: 'heat' }, h('span', { class: 'pause' })), 'пауза'));
