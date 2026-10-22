@@ -465,7 +465,7 @@ button.link-btn { padding: 0; border: 0; background: none; color: var(--accent);
 }
 .remind-row.done .remind-text > span:first-child { text-decoration: line-through; color: var(--muted); }
 .remind-row.late .remind-text .muted { color: var(--bad-fg); }
-.remind-tile { --c: var(--c-orange); }
+.remind-tile { --c: var(--c-slate); }
 /* серії: вогник кольору заняття (на «Сьогодні» — помаранчевий) */
 .day-left.streak { color: var(--c-orange); }
 .streak-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; font-weight: 700; color: var(--c); }
