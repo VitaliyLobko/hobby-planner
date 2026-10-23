@@ -176,6 +176,9 @@ a { color: var(--accent); }
 .slot-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .slot-name { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; color: var(--muted); }
 .slot-head .slot-name { margin-right: auto; }
+/* У «Сьогодні» назва вікна крупніша — по ній орієнтуються в дні */
+.slot-group .slot-name { gap: 8px; font-size: 16px; }
+.slot-group .slot-name .ico svg { width: 22px; height: 22px; }
 .dots { display: inline-flex; gap: 3px; flex: none; }
 .slot-group .card.swipe { border: 0; }
 .slot-group .card.swipe .swipe-body { background: var(--surface-2); }
@@ -377,7 +380,11 @@ button.link-btn { padding: 0; border: 0; background: none; color: var(--accent);
 /* Клітинки тягнуться на ширину картки (до 28px), квадратні; дні тижня — тими ж рядками */
 .heat-frame { display: grid; grid-template-columns: max-content minmax(0, 369px); gap: 4px 6px; }
 .heat-frame > .heat { margin-top: 0; width: auto; grid-template-rows: repeat(7, auto); grid-auto-columns: 1fr; gap: 3px; }
-.heat-frame > .heat > span { aspect-ratio: 1; }
+.heat-frame > .heat > span { aspect-ratio: 1; display: grid; place-items: center; font-size: 10px; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; color: color-mix(in srgb, var(--text) 35%, transparent); }
+/* На яскравих — напівпрозорим білим: читається, але не сперечається з кольором заняття */
+.heat-frame > .heat > :is(.l2, .l3) { color: rgb(255 255 255 / .7); }
+.heat-frame > .heat > .first { font-weight: 800; color: color-mix(in srgb, var(--text) 70%, transparent); }
+.heat-frame > .heat > :is(.l2, .l3).first { color: rgb(255 255 255 / .85); }
 .heat > .today { outline: 2px solid var(--text); outline-offset: 1px; }
 .heat-info { font-size: 14px; font-weight: 700; }
 .heat-months { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 3px; }
