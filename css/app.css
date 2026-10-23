@@ -380,11 +380,11 @@ button.link-btn { padding: 0; border: 0; background: none; color: var(--accent);
 /* Клітинки тягнуться на ширину картки (до 28px), квадратні; дні тижня — тими ж рядками */
 .heat-frame { display: grid; grid-template-columns: max-content minmax(0, 369px); gap: 4px 6px; }
 .heat-frame > .heat { margin-top: 0; width: auto; grid-template-rows: repeat(7, auto); grid-auto-columns: 1fr; gap: 3px; }
-.heat-frame > .heat > span { aspect-ratio: 1; display: grid; place-items: center; font-size: 10px; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; color: color-mix(in srgb, var(--text) 55%, transparent); }
-/* На яскравих — білим, щоб число не губилося на кольорі заняття */
-.heat-frame > .heat > :is(.l2, .l3) { color: #fff; }
-.heat-frame > .heat > .first { font-weight: 800; color: var(--text); }
-.heat-frame > .heat > :is(.l2, .l3).first { color: #fff; }
+.heat-frame > .heat > span { aspect-ratio: 1; display: grid; place-items: center; font-size: 10px; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; color: color-mix(in srgb, var(--text) 35%, transparent); }
+/* На яскравих — напівпрозорим білим: читається, але не сперечається з кольором заняття */
+.heat-frame > .heat > :is(.l2, .l3) { color: rgb(255 255 255 / .7); }
+.heat-frame > .heat > .first { font-weight: 800; color: color-mix(in srgb, var(--text) 70%, transparent); }
+.heat-frame > .heat > :is(.l2, .l3).first { color: rgb(255 255 255 / .85); }
 .heat > .today { outline: 2px solid var(--text); outline-offset: 1px; }
 .heat-info { font-size: 14px; font-weight: 700; }
 .heat-months { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 3px; }
