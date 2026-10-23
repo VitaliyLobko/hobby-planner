@@ -176,8 +176,8 @@ a { color: var(--accent); }
 .slot-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .slot-name { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; color: var(--muted); }
 .slot-head .slot-name { margin-right: auto; }
-/* У «Сьогодні» назва вікна крупніша — по ній орієнтуються в дні */
-.slot-group .slot-name { gap: 8px; font-size: 16px; }
+/* У «Сьогодні» іконка вікна крупніша — по ній орієнтуються в дні; шрифт звичайний, щоб рядок не рвався */
+.slot-group .slot-name { gap: 8px; }
 .slot-group .slot-name .ico svg { width: 22px; height: 22px; }
 .dots { display: inline-flex; gap: 3px; flex: none; }
 .slot-group .card.swipe { border: 0; }
