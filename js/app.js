@@ -2051,7 +2051,11 @@ function heatMap(a, heat) {
     const score = days[date] ?? 0;
     if (score) active += 1;
     const lvl = date > today ? 'future' : score >= 4 ? 'l3' : score >= 2 ? 'l2' : score ? 'l1' : M.pauseOn(date, pauses()) ? 'pause' : 'l0';
-    grid.append(h('span', { class: date === today ? `${lvl} today` : lvl, title: date > today ? null : `${M.dayMonth(date)}: ${score ? `${Math.floor(score / 2)} повн., ${score % 2} мін.` : 'нічого'}` }));
+    // Число дня в квадратику; 1-ше — жирне, щоб видно було, де починається місяць
+    const day = Number(date.slice(8));
+    const cls = [lvl, date === today ? 'today' : '', day === 1 ? 'first' : ''].filter(Boolean).join(' ');
+    grid.append(h('span', { class: cls, title: date > today ? null : `${M.dayMonth(date)}: ${score ? `${Math.floor(score / 2)} повн., ${score % 2} мін.` : 'нічого'}` },
+      date > today ? null : String(day)));
   }
   grid.setAttribute('aria-label', `За ${HEAT_WEEKS} тижнів — ${active} ${plural(active, 'день', 'дні', 'днів')} із заняттям`);
   return grid;
