@@ -151,6 +151,13 @@ a { color: var(--accent); }
 }
 .card h2 { margin: 0 0 10px; font-size: 15px; font-weight: 800; }
 
+/* налаштування групами, як у Стрілецькому журналі: рамка з назвою на лінії, всередині — розділи через лінію */
+.settings-group { min-width: 0; margin: 22px 0 14px; padding: 2px 16px 4px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.settings-group > legend { padding: 0 8px; margin-left: -6px; border-radius: 6px; background: var(--surface); color: var(--accent); font-size: 13px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.settings-group > .card { padding: 14px 0; border: 0; border-radius: 0; background: none; }
+/* лінія між розділами — від кольору тексту: у темній темі var(--line) майже зливався з тлом */
+.settings-group > .card + .card { border-top: 1px solid color-mix(in srgb, var(--text) 20%, transparent); }
+
 .view-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; }
 .week-pill { display: flex; flex-direction: column; align-items: flex-end; text-decoration: none; color: var(--text); }
 .week-pill b { font-size: 20px; font-weight: 800; }

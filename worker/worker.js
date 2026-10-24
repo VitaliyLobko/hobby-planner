@@ -346,18 +346,17 @@ const byOrder = (acts) => (x, y) => (acts.get(x.activityId)?.order ?? 99) - (act
 const topicOf = (it) => (it.topic ? ` — ${esc(it.topic)}` : '');
 
 /**
- * Відкрита справа: назва жирним, подробиці (таймер, хвилини, мінімум) курсивом — рядком нижче
- * чи, в compact, у тому ж рядку. Відкрита — емодзі заняття, йде — ▶.
+ * Відкрита справа одним рядком: назва жирним, подробиці (таймер, хвилини, мінімум) курсивом.
+ * Відкрита — емодзі заняття, йде — ▶. ended — вікно вже минуло: замість хвилин «не зроблено».
  */
-function openLines(it, a, tz, now, compact = false) {
+function openLine(it, a, tz, now, { min = false, ended = false } = {}) {
   const sec = elapsed(it, now);
   const head = `${it.runningSince ? '▶️' : actEmoji(a)} <b>${esc(a.name)}</b>${topicOf(it)}`;
   const details = (it.runningSince
     ? [`йде з ${local(it.runningSince, tz).hm}`, sec ? dur(sec) : '']
-    : [sec ? `⏸ на паузі, ${dur(sec)}` : '', a.minutes ? `~${a.minutes} хв` : '',
-      compact || !a.minVersion ? '' : `мінімум: ${esc(a.minVersion)}`]).filter(Boolean).join(' · ');
-  if (!details) return [head];
-  return compact ? [`${head} · <i>${details}</i>`] : [head, `      <i>${details}</i>`];
+    : [sec ? `⏸ на паузі, ${dur(sec)}` : '', ended ? 'не зроблено' : a.minutes ? `~${a.minutes} хв` : '',
+      ended || !min || !a.minVersion ? '' : `мінімум: ${esc(a.minVersion)}`]).filter(Boolean).join(' · ');
+  return details ? `${head} · <i>${details}</i>` : head;
 }
 
 /**
@@ -374,20 +373,14 @@ function closedLine(it, a, now) {
   return `${MARK[it.status] ?? '•'} <s><i>${esc(a.name)}${topicOf(it)}</i></s>${parts.length ? ` · <i>${parts.join(' · ')}</i>` : ''}`;
 }
 
-/** Справи вікна: спершу відкриті (gap — порожній рядок між ними), нижче відмічені — разом однією цитатою. */
-function itemsBlock(list, acts, tz, now, { gap = false, compact = false } = {}) {
+/** Справи вікна однією цитатою, як «Не забудь»: спершу відкриті, нижче відмічені — закреслені. */
+function itemsBlock(list, acts, tz, now, opts = {}) {
   const sorted = [...list].sort(byOrder(acts));
-  const lines = [];
-  for (const it of sorted.filter((x) => x.status === 'planned')) {
-    if (gap && lines.length) lines.push('');
-    lines.push(...openLines(it, acts.get(it.activityId) ?? MISSING, tz, now, compact));
-  }
-  const closed = sorted.filter((x) => x.status !== 'planned');
-  if (closed.length) {
-    if (gap && lines.length) lines.push('');
-    lines.push(`<blockquote>${closed.map((it) => closedLine(it, acts.get(it.activityId) ?? MISSING, now)).join('\n')}</blockquote>`);
-  }
-  return lines;
+  const lines = [
+    ...sorted.filter((x) => x.status === 'planned').map((it) => openLine(it, acts.get(it.activityId) ?? MISSING, tz, now, opts)),
+    ...sorted.filter((x) => x.status !== 'planned').map((it) => closedLine(it, acts.get(it.activityId) ?? MISSING, now)),
+  ];
+  return lines.length ? [`<blockquote>${lines.join('\n')}</blockquote>`] : [];
 }
 
 /** «1 год 20 хв» до кінця вікна — щоб було видно, скільки ще є часу. */
@@ -397,25 +390,30 @@ function timeLeft(date, slot, tz, now) {
   return left > 0 ? dur(Math.round(left / 1000)) : '';
 }
 
-/** Повний набір кнопок однієї справи — коли вона у вікні одна відкрита. */
-function fullKeyboard(it, now) {
-  if (it.runningSince) return [[btn('⏸ Пауза', 'stop', it), btn('✅ Зробив', 'done', it)], [btn('◐ Мінімум', 'min', it)]];
+/**
+ * Усі дії справи одним рядком кнопок: ✅ зробив, ▶/⏸ таймер, ◐ мінімум, ↷ перенести, ✕ пропускаю.
+ * Справа у вікні одна — «✅ Зробив»; кілька — на ✅ емодзі заняття (чи коротка назва, коли емодзі повторюються).
+ */
+function itemRow(it, label) {
   return [
-    [btn(elapsed(it, now) ? '▶ Продовжити' : '▶ Почав', 'start', it), btn('✅ Зробив', 'done', it)],
-    [btn('◐ Мінімум', 'min', it), btn('⏰ +30 хв', 'snooze', it)],
-    [btn('↷ Перенести', 'move', it), btn('✕ Пропускаю', 'skip', it)],
+    btn(`✅ ${label}`, 'done', it),
+    it.runningSince ? btn('⏸', 'stop', it) : btn('▶', 'start', it),
+    btn('◐', 'min', it),
+    btn('↷', 'move', it),
+    btn('✕', 'skip', it),
   ];
 }
 
 /**
- * Одне повідомлення на вікно: усі справи рядками й кнопки до відкритих.
- * Кілька відкритих — по рядку кнопок на справу (зробив, таймер, «⋯» — решта дій), «⏰ +30 хв» — на все вікно.
- * more — id справи, для якої зараз розгорнуто «⋯».
+ * Одне повідомлення на вікно: усі справи цитатою й під ними кнопки до відкритих — по рядку на справу,
+ * «⏰ +30 хв» — на все вікно. more — id справи, для якої розгорнуто «⋯» (лише в старих повідомленнях).
+ * morning — { head, foot } з morningParts: перше вікно дня приходить з «Доброго ранку!» і тим, що далі за день.
  */
-function windowMessage(list, acts, slot, tz, now, { prefix = '', more = null, moving = null } = {}) {
+function windowMessage(list, acts, slot, tz, now, { prefix = '', more = null, moving = null, morning = null } = {}) {
   const sorted = [...list].sort(byOrder(acts));
   const open = sorted.filter((it) => it.status === 'planned');
   const lines = [];
+  if (morning) lines.push(...morning.head, '');
   if (prefix) lines.push(`<i>${prefix}</i>`);
   lines.push(slotHead(slot));
   // Під заголовком — стан вікна: скільки відмічено й скільки часу ще є; закрите — підсумок
@@ -426,7 +424,7 @@ function windowMessage(list, acts, slot, tz, now, { prefix = '', more = null, mo
     ? [left ? `⏳ до кінця ${left}` : '', real.length > 1 ? `зроблено ${counted} з ${real.length}` : ''].filter(Boolean).join(' · ')
     : sorted.length && (counted ? `🎉 Вікно закрите: зараховано ${counted} з ${real.length}` : 'Вікно закрите — наступного разу вийде');
   if (state) lines.push(`<i>${state}</i>`);
-  lines.push('', ...itemsBlock(sorted, acts, tz, now, { gap: true }));
+  lines.push(...itemsBlock(sorted, acts, tz, now, { min: true }));
   let keyboard = [];
   const picked = open.find((it) => it.id === more);
   const movingIt = moving && open.find((it) => it.id === moving.id);
@@ -436,8 +434,6 @@ function windowMessage(list, acts, slot, tz, now, { prefix = '', more = null, mo
       keyboard.push(moving.targets.slice(i, i + 2).map((t) => btn(t.text, t.action, movingIt)));
     }
     keyboard.push([btn('← Назад', 'back', movingIt)]);
-  } else if (open.length === 1) {
-    keyboard = fullKeyboard(open[0], now);
   } else if (picked) {
     const name = short((acts.get(picked.activityId) ?? MISSING).name);
     keyboard = [
@@ -446,13 +442,13 @@ function windowMessage(list, acts, slot, tz, now, { prefix = '', more = null, mo
       [btn('← Назад', 'back', picked)],
     ];
   } else if (open.length) {
-    keyboard = open.map((it) => [
-      btn(`✅ ${short((acts.get(it.activityId) ?? MISSING).name)}`, 'done', it),
-      it.runningSince ? btn('⏸', 'stop', it) : btn('▶', 'start', it),
-      btn('⋯', 'more', it),
-    ]);
-    if (!open.some((it) => it.runningSince)) keyboard.push([btn('⏰ +30 хв — усе вікно', 'snooze', open[0])]);
+    const emojis = open.map((it) => actEmoji(acts.get(it.activityId)));
+    const unique = new Set(emojis).size === emojis.length;
+    keyboard = open.map((it, i) => itemRow(it, open.length === 1 ? 'Зробив'
+      : unique ? emojis[i] : short((acts.get(it.activityId) ?? MISSING).name)));
+    if (!open.some((it) => it.runningSince)) keyboard.push([btn(open.length > 1 ? '⏰ +30 хв — усе вікно' : '⏰ +30 хв', 'snooze', open[0])]);
   }
+  if (morning?.foot.length) lines.push('', ...morning.foot);
   return { text: lines.join('\n'), reply_markup: { inline_keyboard: keyboard } };
 }
 
@@ -470,7 +466,10 @@ async function windowRows(env, date, slotId) {
 async function editWindow(env, chatId, messageId, date, slotId, cfg, acts, tz, now, opts = {}) {
   const slot = slotsFor(date, cfg).find((s) => s.id === slotId);
   const list = (await windowRows(env, date, slotId)).map((x) => x.it);
-  const m = windowMessage(list, acts, slot, tz, now, opts);
+  // Ранкове повідомлення лишається ранковим і після натискань: привітання й «Далі» перераховуємо
+  const mm = parseJson(await getMeta(env, 'morning_msg'), null);
+  const morning = mm?.id === messageId && mm.date === date ? await morningParts(env, date, cfg, acts, slotId) : null;
+  const m = windowMessage(list, acts, slot, tz, now, { ...opts, morning });
   await tg(env, 'editMessageText', { chat_id: chatId, message_id: messageId, parse_mode: 'HTML', ...m });
 }
 
@@ -537,6 +536,7 @@ async function onTelegram(request, env) {
   else if (cb && String(cb.data || '').startsWith('q:')) await onQuickButton(env, cb, chatId);
   else if (cb && String(cb.data || '').startsWith('qm:')) await onQuickMinutes(env, cb, chatId);
   else if (cb && String(cb.data || '').startsWith('n:')) await onNextWeekButton(env, cb, chatId);
+  else if (cb && String(cb.data || '').startsWith('h:')) await onHelpButton(env, cb, chatId);
   else if (cb) await onButton(env, cb, chatId);
   else if (msg?.voice || msg?.audio) await onVoice(env, msg, chatId);
   else if (msg?.text) await onCommand(env, msg.text.trim(), chatId);
@@ -576,77 +576,125 @@ async function onCommand(env, cmd, chatId) {
     await recordWeight(env, chatId, parseWeight(cmd), Date.now());
   } else if (env.AI && !cmd.startsWith('/')) {
     await onPhrase(env, cmd, chatId);
+  } else if (name === '/help' || name === '/start') {
+    await tg(env, 'sendMessage', { chat_id: chatId, parse_mode: 'HTML', ...helpMessage('main') });
   } else {
     await tg(env, 'sendMessage', {
-      chat_id: chatId, parse_mode: 'HTML',
-      text: [
-        '<b>Як користуватися ботом</b>',
-        '',
-        '<b>Команди</b>',
-        '/today — план на сьогодні й «📌 Не забудь»',
-        '/week — як іде тиждень',
-        '/tomorrow — план на завтра й кнопки «як минулого тижня / як сьогодні / шаблон»',
-        '/quick — є кілька хвилин: до трьох справ, ▶ — таймер одразу (або напиши «маю 20 хвилин»)',
-        '/pause 3 — пауза на 3 дні з сьогодні · /resume — завершити паузу',
-        '/help — ця підказка',
-        '/key — ключ для ще одного пристрою (старі ключі працюють далі)',
-        '/revoke — вимкнути всі ключі й узяти новий (загубив телефон)',
-        '',
-        '<b>🕐 Що й коли пишу</b>',
-        '• за 10 хв до першого вікна — план дня',
-        '• вікно почалось — його справи з кнопками; за 30 хв до кінця — ще раз, якщо щось не відмічено (іде таймер — мовчу)',
-        '• за 2 год до підсумку — якщо за день ще нічого не зараховано',
-        '• о часі підсумку (з налаштувань застосунку, звичайно 21:00) — одне повідомлення: справи, «Не забудь», вага, гроші з Марнотрату й «План на завтра» кнопками; у неділю ще й тиждень (теж з вагою й грошима)',
-        '• «Не забудь» — на початку свого часу, щогодини й за 15 хв до кінця',
-        '• ⚖️ — у час зважування з «Ваги», через годину ще раз',
-        'Тихі години — мовчу, що настало, прийде одним повідомленням після них. Пауза — про заняття й вагу мовчу, «Не забудь», таймер і вечірній підсумок (без справ) — пишу.',
-        'Застосунок обмінюється зі мною за кілька секунд після зміни, коли відкриваєш і згортаєш його, і щохвилини, поки він на екрані.',
-        '',
-        '<b>Кнопки під нагадуванням про вікно</b>',
-        '▶ почав — таймер · ✅ зробив · ⋯ — мінімум, перенести, пропускаю · ⏰ +30 хв — відкласти все вікно.',
-        'Під «Не забудь»: ✅ Зроблено · ⏰ +30 хв.',
-        '',
-        '<b>⏱ Таймер</b>',
-        'Минули звичні хвилини заняття — напишу: ✅ зробив · ⏸ пауза · ⏰ ще 10 хв.',
-        '',
-        '<b>🌙 План на завтра</b>',
-        'Увечері, після підсумку дня: «Як минулого вівторка», «Як сьогодні» чи шаблон — одним дотиком, «↩️ Скасувати» поверне як було.',
-        'Заняття пропущено двічі поспіль — окрема кнопка поставити його на завтра, у вікно, де воно частіше виходить.',
-        'Тихі години починаються раніше за кінець останнього вікна — підсумок прийде за хвилину до них.',
-        'У неділю до підсумку — ще й тиждень із кнопкою «Наступний тиждень як цей» і підказками 💡, у якому вікні заняття виходить, а в якому ні (за 8 тижнів).',
-        'Кажеш «заплануй» чи «перенеси» без вікна — ставлю туди, де заняття реально виходить, а не туди, де його зазвичай пропускаєш.',
-        '',
-        '<b>🔥 Серії</b>',
-        'Днів поспіль із хоч однією зарахованою справою — у плані й підсумку. За 2 год до підсумку, якщо ще нічого не зараховано, — нагадаю й запропоную справи на 15 хв.',
-        '',
-        '<b>🔁 Постійний розклад</b>',
-        'Задається в застосунку, у занятті: дні тижня й вікна — можна кілька (ЛФК вранці, в обід і ввечері — тричі на день). Справи ставлю на тиждень уперед; прибрав чи переніс якусь — назад не поверну.',
-        '',
-        '<b>🎙 Голосом чи текстом</b>',
-        'Затисни 🎤 і скажи — або просто напиши. Українською чи російською, кілька справ в одній фразі.',
-        '• зробив — «гітара 30 хвилин, вчив баре»',
-        '• мінімум — «англійська мінімум»',
-        '• пропускаю — «пропускаю спорт»',
-        '• таймер — «почав гітару» / «пауза»',
-        '• запланувати — «пайтон на завтра ввечері, урок 6»',
-        '• перенести — «перенеси англійську на суботу»',
-        '• прибрати з плану — «прибери спорт на завтра»',
-        '• вага — «82,4» або «вага 82,4»',
-        '• нагадування — «нагадай завтра о 18 забрати посилку», «нагадуй 1 і 15 числа з 6 до 9 згенерувати код Нової пошти»',
-        '• план і тиждень — «що на сьогодні?», «що на завтра?», «як тиждень?»',
-        '• вільний час — «маю 20 хвилин», «є пів години»',
-        '• статистика — «скільки разів я грав на гітарі цього місяця?», «коли востаннє був пайтон?», «що я робив минулого тижня?», «скільки я схуд за місяць?»',
-        'У відповідь — що почув і що зробив. Не так зрозумів — «↩️ Скасувати».',
-        '',
-        '<b>📌 Не забудь</b>',
-        'Разово, щодня, у дні тижня чи в числа місяця. Без часу — з 9:00 до 10:00, «о 18» — 18:00–19:00, «з 6 до 9» — так і буде.',
-        'Пишу на початку, раз на годину й за 15 хв до кінця — поки не «Зроблено». Приходять і під час паузи.',
-        '',
-        '<b>⚖️ Вага</b>',
-        'Надішли число — <code>82,4</code> чи <code>82.4 після свята</code>: запишу за сьогодні, «Вага» забере сама.',
-      ].join('\n'),
-      reply_markup: { inline_keyboard: [[{ text: 'Відкрити застосунок', url: APP_URL }]] },
+      chat_id: chatId,
+      text: cmd.startsWith('/') ? 'Не знаю такої команди. Усі команди — /help' : 'Не зрозумів. Усі команди — /help',
     });
+  }
+}
+
+// ---------- підказка ----------
+
+// /help — коротко команди, решта розділами: кнопка розділу переписує те саме повідомлення
+const HELP = {
+  main: {
+    title: 'Як користуватися ботом',
+    lines: [
+      '/today — план на сьогодні й «📌 Не забудь»',
+      '/week — як іде тиждень',
+      '/tomorrow — план на завтра одним дотиком',
+      '/quick — є кілька хвилин: до трьох справ із таймером',
+      '/pause 3 — пауза на 3 дні · /resume — завершити',
+      '/key — ключ для ще одного пристрою · /revoke — вимкнути всі старі',
+      '',
+      'Або просто напиши чи скажи голосом: «гітара 30 хвилин», «82,4», «нагадай завтра о 18…».',
+      '',
+      '<i>Детальніше — кнопками нижче.</i>',
+    ],
+  },
+  when: {
+    label: '🕐 Що й коли пишу',
+    lines: [
+      '• початок першого вікна — «Доброго ранку!»: справи цього вікна з кнопками, нижче — що далі за день (вікно порожнє — просто план дня)',
+      '• вікно почалось — його справи з кнопками; за 30 хв до кінця — ще раз, якщо щось не відмічено (іде таймер чи за пів години прийде підсумок — мовчу)',
+      '• за 2 год до підсумку — якщо за день ще нічого не зараховано',
+      '• о часі підсумку (налаштування застосунку, звичайно 21:00) — справи, «Не забудь», вага, гроші з Марнотрату й план на завтра; у неділю слідом — тиждень',
+      '• «Не забудь» — на початку свого часу, щогодини й за 15 хв до кінця',
+      '• ⚖️ — у час зважування з «Ваги», через годину ще раз',
+      '',
+      'Тихі години — мовчу, що настало, прийде одним повідомленням після них.',
+      'Пауза — про заняття й вагу мовчу; «Не забудь», таймер і вечірній підсумок (без справ) — пишу.',
+    ],
+  },
+  buttons: {
+    label: '🔘 Кнопки',
+    lines: [
+      '<b>Під справою у вікні</b>',
+      '✅ зробив · ▶ таймер (⏸ — пауза) · ◐ мінімум · ↷ перенести · ✕ пропускаю',
+      '⏰ +30 хв — відкласти все вікно',
+      '',
+      '<b>Під таймером</b>',
+      'Минули звичні хвилини заняття: ✅ зробив · ⏸ пауза · ⏰ ще 10 хв',
+      '',
+      '<b>Під «Не забудь»</b>',
+      '✅ Зроблено · ⏰ +30 хв · ➡️ Завтра (для разових)',
+    ],
+  },
+  plan: {
+    label: '🗓 План і серії',
+    lines: [
+      '<b>План на завтра</b> — у вечірньому підсумку й по /tomorrow: «Як минулого вівторка», «Як сьогодні» чи шаблон одним дотиком, «↩️ Скасувати» поверне як було.',
+      'Заняття пропущено двічі поспіль — окрема кнопка поставити його на завтра, у вікно, де воно частіше виходить.',
+      'Кажеш «заплануй» чи «перенеси» без вікна — ставлю туди, де заняття реально виходить.',
+      '',
+      '<b>Тиждень</b> — у неділю після підсумку, з кнопкою «🔁 Наступний тиждень як цей» і підказками 💡, у якому вікні заняття виходить (за 8 тижнів).',
+      '',
+      '<b>🔥 Серії</b> — днів поспіль із хоч однією зарахованою справою. За 2 год до підсумку, якщо ще нічого немає, — запропоную справи на 15 хв.',
+      '',
+      '<b>🔁 Постійний розклад</b> — у застосунку, в занятті: дні тижня й вікна. Справи ставлю на тиждень уперед; прибрав чи переніс якусь — назад не поверну.',
+    ],
+  },
+  voice: {
+    label: '🎙 Голосом чи текстом',
+    lines: [
+      'Затисни 🎤 і скажи — або напиши. Українською чи російською, кілька справ в одній фразі.',
+      '',
+      '• зробив — «гітара 30 хвилин, вчив баре»',
+      '• мінімум — «англійська мінімум» · пропускаю — «пропускаю спорт»',
+      '• таймер — «почав гітару» / «пауза»',
+      '• запланувати — «пайтон на завтра ввечері, урок 6»',
+      '• перенести — «перенеси англійську на суботу» · прибрати — «прибери спорт на завтра»',
+      '• нагадування — «нагадай завтра о 18 забрати посилку»',
+      '• план — «що на сьогодні?», «що на завтра?», «як тиждень?»',
+      '• вільний час — «маю 20 хвилин»',
+      '• статистика — «скільки разів я грав на гітарі цього місяця?», «скільки я схуд за місяць?»',
+      '',
+      'У відповідь — що почув і що зробив. Не так зрозумів — «↩️ Скасувати».',
+    ],
+  },
+  remind: {
+    label: '📌 Не забудь і вага',
+    lines: [
+      '<b>📌 Не забудь</b> — разово, щодня, у дні тижня чи в числа місяця. Без часу — з 9:00 до 10:00, «о 18» — 18:00–19:00, «з 6 до 9» — так і буде.',
+      'Пишу на початку, раз на годину й за 15 хв до кінця — поки не «Зроблено». Приходять і під час паузи.',
+      '',
+      '<b>⚖️ Вага</b> — надішли число: <code>82,4</code> чи <code>82.4 після свята</code>. Запишу за сьогодні, «Вага» забере сама.',
+    ],
+  },
+};
+
+/** Підказка: main — команди, інший ключ — розділ; під текстом — кнопки решти розділів. */
+function helpMessage(key) {
+  const page = HELP[key] ?? HELP.main;
+  const title = key === 'main' || !HELP[key] ? page.title : page.label;
+  const others = Object.keys(HELP).filter((k) => k !== 'main' && k !== key);
+  const rows = [];
+  for (let i = 0; i < others.length; i += 2) {
+    rows.push(others.slice(i, i + 2).map((k) => ({ text: HELP[k].label, callback_data: `h:${k}` })));
+  }
+  if (key !== 'main' && HELP[key]) rows.push([{ text: '← Команди', callback_data: 'h:main' }]);
+  rows.push([{ text: 'Відкрити застосунок', url: APP_URL }]);
+  return { text: [`<b>${title}</b>`, '', ...page.lines].join('\n'), reply_markup: { inline_keyboard: rows } };
+}
+
+async function onHelpButton(env, cb, chatId) {
+  const key = String(cb.data).slice(2);
+  await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id });
+  if (cb.message?.message_id) {
+    await tg(env, 'editMessageText', { chat_id: chatId, message_id: cb.message.message_id, parse_mode: 'HTML', ...helpMessage(key) });
   }
 }
 
@@ -1307,14 +1355,28 @@ async function sendNudges(env, chatId, cfg, acts, tz, now) {
     // Таймер у вікні йде — людина зайнята, нагадування пропускаємо до наступного за розкладом
     if (rows.some((x) => x.it.status === 'planned' && x.it.runningSince)) { await setNext(next); continue; }
     const first = due.every((r) => r.nudge === 0);
+    const today = local(now, tz).date;
+    // «Скоро закінчиться» не шлемо, коли за пів години до чи після кінця вікна прийде вечірній підсумок — там усе буде
+    if (!first && !next && date === today
+      && Math.abs(zoned(date, await eveningTime(env), tz) - ref.end_at) <= LAST_NUDGE_BEFORE_END_MIN * MIN) {
+      await setNext(null);
+      continue;
+    }
     const prefix = first ? '' : (next ? '🔔 Нагадую' : '⚠️ Вікно скоро закінчиться');
+    // Перше вікно дня й ранку ще не було — це повідомлення і є «Доброго ранку!»
+    const greet = first && date === today && slotsFor(date, cfg)[0].id === slotId && await getMeta(env, 'digest') !== date;
     // Кнопки лишаються лише на найновішому повідомленні вікна, щоб чат не рябів
     const old = [...new Set(rows.map((x) => x.row.msg_id).filter(Boolean))];
     for (const id of old) await tg(env, 'editMessageReplyMarkup', { chat_id: chatId, message_id: id, reply_markup: { inline_keyboard: [] } });
     const slot = slotsFor(date, cfg).find((s) => s.id === slotId);
-    const m = windowMessage(rows.map((x) => x.it), acts, slot, tz, now, { prefix });
+    const morning = greet ? await morningParts(env, date, cfg, acts, slotId) : null;
+    const m = windowMessage(rows.map((x) => x.it), acts, slot, tz, now, { prefix, morning });
     const sent = await tg(env, 'sendMessage', { chat_id: chatId, parse_mode: 'HTML', ...m });
     const msgId = sent.result?.message_id ?? null;
+    if (greet) {
+      await setMeta(env, 'digest', date);
+      await setMeta(env, 'morning_msg', JSON.stringify({ date, id: msgId }));
+    }
     await env.DB.batch([
       ...due.map((r) => env.DB.prepare('UPDATE items SET next_at = ?, nudge = nudge + 1 WHERE id = ?').bind(next, r.id)),
       ...rows.map((x) => env.DB.prepare('UPDATE items SET msg_id = ? WHERE id = ?').bind(msgId ?? x.row.msg_id, x.row.id)),
@@ -1351,9 +1413,9 @@ const STREAK_WARN_MIN = 120;
 async function sendDigests(env, chatId, cfg, tz, now, paused = false) {
   const { date, hm } = local(now, tz);
   const slots = slotsFor(date, cfg);
-  const morningAt = minusMinutes(slots[0].from, 10);
   const eveningAt = await eveningTime(env);
-  if (!paused && hm >= morningAt && hm < slots[0].to && await getMeta(env, 'digest') !== date) {
+  // Ранок — з повідомленням першого вікна (sendNudges іде раніше); вікно порожнє — окремим планом дня
+  if (!paused && hm >= slots[0].from && hm < slots[0].to && await getMeta(env, 'digest') !== date) {
     await setMeta(env, 'digest', date);
     await sendToday(env, chatId, now, 'Доброго ранку!', true);
   }
@@ -1388,20 +1450,19 @@ async function sendEvening(env, chatId, now, { paused = false } = {}) {
   const { date } = local(now, tz);
   const cfg = await slotsCfg(env);
   const acts = await actsMap(env);
-  const lines = ['🌙 <b>Підсумок дня</b>', `<i>${dayTitle(date)}</i>`];
+  const lines = [`🌙 <b>Підсумок дня</b> · ${dayTitle(date)}`];
   let any = false;
   const items = paused ? [] : await todayItems(env, date);
   if (paused) lines.push('', '🌴 Пауза — справи сьогодні не рахуються.');
   if (items.length) {
+    // Справи: заголовок з підсумком і серією, нижче — лише вікна, де щось було
     any = true;
-    lines.push(...planLines(date, items, cfg, acts, tz, now));
     const done = items.filter((x) => x.status === 'done' || x.status === 'min');
     const sec = done.reduce((s, x) => s + (x.spent || 0), 0);
-    lines.push('', `<b>Зараховано ${done.length} з ${items.length}</b>${sec ? ` · ${dur(sec)}` : ''}`);
-  }
-  if (!paused) {
+    lines.push('', `📋 <b>Справи</b> · зараховано ${done.length} з ${items.length}${sec ? ` · ${dur(sec)}` : ''}`);
     const streak = streakLine(await dayStreak(env, date, await pausesOf(env)), false);
-    if (streak) lines.push('', streak);
+    if (streak) lines.push(`<i>${streak}</i>`);
+    lines.push(...planLines(date, items, cfg, acts, tz, now, { skipEmpty: true }));
   }
   const blocks = [await reminderLines(env, date), await weightDayLines(env, date), await moneyDayLines(env, date, now)];
   for (const b of blocks) {
@@ -1409,7 +1470,7 @@ async function sendEvening(env, chatId, now, { paused = false } = {}) {
   }
   const tomorrow = paused ? null : await tomorrowBlock(env, now);
   if (!any && !tomorrow) return;
-  if (tomorrow) lines.push('', ...tomorrow.lines);
+  if (tomorrow) lines.push('', '─────────────', ...tomorrow.lines);
   const links = [{ text: 'Відкрити план', url: `${APP_URL}#${tomorrow ? 'plan' : 'today'}` }];
   if (blocks[2].length) links.push({ text: 'Марнотрат', url: MONEY_URL });
   await tg(env, 'sendMessage', {
@@ -1418,13 +1479,32 @@ async function sendEvening(env, chatId, now, { paused = false } = {}) {
   });
 }
 
+/**
+ * «Доброго ранку!» навколо повідомлення першого вікна: head — привітання з датою,
+ * foot — що далі за день (вікна з відкритими справами), невідмічені «Не забудь», скільки всього й серія.
+ */
+async function morningParts(env, date, cfg, acts, slotId) {
+  const items = await todayItems(env, date);
+  const later = slotsFor(date, cfg).filter((s) => s.id !== slotId)
+    .map((s) => [s, items.filter((x) => x.slot === s.id && x.status === 'planned').length]).filter(([, n]) => n);
+  const foot = [];
+  if (later.length) foot.push(`Далі: ${later.map(([s, n]) => `${SLOT_EMOJI[s.id] ?? '🕒'} ${esc(s.label)} — ${n}`).join(' · ')}`);
+  const reminders = (await remindersFor(env, date)).filter((r) => !r.done?.[date]);
+  if (reminders.length) foot.push(`📌 Не забудь — ${reminders.length}`);
+  const minutes = items.reduce((s, x) => s + ((acts.get(x.activityId) ?? MISSING).minutes || 0), 0);
+  foot.push(`<b>Сьогодні ${items.length} ${plural(items.length, 'справа', 'справи', 'справ')}</b>${minutes ? ` · ~${minutes} хв` : ''}`);
+  const streak = streakLine(await dayStreak(env, date, await pausesOf(env)), true);
+  if (streak) foot.push(`<i>${streak}</i>`);
+  return { head: [`🌤 <b>Доброго ранку!</b> · ${dayTitle(date)}`], foot };
+}
+
 async function sendToday(env, chatId, now, title, morning = false) {
   const tz = tzOf(env);
   const { date } = local(now, tz);
   const cfg = await slotsCfg(env);
   const acts = await actsMap(env);
   const items = await todayItems(env, date);
-  const lines = [`<b>${esc(title)}</b>`, `<i>${dayTitle(date)}</i>`];
+  const lines = [`${morning ? '🌤' : '📅'} <b>${esc(title)}</b> · ${dayTitle(date)}`];
   const remindLines = await reminderLines(env, date);
   if (!items.length) {
     lines.push('', morning ? 'План на сьогодні ще порожній — дві хвилини, і готово.' : 'На сьогодні нічого не заплановано.');
@@ -1502,10 +1582,11 @@ async function sendWeek(env, chatId, now, { offerNext = false } = {}) {
   const range = sm === em ? `${sd}–${ed} ${MONTHS[em - 1]}` : `${sd} ${MONTHS[sm - 1]} – ${ed} ${MONTHS[em - 1]}`;
   const lines = [`📊 <b>Тиждень</b> · ${range}`];
   if (paused) lines.push(`<i>🌴 Пауза ${paused} дн. — цілі менші</i>`);
-  lines.push('');
+  // Справи: заголовок з підсумком, під ним цитатою заняття — смужка цілі, скільки разів і скільки часу
   let doneAll = 0;
   let targetAll = 0;
   let secAll = 0;
+  const actLines = [];
   for (const a of acts) {
     const mine = items.filter((x) => x.activityId === a.id);
     const sec = mine.reduce((s, x) => s + (x.spent || 0), 0);
@@ -1514,11 +1595,10 @@ async function sendWeek(env, chatId, now, { offerNext = false } = {}) {
     targetAll += target;
     secAll += sec;
     const ok = target > 0 && mine.length >= target;
-    lines.push(`${actEmoji(a)} <b>${esc(a.name)}</b>${ok ? ' ✅' : ''}`);
-    lines.push(`   ${progressBar(mine.length, target)}  ${mine.length}/${target}${sec ? ` · ${dur(sec)}` : ''}`);
+    actLines.push(`${actEmoji(a)} <b>${esc(a.name)}</b>${ok ? ' ✅' : ''}  ${progressBar(mine.length, target)} ${mine.length}/${target}${sec ? ` · <i>${dur(sec)}</i>` : ''}`);
   }
-  if (!acts.length) lines.push('Заняття ще не синхронізовані — відкрий застосунок.');
-  else lines.push('', `Разом ${doneAll} з ${targetAll}${secAll ? ` · ${dur(secAll)}` : ''}`);
+  if (!acts.length) lines.push('', 'Заняття ще не синхронізовані — відкрий застосунок.');
+  else lines.push('', `📋 <b>Справи</b> · ${doneAll} з ${targetAll}${secAll ? ` · ${dur(secAll)}` : ''}`, `<blockquote>${actLines.join('\n')}</blockquote>`);
   // «Коли реально виходить» — лише в неділю: підказка, куди ставити наступного тижня
   if (offerNext && acts.length) {
     const cfg = await slotsCfg(env);
@@ -2102,13 +2182,15 @@ async function tomorrowOptions(env, now) {
 }
 
 /**
- * План дня по вікнах — і для підсумку, і для «Плану на завтра»: заголовок, під ним справи рядком кожна,
- * відмічені — цитатою; порожнє вікно — «вільно» в заголовку.
+ * План дня по вікнах — і для підсумку, і для «Плану на завтра»: заголовок, під ним справи цитатою;
+ * порожнє вікно — «вільно» в заголовку (skipEmpty — не показувати зовсім). У вікні, що минуло, відкрите — «не зроблено».
  */
-function planLines(date, items, cfg, acts, tz, now) {
+function planLines(date, items, cfg, acts, tz, now, { skipEmpty = false } = {}) {
   return slotsFor(date, cfg).flatMap((slot) => {
     const mine = items.filter((x) => x.slot === slot.id);
-    return ['', `${slotHead(slot)}${mine.length ? '' : ' · <i>вільно</i>'}`, ...itemsBlock(mine, acts, tz, now, { compact: true })];
+    if (!mine.length && skipEmpty) return [];
+    const ended = zoned(date, slot.to, tz) <= now;
+    return ['', `${slotHead(slot)}${mine.length ? '' : ' · <i>вільно</i>'}`, ...itemsBlock(mine, acts, tz, now, { ended })];
   });
 }
 
@@ -2121,7 +2203,7 @@ async function tomorrowBlock(env, now, { always = false } = {}) {
   const { day, have, list, again, cfg, acts, tz } = await tomorrowOptions(env, now);
   const paused = pauseOn(day, await pausesOf(env));
   if (!always && (paused || (!list.length && !again.length))) return null;
-  const lines = ['🗓 <b>План на завтра</b>', `<i>${dayTitle(day)}</i>`];
+  const lines = [`🗓 <b>План на завтра</b> · ${dayTitle(day)}`];
   if (paused) lines.push('', '🌴 Завтра пауза — нагадувань не буде.');
   lines.push(...(have.length ? planLines(day, have, cfg, acts, tz, now) : ['', 'Поки порожньо.']));
   for (const o of again) lines.push('', `⚠️ ${actEmoji(o.a)} <b>${esc(o.a.name)}</b> — пропущено двічі поспіль. Утретє не пропускай?`);
@@ -2182,7 +2264,7 @@ async function onTomorrowButton(env, cb, chatId) {
   await clear();
   await tg(env, 'sendMessage', {
     chat_id: chatId, parse_mode: 'HTML',
-    text: ['🗓 <b>План на завтра</b>', `<i>${dayTitle(day)}</i>`, ...planLines(day, await todayItems(env, day), cfg, acts, tz, now), '',
+    text: [`🗓 <b>План на завтра</b> · ${dayTitle(day)}`, ...planLines(day, await todayItems(env, day), cfg, acts, tz, now), '',
       `<i>${esc(opt.label)}: +${n}</i>`].join('\n'),
     reply_markup: { inline_keyboard: [[{ text: '↩️ Скасувати', callback_data: `u:${token}` }]] },
     ...(msgId ? { reply_to_message_id: msgId } : {}),
@@ -2344,9 +2426,9 @@ async function onWeights(request, env) {
 /** Вага за день: записана — з різницею від минулого разу; не записана — лише коли ввімкнено нагадування. */
 async function weightDayLines(env, date) {
   const kg = await env.DB.prepare('SELECT kg FROM weights WHERE date = ?').bind(date).first('kg');
-  if (kg == null) return (await getMeta(env, 'weigh_time')) ? ['', '⚖️ Сьогодні без зважування'] : [];
+  if (kg == null) return (await getMeta(env, 'weigh_time')) ? ['', '⚖️ <b>Вага</b> · сьогодні без зважування'] : [];
   const prev = await env.DB.prepare('SELECT date, kg FROM weights WHERE date < ? ORDER BY date DESC LIMIT 1').bind(date).first();
-  return ['', `⚖️ <b>Вага ${kgText(kg)} кг</b>${prev ? ` · ${kgDiff(kg - prev.kg)} від ${dayMonth(prev.date)}` : ''}`];
+  return ['', `⚖️ <b>Вага</b> · ${kgText(kg)} кг${prev ? ` · ${kgDiff(kg - prev.kg)} від ${dayMonth(prev.date)}` : ''}`];
 }
 
 /** Вага за тиждень: з чого почали й чим скінчили (різниця — від останнього зважування до тижня), мін і макс. */
@@ -2359,8 +2441,8 @@ async function weightWeekLines(env, start, end) {
   const last = results[results.length - 1].kg;
   const base = prev ?? first;
   const kgs = results.map((r) => r.kg);
-  const lines = ['', `⚖️ <b>Вага</b> · ${kgText(last)} кг${results.length > 1 || prev != null ? ` (${kgDiff(last - base)} за тиждень)` : ''}`];
-  if (results.length > 1) lines.push(`   ${kgText(first)} → ${kgText(last)} · мін ${kgText(Math.min(...kgs))} · макс ${kgText(Math.max(...kgs))}`);
+  const lines = ['', `⚖️ <b>Вага</b> · ${kgText(last)} кг${results.length > 1 || prev != null ? ` · ${kgDiff(last - base)} за тиждень` : ''}`];
+  if (results.length > 1) lines.push(`<blockquote>${kgText(first)} → ${kgText(last)} · мін ${kgText(Math.min(...kgs))} · макс ${kgText(Math.max(...kgs))}</blockquote>`);
   return lines;
 }
 
@@ -2388,17 +2470,17 @@ async function moneyDayLines(env, date, now) {
   if (!m) return [];
   const d = (await moneyDays(env, date, date)).get(date) ?? {};
   const lines = [''];
-  if (!d.e && !d.i) lines.push('💸 Сьогодні без витрат');
+  if (!d.e && !d.i) lines.push('💸 <b>Гроші</b> · сьогодні без витрат');
   else {
-    lines.push(`💸 <b>Витрачено ${uah(d.e || 0)}</b>${d.i ? ` · отримано ${uah(d.i)}` : ''}`);
+    lines.push(`💸 <b>Гроші</b> · витрачено ${uah(d.e || 0)}${d.i ? ` · отримано ${uah(d.i)}` : ''}`);
     const top = (d.cats ?? []).slice(0, 3);
-    if (top.length) lines.push(`   ${top.map(([name, v]) => `${esc(name)} ${uahNum(v)}`).join(' · ')}`);
+    if (top.length) lines.push(`<blockquote>${top.map(([name, v]) => `${esc(name)} — ${uahNum(v)}`).join('\n')}</blockquote>`);
   }
-  if (m.plan) lines.push(m.left >= 0 ? `   Лишилось у бюджеті місяця: ${uah(m.left)}` : `   Понад бюджет місяця: ${uah(-m.left)}`);
+  if (m.plan) lines.push(m.left >= 0 ? `<i>Лишилось у бюджеті місяця: ${uah(m.left)}</i>` : `<i>Понад бюджет місяця: ${uah(-m.left)}</i>`);
   if (now - (m.at || 0) > MONEY_STALE_MS) {
     const tz = tzOf(env);
     const at = local(m.at || 0, tz);
-    lines.push(`   <i>Дані Марнотрату станом на ${at.date === date ? at.hm : `${dayMonth(at.date)}, ${at.hm}`}</i>`);
+    lines.push(`<i>Дані Марнотрату станом на ${at.date === date ? at.hm : `${dayMonth(at.date)}, ${at.hm}`}</i>`);
   }
   return lines;
 }
@@ -2416,7 +2498,7 @@ async function moneyWeekLines(env, start, end) {
   const prevE = sum(prevStart, addDays(start, -1), 'e');
   const lines = ['', `💸 <b>Гроші</b> · витрачено ${uah(e)}${i ? ` · отримано ${uah(i)}` : ''}`];
   if (prevE > 0 && Math.round(e) !== Math.round(prevE)) {
-    lines.push(`   ${e < prevE ? '↓' : '↑'} на ${uah(Math.abs(e - prevE))} ${e < prevE ? 'менше' : 'більше'}, ніж минулого тижня`);
+    lines.push(`<i>${e < prevE ? '↓' : '↑'} на ${uah(Math.abs(e - prevE))} ${e < prevE ? 'менше' : 'більше'}, ніж минулого тижня</i>`);
   }
   const cats = new Map();
   for (const [d, x] of days) {
@@ -2424,11 +2506,11 @@ async function moneyWeekLines(env, start, end) {
     for (const [name, v] of x.cats ?? []) cats.set(name, (cats.get(name) || 0) + v);
   }
   const top = [...cats].sort((a, b) => b[1] - a[1]).slice(0, 5);
-  if (top.length) lines.push(...top.map(([name, v]) => `   ${esc(name)} — ${uahNum(v)}`));
+  if (top.length) lines.push(`<blockquote>${top.map(([name, v]) => `${esc(name)} — ${uahNum(v)}`).join('\n')}</blockquote>`);
   if (e > 0) {
     const per = Array.from({ length: 7 }, (_, k) => addDays(start, k)).map((d) => [d, days.get(d)?.e || 0]);
     const max = Math.max(...per.map(([, v]) => v));
-    lines.push(`<code>${per.map(([d, v]) => `${DAYS_SHORT[weekdayOf(d)]} ${progressBar(Math.round((v / max) * 8), 8)} ${uahNum(v)}`).join('\n')}</code>`);
+    lines.push('<i>По днях</i>', `<blockquote><code>${per.map(([d, v]) => `${DAYS_SHORT[weekdayOf(d)]} ${progressBar(Math.round((v / max) * 8), 8)} ${uahNum(v)}`).join('\n')}</code></blockquote>`);
   }
   return lines;
 }

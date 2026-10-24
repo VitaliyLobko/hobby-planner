@@ -2583,24 +2583,26 @@ function botSection() {
 
 function viewSettings() {
   const file = h('input', { type: 'file', accept: 'application/json,.json', hidden: true, onChange: (e) => { const f = e.target.files[0]; if (f) importBackup(f); e.target.value = ''; } });
-  return h('div', { class: 'stack' },
-    aboutPanel(),
-    aboutSection(),
-    pauseSection(),
-    botSection(),
-    h('section', { class: 'card' }, h('h2', {}, 'Тема'),
-      chips(THEMES, themePref(), (v) => { remember('theme', v); applyTheme(); })),
-    folded('set-slots', h('h2', {}, 'Вікна дня й вихідні'),
+  return h('div', {},
+    settingsGroup('Про застосунок', [aboutPanel(), aboutSection()]),
+    settingsGroup('Розклад', [pauseSection(), folded('set-slots', h('h2', {}, 'Вікна дня й вихідні'),
       h('div', { class: 'fold-body' }, weekendPicker(), slotEditor('weekday', 'Будні'), slotEditor('weekend', 'Вихідні'),
         h('p', { class: 'muted small' }, 'Стандартні: будні — ранок 7–12, обід 12–18, вечір 18–21; вихідні — ранок 9–12, день 12–18, вечір 18–21.'),
         button('refresh', 'Стандартні вікна', 'ghost', resetSlots)),
-      { def: false, persist: true, cls: 'card' }),
-    folded('set-backup', h('h2', {}, 'Резервна копія'), h('div', { class: 'fold-body' },
+      { def: false, persist: true, cls: 'card' })]),
+    settingsGroup('Дані', [botSection(), folded('set-backup', h('h2', {}, 'Резервна копія'), h('div', { class: 'fold-body' },
       h('p', { class: 'muted small' }, 'Дані живуть лише в цьому браузері. Копія — файл JSON, його можна відновити на іншому пристрої.'),
       h('div', { class: 'btn-grid' },
         button('move', 'Зберегти копію', '', exportBackup),
         button('undo', 'Відновити з файлу', '', () => file.click())),
-      file, driveBlock()), { def: false, persist: true, cls: 'card' }));
+      file, driveBlock()), { def: false, persist: true, cls: 'card' })]),
+    settingsGroup('Вигляд', [h('section', { class: 'card' }, h('h2', {}, 'Тема'),
+      chips(THEMES, themePref(), (v) => { remember('theme', v); applyTheme(); }))]));
+}
+
+/** Група налаштувань, як у Стрілецькому журналі: рамка з назвою на лінії, розділи всередині — через лінію. */
+function settingsGroup(title, sections) {
+  return h('fieldset', { class: 'settings-group' }, h('legend', {}, title), sections.filter(Boolean));
 }
 
 /** «Про застосунок»: що воно таке, де лежать дані, з чого почати — як у shooting-log. */
