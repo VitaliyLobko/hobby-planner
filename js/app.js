@@ -2,7 +2,7 @@
 import { loadAll, write, uid, replaceAll } from './db.js';
 import * as M from './model.js';
 import { $, h, icon, toast, sheet, closeSheet, chips, swipeable, swipeStep, fold, timeField, vibrate } from './ui.js';
-import { initSync, syncNow, scheduleSync, botConfig, setBotConfig, lastSync, holdSync, fetchRestore, markRestored } from './sync.js';
+import { initSync, syncNow, scheduleSync, botConfig, setBotConfig, declineBot, sharedConfig, lastSync, holdSync, holdChoice, choosingBot, fetchRestore, markRestored, adoptShared, keyProblem, changeKey } from './sync.js';
 import * as Drive from './drive.js';
 import { CHANGES, changesSince } from './changes.js';
 
@@ -68,7 +68,7 @@ const slotAdvice = (id, today = M.ymd(), now = M.nowHm()) => M.slotAdvice(M.slot
  * remote — зміни, що приїхали з бота: зберігаємо їхній updated і не шлемо назад.
  */
 async function save(changes, { render: redraw = true, remote = false } = {}) {
-  // Копія на Диск раз на тиждень — з цього натискання, поки браузер ще пускає вікно Google; дані бере пізніше, вже нові
+  // Копія на Диск раз на день — з цього натискання, поки браузер ще пускає вікно Google; дані бере пізніше, вже нові
   if (!remote) driveTick(true);
   const at = await write(changes, { keep: remote });
   for (const [name, { put = [], del = [] }] of Object.entries(changes)) {
@@ -393,6 +393,7 @@ function itemSheet(item) {
         window.addEventListener('popstate', () => setTimeout(() => moveSheet(item)), { once: true });
         closeSheet();
       }) : null,
+      a.watchList ? button('list', item.topic ? 'Інше зі списку' : 'Обрати зі списку', '', () => openWatchFrom(a, item)) : null,
       button('skip', 'Пропустити', 'danger', () => { closeSheet(); mark(item, 'skipped'); }),
       // Поставив помилково — прибрати зовсім: не пропуск і не рахується; «Скасувати» в тості поверне
       button('trash', 'Прибрати з плану', 'ghost', () => { closeSheet(); unplan(current()); })));
@@ -415,6 +416,149 @@ function itemSheet(item) {
     box.append(h('div', { class: 'btn-grid' }, button('undo', 'Повернути в план', '', () => { closeSheet(); mark(current(), 'planned'); })));
   }
   sheet(`${a.name} · ${slot?.label ?? ''}`, box);
+}
+
+// ---------- список заняття: фільми, книги, ігри — додав, переглянув, «порадь» ----------
+
+// Скільки назв пропонує «Порадь» за раз — на вибір; обране пам'ятається
+const PICK_COUNTS = [1, 3, 5, 7, 10];
+const pickCount = () => {
+  const n = Number(recall('pick-count'));
+  return PICK_COUNTS.includes(n) ? n : 7;
+};
+const titleKey = (t) => t.toLocaleLowerCase('uk').replace(/\s+/g, ' ').trim();
+
+/** Змінити список заняття: fn отримує копію поточного й повертає новий. Заняття береться свіже — його могла змінити синхронізація. */
+async function saveWatch(id, fn) {
+  const cur = act(id);
+  if (cur) await save({ activities: { put: [{ ...cur, watch: fn([...(cur.watch ?? [])]) }] } });
+}
+
+/** Назви з поля — по рядку: вставив список стовпчиком — додались усі; маркери «-», «1.» зрізаються, повтори пропускаються. */
+function parseTitles(text, have) {
+  const seen = new Set(have.map((w) => titleKey(w.title)));
+  const out = [];
+  for (const line of text.split(/\r?\n/)) {
+    const title = line.replace(/^\s*(?:[-•*·]|\d+[.)])\s*/, '').trim().slice(0, 120);
+    if (!title || seen.has(titleKey(title))) continue;
+    seen.add(titleKey(title));
+    out.push({ id: uid(), title, done: '', added: M.ymd() });
+  }
+  return out;
+}
+
+/** n випадкових без повторів (Фішер — Єйтс). */
+function sample(list, n) {
+  const a = [...list];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a.slice(0, n);
+}
+
+/**
+ * Список заняття. item — запис плану, з якого відкрили: «Обрати» пише назву в його «Що саме?».
+ * Відкрили з картки заняття — «Обрати» йде в сьогоднішній ще не зроблений запис, якщо такий є.
+ */
+function watchSheet(a, item = null) {
+  const id = a.id;
+  const today = M.ymd();
+  const target = () => (item ? state.plan.find((p) => p.id === item.id && p.status === 'planned') : null)
+    ?? state.plan.find((p) => p.activityId === id && p.date === today && p.status === 'planned');
+  let picks = null;
+  let seenOpen = false;
+  const body = h('div', { class: 'sheet-body watch' });
+  const add = async (text) => {
+    const fresh = parseTitles(text, act(id)?.watch ?? []);
+    input.value = '';
+    if (!fresh.length) { if (text.trim()) toast('Це вже є в списку'); return; }
+    await saveWatch(id, (w) => [...w, ...fresh]);
+    paint();
+    if (fresh.length > 1) toast(`Додано ${fresh.length} ${plural(fresh.length, 'назву', 'назви', 'назв')}`);
+    input.focus();
+  };
+  const input = h('input', {
+    type: 'text', maxlength: 120, enterkeyhint: 'done', 'aria-label': `Додати до списку «${a.name}»`,
+    placeholder: 'Назва — або встав список стовпчиком',
+    onKeydown: (e) => { if (e.key === 'Enter') { e.preventDefault(); add(input.value); } },
+    // Поле в один рядок з'їло б переноси — багаторядкову вставку розбираємо самі
+    onPaste: (e) => {
+      const text = e.clipboardData?.getData('text') ?? '';
+      if (/\n/.test(text.trim())) { e.preventDefault(); add(text); }
+    },
+  });
+  const toggle = async (w) => {
+    await saveWatch(id, (list) => list.map((x) => (x.id === w.id ? { ...x, done: x.done ? '' : today } : x)));
+    paint();
+    if (!w.done) {
+      vibrate(15);
+      toast(`Переглянуто: ${w.title}`, { label: 'Скасувати', run: async () => { await saveWatch(id, (list) => list.map((x) => (x.id === w.id ? { ...x, done: '' } : x))); paint(); } });
+    }
+  };
+  const remove = async (w) => {
+    const at = (act(id)?.watch ?? []).findIndex((x) => x.id === w.id);
+    await saveWatch(id, (list) => list.filter((x) => x.id !== w.id));
+    paint();
+    toast(`Видалено: ${w.title}`, {
+      label: 'Скасувати',
+      run: async () => {
+        await saveWatch(id, (list) => (list.some((x) => x.id === w.id) ? list : [...list.slice(0, at), w, ...list.slice(at)]));
+        paint();
+      },
+    });
+  };
+  const choose = async (w) => {
+    const cur = target();
+    if (!cur) { toast('Сьогодні цього заняття немає в плані'); return; }
+    closeSheet();
+    await save({ plan: { put: [{ ...cur, topic: w.title.slice(0, 80) }] } });
+    toast(`${a.name}: ${w.title}`);
+  };
+  const roll = () => {
+    picks = sample((act(id)?.watch ?? []).filter((w) => !w.done), pickCount()).map((w) => w.id);
+    vibrate(10);
+    paint();
+  };
+  const row = (w, pick = false) => h('div', { class: `remind-row watch-row${w.done ? ' done' : ''}` },
+    h('button', {
+      type: 'button', class: 'remind-check', 'aria-pressed': String(Boolean(w.done)),
+      'aria-label': w.done ? `Ще не переглянуто: ${w.title}` : `Переглянуто: ${w.title}`, onClick: () => toggle(w),
+    }, w.done ? icon('check') : null),
+    h('span', { class: 'remind-text' }, h('span', {}, w.title),
+      w.done ? h('span', { class: 'muted small' }, `переглянуто ${M.dayMonth(w.done)}`) : null),
+    pick && !w.done && target() ? h('button', {
+      type: 'button', class: 'remind-later', 'aria-label': `Обрати на сьогодні: ${w.title}`, onClick: () => choose(w),
+    }, icon('next'), 'Обрати') : null,
+    pick ? null : h('button', { type: 'button', class: 'icon-btn watch-del', 'aria-label': `Видалити: ${w.title}`, onClick: () => remove(w) }, icon('trash')));
+  const paint = () => {
+    const list = act(id)?.watch ?? [];
+    const left = list.filter((w) => !w.done);
+    const seen = list.filter((w) => w.done).sort((x, y) => y.done.localeCompare(x.done));
+    const shown = (picks ?? []).map((pid) => list.find((w) => w.id === pid)).filter(Boolean);
+    const n = pickCount();
+    body.replaceChildren(...[
+      h('div', { class: 'watch-add' }, input,
+        h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Додати', onClick: () => add(input.value) }, icon('plus'))),
+      left.length > 1 ? h('div', { class: 'form' }, h('span', { class: 'flabel' }, 'Скільки порадити'),
+        chips(PICK_COUNTS.map((c) => [String(c), String(c)]), String(n), (v) => { remember('pick-count', v); picks = null; paint(); })) : null,
+      left.length ? h('div', { class: 'btn-grid' },
+        button('dice', picks ? 'Ще раз' : `Порадь ${Math.min(n, left.length)}`, 'primary', roll)) : null,
+      shown.length ? formBox(left.length > shown.length ? 'Навмання зі списку' : 'Усе, що лишилось', ...shown.map((w) => row(w, true))) : null,
+      h('h3', { class: 'form-box-title watch-head' }, left.length ? `Ще не переглянуто · ${left.length}` : 'Ще не переглянуто'),
+      left.length ? left.map((w) => row(w)) : h('p', { class: 'muted small' }, list.length ? 'Усе переглянуто 🎉 Додай нове.' : 'Список порожній — додай першу назву.'),
+      seen.length ? fold(h('span', { class: 'flabel' }, `Переглянуто · ${seen.length}`),
+        h('div', { class: 'watch-seen' }, seen.map((w) => row(w))), { open: seenOpen, onToggle: (o) => { seenOpen = o; } }) : null,
+    ].flat().filter(Boolean));
+  };
+  paint();
+  sheet(`${a.name} · список`, body);
+}
+
+/** Відкрити список з іншої шторки — уже після history.back() її, інакше він закрив би нову. */
+function openWatchFrom(a, item) {
+  window.addEventListener('popstate', () => setTimeout(() => watchSheet(a, item)), { once: true });
+  closeSheet();
 }
 
 function moveSheet(item) {
@@ -526,6 +670,16 @@ async function endPause(p) {
   const rest = pauses().filter((x) => x.id !== p.id);
   await savePauses(p.from >= today ? rest : [...rest, { ...p, to: M.addDays(today, -1) }]);
   toast('Паузу завершено — з поверненням!');
+}
+
+/** Бот відкидає ключ — на головній, а не лише в налаштуваннях: інакше відмітки тихо не їдуть на інші пристрої. */
+function keyBanner() {
+  if (!keyProblem()) return null;
+  return h('section', { class: 'card pause-card key-card' },
+    h('div', {},
+      h('b', {}, 'Ключ доступу не підходить'),
+      h('p', { class: 'small' }, 'Відмітки не йдуть на інші пристрої. Візьми новий ключ командою /key у Telegram-боті й встав у будь-якому застосунку — тут, у Вазі чи Марнотраті: решта на цьому пристрої візьмуть його самі, інші — з Google Диска.')),
+    button('check', 'Вставити ключ', '', () => { folds.set('set-bot', true); location.hash = '#settings'; }));
 }
 
 function pauseBanner(today) {
@@ -825,14 +979,21 @@ function viewToday() {
   const left = planMin(slots.filter((s) => now < s.to)
     .flatMap((s) => itemsAt(today, s.id).filter((p) => isOpen(M.shownStatus(p, s, today, now)))));
   const streak = M.dayStreak(state.plan, today, pauses());
+  const [weekday, date] = M.dayTitle(today).split(', ');
+  const tags = [
+    left ? h('span', { class: 'tc-tag' }, icon('clock'), `Ще ~${minText(left)}`) : null,
+    streak >= MIN_STREAK ? h('span', { class: 'tc-tag streak' }, icon('flame'), `${streak} ${plural(streak, 'день', 'дні', 'днів')} поспіль`) : null,
+  ].filter(Boolean);
   return h('div', { class: 'stack' },
-    h('div', { class: 'view-head' },
-      h('div', {},
-        h('div', { class: 'muted' }, M.dayTitle(today)),
-        left ? h('div', { class: 'day-left' }, icon('clock'), `Ще на сьогодні ~${minText(left)}`) : null,
-        streak >= MIN_STREAK ? h('div', { class: 'day-left streak' }, icon('flame'), `${streak} ${plural(streak, 'день', 'дні', 'днів')} поспіль`) : null),
-      h('a', { class: 'week-pill', href: '#week', 'aria-label': `Тиждень: ${done} з ${target}` },
-        h('span', { class: 'muted small' }, 'Тиждень'), h('b', {}, `${done} / ${target}`))),
+    h('section', { class: 'today-card' },
+      h('div', { class: 'tc-top' },
+        h('div', { class: 'tc-date' }, h('span', {}, weekday), h('b', {}, date ?? '')),
+        h('a', { class: 'tc-week', href: '#week', 'aria-label': `Тиждень: ${done} з ${target}` },
+          h('span', {}, 'Тиждень'), h('b', {}, `${done} / ${target}`))),
+      h('div', { class: 'tc-bar' }, h('span', { style: { width: `${target ? Math.min(100, (done / target) * 100) : 0}%` } })),
+      tags.length ? h('div', { class: 'tc-tags' }, tags) : null,
+      neighbours(today)),
+    keyBanner(),
     pauseBanner(today),
     remindersToday(today, now),
     button('clock', 'Є кілька хвилин?', 'quick-btn', quickSheet),
@@ -1937,6 +2098,9 @@ function editActivity(orig) {
         weekChips(rep.days, pickRepDays),
         repWins,
         h('p', { class: 'muted small' }, "У ці дні справа сама з'являється в плані на тиждень уперед — у кожному обраному вікні (усі три — тричі на день). Прибрав чи переніс якусь — назад не повернеться. Без днів — розкладу немає."))),
+    formBox('Список',
+      chips([['off', 'Немає'], ['on', 'Вести список']], d.watchList ? 'on' : 'off', (v) => { d.watchList = v === 'on'; }),
+      h('p', { class: 'muted small' }, 'Фільми, книги, ігри — що хочеш спробувати. Відкривається значком на картці заняття; «Порадь 7» вибере навмання з не переглянутого. Вимкнеш — назви не зникнуть.')),
     h('div', { class: 'btn-grid' },
       button('check', 'Зберегти', 'primary', async () => {
         d.name = name.value.trim();
@@ -1944,6 +2108,8 @@ function editActivity(orig) {
         d.minutes = Math.max(0, Math.round(Number(minutes.value) || 0));
         d.minVersion = minVersion.value.trim();
         d.repeat = repeatFrom(orig?.repeat, rep);
+        // Список міг змінитись, поки відкритий редактор (синхронізація) — його не затираємо
+        if (orig) d.watch = act(orig.id)?.watch ?? d.watch;
         if (rep.days.length && !rep.slots.length) toast('Розклад без вікон не діє — обери хоч одне вікно');
         closeSheet();
         if (fresh.g && d.group === fresh.g.id) await saveGroups([...actGroups(), fresh.g]);
@@ -2180,7 +2346,13 @@ function actRow(a, heat, drag = true) {
       moveAmong(wrap, siblingRows(wrap).indexOf(wrap) + dir);
     },
   }, icon('grip')) : null;
-  box.append(h('div', { class: 'act-side' }, toggle, grip));
+  const list = a.watchList ? h('button', {
+    type: 'button', class: 'heat-toggle watch-open',
+    'aria-label': `Список «${a.name}»: ${(a.watch ?? []).filter((w) => !w.done).length} не переглянуто`,
+    onClick: () => watchSheet(act(a.id) ?? a),
+  }, icon('list')) : null;
+  if (list) box.classList.add('has-list');
+  box.append(h('div', { class: 'act-side' }, list, toggle, grip));
   if (panel) wrap.append(panel);
   return wrap;
 }
@@ -2424,7 +2596,11 @@ function restoreSheet(data) {
     h('div', { class: 'btn-grid' },
       button('check', 'Відновити', 'danger', async () => {
         closeSheet();
-        await replaceAll(data);
+        // Свіжа мітка часу: інакше бот вважав би свої записи новішими й мовчки повернув би їх замість відновлених
+        const at = Date.now();
+        const fresh = (list) => (list ?? []).map((r) => ({ ...r, updated: at }));
+        await replaceAll({ ...data, activities: fresh(data.activities), plan: fresh(data.plan), reminders: fresh(data.reminders), meta: fresh(data.meta) });
+        scheduleSync();
         Object.assign(state, await loadAll());
         slotsCfg = state.meta.find((m) => m.id === 'slots') ?? structuredClone(M.DEFAULT_SLOTS);
         toast('Відновлено');
@@ -2436,8 +2612,85 @@ function restoreSheet(data) {
 const BOT_URL = 'https://t.me/hobby_planner_bot';
 const BOT_WORKER = 'https://hobby-bot.hobbyplanner338.workers.dev';
 
+// ---------- значок синхронізації в шапці: як у Вазі й Марнотраті ----------
+
+let syncRes = null;
+const shortWhen = (ms) => {
+  const d = new Date(ms);
+  return M.ymd(d) === M.ymd() ? M.nowHm(d) : M.dayMonth(M.ymd(d));
+};
+
+/** Стан для значка: idle «✓ час», syncing, offline, key (ключ не підходить), error; без синхронізації — немає значка. */
+function chipState() {
+  if (keyProblem() || syncRes?.keyBad) return { st: 'key', text: 'ключ', title: 'Ключ доступу не підходить' };
+  if (!botConfig().key) return null;
+  if (!navigator.onLine) return { st: 'offline', text: 'офлайн', title: 'Немає інтернету — синхронізація пройде, щойно з’явиться зв’язок' };
+  if (syncRes && !syncRes.ok) return { st: 'error', text: 'помилка', title: syncRes.error };
+  const at = lastSync();
+  if (!at) return { st: 'syncing', text: '…', title: 'Синхронізую…' };
+  return { st: 'idle', text: `✓ ${shortWhen(at)}`, title: syncStatusText() };
+}
+
+function renderSyncChip() {
+  const chip = $('sync-chip');
+  const s = chipState();
+  chip.hidden = !s;
+  if (!s) return;
+  chip.replaceChildren(icon(s.st === 'key' ? 'warn' : 'refresh'), s.text);
+  chip.className = `sync-chip ${s.st}`;
+  chip.title = s.title;
+  chip.setAttribute('aria-label', `Синхронізація: ${s.title}`);
+}
+
+function onSyncChip() {
+  const s = chipState();
+  if (s?.st === 'key') { folds.set('set-bot', true); location.hash = '#settings'; return; }
+  if (s?.st === 'offline') { toast(s.title); return; }
+  connectSync(h('p')).then(render);
+}
+
+// ---------- вага й гроші з Ваги й Марнотрату: той самий сайт — спільний localStorage ----------
+
+const WEIGHT_SHARE = 'vitaliylobko:weight-today';
+const MONEY_SHARE = 'vitaliylobko:money-today';
+
+function shared(key) {
+  try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch { return null; }
+}
+
+const kgText = (v) => v.toLocaleString('uk-UA', { maximumFractionDigits: 1 });
+const uahText = (v) => `${Math.round(v).toLocaleString('uk-UA')} ₴`;
+
+/**
+ * Вага й гроші на «Сьогодні». Свіжі настільки, наскільки давно відкривали Вагу чи Марнотрат на цьому пристрої:
+ * не за сьогодні — з датою, а не «не зважився». Тап — відкрити застосунок.
+ */
+function neighbours(today) {
+  const w = shared(WEIGHT_SHARE);
+  const m = shared(MONEY_SHARE);
+  const tile = (href, label, value, sub, over = false) => h('a', { class: 'nb-tile', href },
+    h('span', { class: 'nb-label' }, label), h('b', {}, value),
+    sub ? h('span', { class: `nb-sub${over ? ' over' : ''}` }, sub) : null);
+  const tiles = [];
+  if (Number.isFinite(w?.kg)) {
+    const diff = Number.isFinite(w.prevKg) ? Math.round((w.kg - w.prevKg) * 10) / 10 : 0;
+    const sub = w.date !== today ? M.dayMonth(w.date) : diff ? `${diff > 0 ? '+' : '−'}${kgText(Math.abs(diff))} кг` : 'без змін';
+    tiles.push(tile('../weight-log/', 'Вага', `${kgText(w.kg)} кг`, sub));
+  }
+  if (m?.date) {
+    const over = Number.isFinite(m.left) && m.left < 0;
+    const sub = [
+      m.date === today ? null : M.dayMonth(m.date),
+      Number.isFinite(m.left) ? (over ? `понад бюджет ${uahText(-m.left)}` : `лишилось ${uahText(m.left)}`) : null,
+    ].filter(Boolean).join(' · ');
+    tiles.push(tile('../marnotrat/', m.date === today ? 'Витрати сьогодні' : 'Витрати', uahText(m.spent), sub, over));
+  }
+  return tiles.length ? h('div', { class: 'nb-tiles' }, tiles) : null;
+}
+
 function syncStatusText(res) {
   if (res && !res.ok && res.error) return res.error;
+  if (keyProblem()) return 'Ключ доступу не підходить — візьми новий командою /key у Telegram-боті';
   const at = lastSync();
   if (!at) return 'Ще не синхронізовано';
   const d = new Date(at);
@@ -2448,8 +2701,70 @@ async function connectSync(status) {
   status.textContent = 'Синхронізую…';
   const res = await syncNow();
   status.textContent = syncStatusText(res);
-  toast(res.ok ? 'Бот підключено' : res.error);
+  toast(res.ok ? 'Синхронізовано' : res.error);
+  // Бот працює — адреса й ключ у спільний bot-settings.json (якщо ключ Google ще живий; ні — з наступною копією)
+  if (res.ok) Drive.syncBotFile().catch(() => {});
 }
+
+/**
+ * Підключити бота: спершу дивимось, що вже є в боті — на новому телефоні перший обмін інакше затер би там заняття.
+ * at — час налаштування (з Диска — час того запису). fromDrive — збій зв'язку повертає, як було, а не лишає бота наполовину.
+ */
+async function connectBot(url, key, status, { at, fromDrive = false } = {}) {
+  const prev = botConfig();
+  const prevAt = sharedConfig()?.updated;
+  holdSync(true);
+  setBotConfig(url, key, at);
+  holdChoice(true);
+  status.textContent = 'Перевіряю сервер…';
+  await askBotData(status, () => {
+    // Бот з Диска не відповів — як було, і вибору вже не чекаємо (інакше обмін зі старим ботом стояв би назавжди);
+    // підключений руками лишається чекати вибору (обмін стоїть до нього)
+    if (fromDrive) {
+      setBotConfig(prev.url || null, prev.key || null, prevAt);
+      holdChoice(false);
+    }
+    return !fromDrive;
+  });
+}
+
+/**
+ * Що вже є в боті: є дані — шторка вибору, порожньо — звичайний обмін. failed(err) — збій зв'язку;
+ * true — показати помилку. Вибір не зроблено, доки не натиснуто кнопку чи не закрито шторку (holdChoice).
+ */
+async function askBotData(status, failed) {
+  let data;
+  try {
+    data = await fetchRestore();
+  } catch (err) {
+    const loud = failed(err);
+    holdSync(false);
+    status.textContent = loud ? err.message : '';
+    if (loud) toast(err.message);
+    return;
+  }
+  if (data.activities?.length || data.items?.length) {
+    status.textContent = '';
+    chooseBotData(data);
+    return;
+  }
+  holdChoice(false);
+  holdSync(false);
+  await connectSync(status);
+}
+
+// Новіші адреса й ключ з Google Диска (спільний bot-settings.json) — той самий шлях, що й «Зберегти й синхронізувати»
+let adoptingBot = false;
+window.addEventListener('bot-config', async ({ detail }) => {
+  if (adoptingBot) return;
+  adoptingBot = true;
+  try {
+    toast('Нова адреса сервера — підключаю');
+    await connectBot(detail.url, detail.key, $('sync-status') ?? h('p'), { at: detail.updated, fromDrive: true });
+  } finally {
+    adoptingBot = false;
+  }
+});
 
 const restoreCounts = (data) => `Занять: ${data.activities?.length ?? 0}, справ у плані: ${data.items?.length ?? 0}, нагадувань: ${data.reminders?.length ?? 0}.`;
 
@@ -2467,19 +2782,19 @@ async function applyRestore(data) {
   slotsCfg = state.meta.find((m) => m.id === 'slots') ?? structuredClone(M.DEFAULT_SLOTS);
   markRestored(data.now);
   holdSync(false);
-  toast('Дані взято з бота');
+  toast('Дані взято з бази');
   render();
 }
 
 /** Підключення, а в боті вже є дані: узяти їх сюди чи залишити ці. Закрили, не обравши, — бота не підключаємо. */
 function chooseBotData(data) {
   let chosen = false;
-  const pick = (fn) => async () => { chosen = true; closeSheet(); await fn(); };
-  sheet('У боті вже є дані', h('div', { class: 'sheet-body' },
+  const pick = (fn) => async () => { chosen = true; holdChoice(false); closeSheet(); await fn(); };
+  sheet('У базі вже є дані', h('div', { class: 'sheet-body' },
     h('p', {}, restoreCounts(data)),
-    h('p', { class: 'muted small' }, 'Новий телефон — бери з бота. Якщо ж правильні дані тут, бот отримає їх і віддасть своє: що змінено і тут, і там, — лишиться новіше.'),
+    h('p', { class: 'muted small' }, 'Новий телефон — бери з бази. Якщо ж правильні дані тут, база отримає їх і віддасть своє: що змінено і тут, і там, — лишиться новіше.'),
     h('div', { class: 'btn-grid' },
-      button('refresh', 'Взяти з бота', 'primary', pick(() => applyRestore(data))),
+      button('refresh', 'Взяти з бази', 'primary', pick(() => applyRestore(data))),
       button('check', 'Залишити ці', '', pick(async () => {
         holdSync(false);
         await connectSync($('sync-status') ?? h('p'));
@@ -2487,21 +2802,21 @@ function chooseBotData(data) {
       })))), {
     onClose: () => {
       if (chosen) return;
-      setBotConfig(null, null);
+      declineBot();
       holdSync(false);
-      toast('Бота не підключено — дані не чіпали');
+      toast('Синхронізацію не ввімкнено — дані не чіпали');
       runRepeats().then(render);
     },
   });
 }
 
-/** «Відновити з бота» на вже підключеному телефоні. */
+/** «Відновити з бази» на вже підключеному телефоні. */
 function confirmRestore(data) {
   holdSync(true);
   let chosen = false;
-  sheet('Відновити з бота?', h('div', { class: 'sheet-body' },
+  sheet('Відновити з бази?', h('div', { class: 'sheet-body' },
     h('p', {}, restoreCounts(data)),
-    h('p', { class: 'muted small' }, 'Заняття, план і нагадування на цьому телефоні заміняться тими, що в боті. Зроби спершу резервну копію, якщо сумніваєшся.'),
+    h('p', { class: 'muted small' }, 'Заняття, план і нагадування на цьому телефоні заміняться тими, що в базі. Зроби спершу резервну копію, якщо сумніваєшся.'),
     h('div', { class: 'btn-grid' },
       button('refresh', 'Відновити', 'danger', async () => { chosen = true; closeSheet(); await applyRestore(data); }),
       button('undo', 'Скасувати', '', () => closeSheet()))), {
@@ -2509,9 +2824,9 @@ function confirmRestore(data) {
   });
 }
 
-/** Тихі години: бот нічого не пише, що настало — прийде після них. */
+/** Тихі години: бот нічого не пише, що настало — прийде після них. Тут же — час вечірнього підсумку. */
 function quietBlock() {
-  const q = { on: false, from: '23:00', to: '07:00', ...state.meta.find((m) => m.id === 'quiet'), id: 'quiet' };
+  const q = { on: false, from: '23:00', to: '07:00', evening: '21:00', ...state.meta.find((m) => m.id === 'quiet'), id: 'quiet' };
   const store = () => save({ meta: { put: [{ ...q }] } }, { render: false });
   const times = h('div', { class: 'date-pair' },
     h('label', {}, 'з', timeField({ value: q.from, label: 'Тихі години з', onChange: (v) => { q.from = v; store(); } })),
@@ -2521,83 +2836,81 @@ function quietBlock() {
     h('span', { class: 'flabel' }, 'Тихі години'),
     chips([['off', 'Вимкнено'], ['on', 'Увімкнено']], q.on ? 'on' : 'off', (v) => { q.on = v === 'on'; times.hidden = !q.on; store(); }),
     times,
-    h('p', { class: 'muted small' }, 'У цей час бот мовчить — і про вікна, і «Не забудь», і вагу. Що настало, прийде одним повідомленням після них.'));
+    h('p', { class: 'muted small' }, 'У цей час бот мовчить — і про вікна, і «Не забудь», і вагу. Що настало, прийде одним повідомленням після них.'),
+    h('span', { class: 'flabel' }, 'Вечірній підсумок'),
+    h('label', {}, 'о', timeField({ value: q.evening || '21:00', label: 'Вечірній підсумок о', onChange: (v) => { q.evening = v; store(); } })),
+    h('p', { class: 'muted small' }, 'Одне повідомлення за день: справи, вага, гроші з Марнотрату й план на завтра. Потрапляє в тихі години — прийде за хвилину до них.'));
 }
 
 function botSection() {
   const cfg = botConfig();
   const url = h('input', { type: 'url', id: 'f-bot-url', value: cfg.url || BOT_WORKER, inputmode: 'url', autocomplete: 'off', spellcheck: 'false' });
-  const key = h('input', { type: 'password', id: 'f-bot-key', value: cfg.key, autocomplete: 'off', placeholder: 'Ключ із команди /key' });
-  const status = h('p', { class: 'muted small', id: 'sync-status', 'aria-live': 'polite' }, cfg.key ? syncStatusText() : '');
-  // Бот підключено — блок згорнутий, у заголовку видно, що він працює
-  const head = h('span', { class: 'slot-head' }, h('h2', {}, 'Telegram-бот'), cfg.key ? badge('done', 'Підключено') : null);
+  const key = h('input', { type: 'password', id: 'f-bot-key', value: cfg.key, autocomplete: 'off', placeholder: 'команда /key у Telegram-боті' });
+  const status = h('p', { class: keyProblem() ? 'small error-text' : 'muted small', id: 'sync-status', 'aria-live': 'polite' }, cfg.key || keyProblem() ? syncStatusText() : 'Не ввімкнено');
+  // Синхронізацію ввімкнено — блок згорнутий, у заголовку видно, що він працює
+  const head = h('span', { class: 'slot-head' }, h('h2', {}, 'Синхронізація'), cfg.key ? badge('done', 'Увімкнено') : null);
+  const save = async () => {
+    const u = url.value.trim().replace(/\/+$/, '');
+    if (!u.startsWith('https://') || !key.value.trim()) { toast('Потрібні адреса (https://…) і ключ'); return; }
+    // Той самий бот, новий ключ — та сама база: без вибору «чиї дані лишити»
+    if (cfg.key && u === cfg.url) {
+      changeKey(key.value);
+      await connectSync(status);
+      render();
+      return;
+    }
+    await connectBot(u, key.value, status);
+  };
   return folded('set-bot', head, h('div', { class: 'form fold-body' },
-    h('p', { class: 'muted small' },
-      'Нагадування з кнопками приходять у Telegram, відмітки звідти повертаються сюди. Напиши ',
-      h('a', { href: BOT_URL, target: '_blank', rel: 'noopener' }, '@hobby_planner_bot'),
-      ' команду /key і встав ключ нижче.'),
-    h('label', { for: 'f-bot-url' }, 'Адреса бота'), url,
-    h('label', { for: 'f-bot-key' }, 'Ключ'), key,
     status,
+    h('p', { class: 'muted small' },
+      'План, заняття й нагадування лежать у спільній базі на сервері — однакові на всіх пристроях; без інтернету все піде пізніше. Цю ж базу читає Telegram-бот: нагадує з кнопками, відмітки звідти повертаються сюди. Ключ доступу дає команда /key у ',
+      h('a', { href: BOT_URL, target: '_blank', rel: 'noopener' }, '@hobby_planner_bot'),
+      '; досить вставити в одному застосунку — тут, у Вазі чи Марнотраті.'),
+    h('label', { for: 'f-bot-url' }, 'Адреса сервера'), url,
+    h('label', { for: 'f-bot-key' }, 'Ключ доступу'), key,
     h('div', { class: 'btn-grid' },
-      button('check', 'Зберегти й синхронізувати', 'primary', async () => {
-        if (!url.value.trim().startsWith('https://') || !key.value.trim()) { toast('Потрібні адреса (https://…) і ключ'); return; }
-        // Спершу дивимось, що вже є в боті: на новому телефоні перший обмін інакше затер би там заняття
-        holdSync(true);
-        setBotConfig(url.value, key.value);
-        status.textContent = 'Перевіряю бота…';
-        let data;
-        try {
-          data = await fetchRestore();
-        } catch (err) {
-          holdSync(false);
-          status.textContent = err.message;
-          toast(err.message);
-          return;
-        }
-        if (data.activities?.length || data.items?.length) {
-          status.textContent = '';
-          chooseBotData(data);
-          return;
-        }
-        holdSync(false);
-        await connectSync(status);
-      }),
-      cfg.key ? button('refresh', 'Відновити з бота', '', async () => {
-        try {
-          confirmRestore(await fetchRestore());
-        } catch (err) {
-          toast(err.message);
-        }
-      }) : null,
-      cfg.key ? button('skip', 'Від’єднати бота', '', () => {
-        setBotConfig(null, null);
-        toast('Бота від’єднано: нагадування для нових справ не прийдуть');
+      button('check', 'Зберегти', cfg.key ? '' : 'primary', save),
+      cfg.key ? button('refresh', 'Обмінятися зараз', 'primary', async () => { await connectSync(status); render(); }) : null,
+      cfg.key ? button('skip', 'Вимкнути синхронізацію', '', () => {
+        declineBot();
+        toast('Синхронізацію вимкнено лише тут: нагадування для нових справ не прийдуть');
         runRepeats().then(render);
       }) : null),
+    cfg.key ? h('div', { class: 'btn-grid' }, button('undo', 'Відновити з бази', 'ghost', async () => {
+      try {
+        confirmRestore(await fetchRestore());
+      } catch (err) {
+        toast(err.message);
+      }
+    })) : null,
+    cfg.key ? h('h3', {}, 'Telegram-бот') : null,
     cfg.key ? quietBlock() : null), { def: !cfg.key, cls: 'card' });
 }
 
 function viewSettings() {
   const file = h('input', { type: 'file', accept: 'application/json,.json', hidden: true, onChange: (e) => { const f = e.target.files[0]; if (f) importBackup(f); e.target.value = ''; } });
-  return h('div', { class: 'stack' },
-    aboutPanel(),
-    aboutSection(),
-    pauseSection(),
-    botSection(),
-    h('section', { class: 'card' }, h('h2', {}, 'Тема'),
-      chips(THEMES, themePref(), (v) => { remember('theme', v); applyTheme(); })),
-    folded('set-slots', h('h2', {}, 'Вікна дня й вихідні'),
+  return h('div', {},
+    settingsGroup('Про застосунок', [aboutPanel(), aboutSection()]),
+    settingsGroup('Розклад', [pauseSection(), folded('set-slots', h('h2', {}, 'Вікна дня й вихідні'),
       h('div', { class: 'fold-body' }, weekendPicker(), slotEditor('weekday', 'Будні'), slotEditor('weekend', 'Вихідні'),
         h('p', { class: 'muted small' }, 'Стандартні: будні — ранок 7–12, обід 12–18, вечір 18–21; вихідні — ранок 9–12, день 12–18, вечір 18–21.'),
         button('refresh', 'Стандартні вікна', 'ghost', resetSlots)),
-      { def: false, persist: true, cls: 'card' }),
-    folded('set-backup', h('h2', {}, 'Резервна копія'), h('div', { class: 'fold-body' },
-      h('p', { class: 'muted small' }, 'Дані живуть лише в цьому браузері. Копія — файл JSON, його можна відновити на іншому пристрої.'),
+      { def: false, persist: true, cls: 'card' })]),
+    settingsGroup('Дані', [botSection(), driveBlock(), h('section', { class: 'card' },
+      h('h2', {}, 'Копія у файл'),
+      h('p', { class: 'muted small' }, 'Файл JSON з усіма даними — про всяк випадок; його можна відновити на іншому пристрої.'),
       h('div', { class: 'btn-grid' },
         button('move', 'Зберегти копію', '', exportBackup),
         button('undo', 'Відновити з файлу', '', () => file.click())),
-      file, driveBlock()), { def: false, persist: true, cls: 'card' }));
+      file)]),
+    settingsGroup('Вигляд', [h('section', { class: 'card' }, h('h2', {}, 'Тема'),
+      chips(THEMES, themePref(), (v) => { remember('theme', v); applyTheme(); }))]));
+}
+
+/** Група налаштувань, як у Стрілецькому журналі: рамка з назвою на лінії, розділи всередині — через лінію. */
+function settingsGroup(title, sections) {
+  return h('fieldset', { class: 'settings-group' }, h('legend', {}, title), sections.filter(Boolean));
 }
 
 /** «Про застосунок»: що воно таке, де лежать дані, з чого почати — як у shooting-log. */
@@ -2612,17 +2925,17 @@ function aboutPanel() {
         h('p', { class: 'muted small' }, 'Хобі-план — щоденний план хобі по вікнах дня (ранок, обід, вечір) і звичка не пропускати. Працює без інтернету.'))),
     more('Де мої дані', h('div', { class: 'muted small' },
       h('p', {}, 'План, заняття й нагадування лежать у браузері на цьому пристрої. Сервера в застосунку немає, автор не отримує ні даних, ні статистики.'),
-      h('p', {}, 'Telegram-бот — за бажанням: план їде на твій власний Cloudflare Worker, щоб бот нагадував, а телефон і комп’ютер бачили те саме.'),
-      h('p', {}, 'Google Диск — теж за бажанням: раз на тиждень копія лягає у твій Диск, застосунок бачить лише свої файли.'),
-      h('p', {}, 'Резервна копія — «Резервна копія» → «Зберегти копію». Нею ж переносиш дані на інший пристрій.'))),
+      h('p', {}, 'Синхронізація — за бажанням: план лягає в базу на твоєму власному Cloudflare Worker, щоб Telegram-бот нагадував, а телефон і комп’ютер бачили те саме.'),
+      h('p', {}, 'Google Диск — теж за бажанням: раз на день копія лягає у твій Диск, застосунок бачить лише свої файли.'),
+      h('p', {}, 'Резервна копія — «Копія у файл» → «Зберегти копію». Нею ж переносиш дані на інший пристрій.'))),
     more('З чого почати', h('ol', { class: 'about-steps' },
       h('li', {}, 'Встанови застосунок: Android — Chrome → ⋮ → «Встановити застосунок»; iPhone — Safari → «Поділитися» → «На екран „Додому“».'),
       h('li', {}, '«Заняття» — заведи свої хобі: скільки разів на тиждень, скільки хвилин, мінімальна версія.'),
       h('li', {}, '«План» — тапом розстав заняття по вікнах дня. Повторюється щотижня — постав постійний розклад у картці заняття.'),
       h('li', {}, '«Сьогодні» — свайп по справі вправо — зробив, вліво — перенести. ▶ на картці вмикає таймер.'),
       h('li', {}, 'Рівень заняття росте від зарахованих справ: повна — 10 досвіду, мінімум — 5, плюс 1 за кожні 10 хв таймера. На картці заняття — ціль тижня, рівень і вікно, де воно найкраще виходить (◎); 📅 — теплова карта за 12 тижнів.'),
-      h('li', {}, 'Нагадування в Telegram — «Telegram-бот» вище. На телефоні й комп’ютері — той самий ключ, тоді план однаковий на обох.'),
-      h('li', {}, 'Без бота й Google Диска дані лише на цьому пристрої — час від часу зберігай копію.'))),
+      h('li', {}, 'Нагадування в Telegram — Налаштування → «Дані» → «Синхронізація». На телефоні й комп’ютері — той самий ключ, тоді план однаковий на обох.'),
+      h('li', {}, 'Без синхронізації й Google Диска дані лише на цьому пристрої — час від часу зберігай копію.'))),
     more('Що й коли пише бот', h('div', { class: 'muted small' },
       h('p', {}, 'За 10 хв до першого вікна — план дня.'),
       h('p', {}, 'Почалось вікно — його справи з кнопками. За 30 хв до кінця — ще раз, якщо щось не відмічено. Поки в вікні йде таймер — мовчить.'),
@@ -2631,7 +2944,7 @@ function aboutPanel() {
       h('p', {}, 'Таймер дійшов до звичних хвилин заняття — «Зараховуємо?».'),
       h('p', {}, '«Не забудь» — на початку свого часу, щогодини й за 15 хв до кінця, поки не «Зроблено». Вага — у час зважування з «Ваги», через годину ще раз.'),
       h('p', {}, 'Тихі години — бот мовчить, що настало, прийде одним повідомленням після них. Пауза — про заняття й вагу мовчить, «Не забудь» і таймер — пише.'),
-      h('p', {}, 'Обмін із ботом — за кілька секунд після зміни, коли відкриваєш і згортаєш застосунок, і щохвилини, поки він на екрані. Одне заняття у вікні — одна справа: дубль із двох пристроїв бот прибере сам.'))),
+      h('p', {}, 'Синхронізація — за кілька секунд після зміни, коли відкриваєш і згортаєш застосунок, і щохвилини, поки він на екрані. Одне заняття у вікні — одна справа: дубль із двох пристроїв бот прибере сам.'))),
     h('p', { class: 'muted small' },
       link('https://github.com/VitaliyLobko/hobby-planner/issues/new', 'Повідомити про помилку'), ' · ',
       link('https://github.com/VitaliyLobko/hobby-planner', 'Вихідний код')));
@@ -2639,7 +2952,7 @@ function aboutPanel() {
 
 // ---------- копія на Google Диск ----------
 
-/** Раз на тиждень: ключ Google живий — тихо; ні — лише з натискання (gesture). */
+/** Раз на день: ключ Google живий — тихо; ні — лише з натискання (gesture). */
 function driveTick(gesture = false) {
   Drive.maybeBackup(backupData, { gesture })
     .then((done) => { if (done) toast('Копію збережено на Google Диск'); })
@@ -2652,7 +2965,7 @@ function driveStatusText() {
   const d = new Date(at);
   const day = M.ymd(d) === M.ymd() ? 'сьогодні' : M.dayMonth(M.ymd(d));
   const left = Math.ceil((at + Drive.BACKUP_EVERY_DAYS * 864e5 - Date.now()) / 864e5);
-  return `Остання копія: ${day} о ${M.nowHm(d)} · ${left > 0 ? `наступна — за ${left} ${plural(left, 'день', 'дні', 'днів')}` : 'наступна — з найближчого натискання'}`;
+  return `Остання копія: ${day} о ${M.nowHm(d)} · ${left > 1 ? `наступна — за ${left} ${plural(left, 'день', 'дні', 'днів')}` : left === 1 ? 'наступна — завтра' : 'наступна — з найближчого натискання'}`;
 }
 
 /** Google Диск: підключити, зберегти зараз, відновити, відключити. Окремо від бота — на випадок, якщо з ним щось станеться. */
@@ -2670,17 +2983,18 @@ function driveBlock() {
     status.textContent = driveStatusText();
     render();
   };
+  const title = h('h2', {}, 'Google Диск · щоденна копія');
   const about = h('p', { class: 'muted small' },
-    'Раз на тиждень застосунок сам кладе копію у файл hobby-planner-backup.json на твоєму Google Диску — окремо від бота. Попередні версії файлу Google тримає до 30 днів.');
+    'Копія — файл hobby-planner-backup.json на твоєму Google Диску, окремо від бази; там же адреса сервера й ключ доступу для інших пристроїв. Попередні версії файлу Google тримає до 30 днів.');
   if (!Drive.driveOn()) {
-    return h('div', { class: 'drive-block' }, h('h3', { class: 'form-box-title' }, 'Google Диск'), about,
-      button('plus', 'Підключити Google Диск', '', run(() => Drive.connect(backupData), 'Google Диск підключено, копію збережено')));
+    return h('section', { class: 'card' }, title, about,
+      button('plus', 'Підключити Google Диск', 'primary', run(() => Drive.connect(backupData), 'Google Диск підключено, копію збережено')));
   }
-  return h('div', { class: 'drive-block' }, h('h3', { class: 'form-box-title' }, 'Google Диск'), about, status,
+  return h('section', { class: 'card' }, title, status, about,
     h('div', { class: 'btn-grid' },
-      button('check', 'Зберегти зараз', '', run(() => Drive.backupByTap(backupData), 'Копію збережено на Google Диск')),
+      button('check', 'Зберегти зараз', 'primary', run(() => Drive.backupByTap(backupData), 'Копію збережено на Google Диск')),
       button('undo', 'Відновити з Диска', '', run(async () => { restoreSheet(await Drive.fetchBackup()); return ''; })),
-      button('skip', 'Відключити Диск', 'ghost', run(() => { Drive.disconnect(); }, 'Google Диск відключено — копія на ньому лишається'))));
+      button('skip', 'Відключити', '', run(() => { Drive.disconnect(); }, 'Google Диск відключено — копія на ньому лишається'))));
 }
 
 // ---------- маршрути ----------
@@ -2920,20 +3234,47 @@ async function init() {
       await save({ plan: { put } }, { render: false, remote: true });
       scheduleSync();
     },
-    onStatus: (res) => { const el = $('sync-status'); if (el) el.textContent = syncStatusText(res); },
+    onStatus: (res) => {
+      syncRes = res;
+      renderSyncChip();
+      const el = $('sync-status');
+      if (el) el.textContent = syncStatusText(res);
+      // Ключ відкинуто чи знову прийнято — плашка на головній
+      if (res.keyBad || (res.ok && document.querySelector('.key-card'))) render();
+    },
   });
   // Згорнули — одразу шлемо боту, що змінилось (почав, переніс, відмітив): інакше він нагадує за старим планом
   // Згорнули — шлемо, лише якщо щось змінили; відкрили — забираємо нове, якщо обміну не було щойно
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') syncNow({ keepalive: true, onlyPending: true });
-    else if (Date.now() - lastSync() > 15000) syncNow();
+    else if (adoptShared() || Date.now() - lastSync() > 15000) syncNow();
+  });
+  // Ключ вставили у Вазі чи Марнотраті на цьому пристрої
+  renderSyncChip();
+  $('sync-chip').addEventListener('click', onSyncChip);
+  addEventListener('online', renderSyncChip);
+  addEventListener('offline', renderSyncChip);
+  addEventListener('storage', (e) => {
+    // Вагу чи гроші щойно записали у Вазі чи Марнотраті в сусідній вкладці
+    if (e.key === WEIGHT_SHARE || e.key === MONEY_SHARE) { if (tab === 'today') render(); return; }
+    if (e.key !== 'vitaliylobko:bot') return;
+    renderSyncChip();
+    if (adoptShared()) syncNow();
+    render();
   });
   // Поки застосунок на екрані — раз на 2 хв, і не одразу після обміну, що вже був (тап, відкриття)
   const SYNC_EVERY = 2 * 60 * 1000;
   setInterval(() => {
     if (document.visibilityState === 'visible' && Date.now() - lastSync() > SYNC_EVERY / 2) syncNow();
   }, SYNC_EVERY);
-  syncNow();
+  // Минулого разу закрили застосунок посеред вибору «узяти з бота чи залишити ці» — питаємо знову, а не обмінюємось
+  if (choosingBot()) {
+    holdSync(true);
+    askBotData(h('p'), () => true);
+  } else {
+    adoptShared();
+    syncNow();
+  }
   // Живий лічильник таймера: міняємо лише текст цифр, без перемальовки екрана
   setInterval(() => {
     for (const el of document.querySelectorAll('[data-timer]')) {
@@ -2947,7 +3288,8 @@ async function init() {
     timerGoals();
   }, 1000);
   await runRepeats();
-  if (Drive.driveOn()) { Drive.preload(); driveTick(); }
+  // Ключ Google ще живий (вхід менш ніж годину тому) — звірити бота зі спільним bot-settings.json
+  if (Drive.driveOn()) { Drive.preload(); driveTick(); Drive.syncBotFile().catch(() => {}); }
   route();
   // З ярлика «Є кілька хвилин?» — одразу до справи, «Що нового» покажемо наступного запуску
   if (!new URLSearchParams(location.search).has('quick')) showWhatsNew();

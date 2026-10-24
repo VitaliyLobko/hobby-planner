@@ -1,16 +1,18 @@
-// Копія на Google Диск: раз на тиждень — файл hobby-planner-backup.json (той самий формат, що «Зберегти копію»).
+// Копія на Google Диск: раз на день — файл hobby-planner-backup.json (той самий формат, що «Зберегти копію»).
 // Не залежить від бота: якщо з ним щось станеться, дані лишаються на Диску власника.
 // Вхід — Google Identity Services, OAuth-клієнт той самий, що в shooting-log: origin спільний (vitaliylobko.github.io).
 // Ключ Диска діє годину й у фоні не продовжується — тож оновлюємо його з натискання, яке людина й так робить.
+import { declinedAt, setBotAt, adoptShared } from './sync.js';
+import * as BK from './bot-key.js';
+import { sharedToken, shareToken, dropSharedToken, noteEmail, whoIs } from './google-token.js';
+import { locate, readJson, writeJson, syncBotFile as botFileExchange } from './drive-files.js';
 
 const CLIENT_ID = '252063766250-9hhqp9hdefccgp508bv983usv5h17lsf.apps.googleusercontent.com';
 const SCOPE = 'https://www.googleapis.com/auth/drive.file';
 const FILE_NAME = 'hobby-planner-backup.json';
-const DRIVE = 'https://www.googleapis.com/drive/v3';
-const UPLOAD = 'https://www.googleapis.com/upload/drive/v3';
 const KEY = 'hobby-planner:drive';
 const DAY = 24 * 60 * 60 * 1000;
-export const BACKUP_EVERY_DAYS = 7;
+export const BACKUP_EVERY_DAYS = 1;
 // Спроба тихо оновити ключ не частіше — інакше вікно Google мелькало б на кожне натискання
 const RETRY_MS = 10 * 60 * 1000;
 
@@ -34,7 +36,16 @@ function save() {
 export const driveOn = () => Boolean(conf.enabled);
 export const lastBackup = () => conf.last ?? null;
 export const backupDue = () => driveOn() && (!conf.last || Date.now() - conf.last >= BACKUP_EVERY_DAYS * DAY);
-const tokenValid = () => Boolean(conf.token) && conf.expires > Date.now() + 60_000;
+/** Свій ключ живий — його; ні — спільний з іншого застосунку автора (вхід там годиться й тут). */
+function tokenValid() {
+  if (conf.token && conf.expires > Date.now() + 60_000) return true;
+  const s = sharedToken(conf);
+  if (!s) return false;
+  conf.token = s.token;
+  conf.expires = s.expires;
+  save();
+  return true;
+}
 
 // ---------- вхід ----------
 
@@ -67,6 +78,7 @@ function client() {
       if (resp.error) { finishAuth(new Error(resp.error_description || resp.error)); return; }
       conf.token = resp.access_token;
       conf.expires = Date.now() + (Number(resp.expires_in) || 3600) * 1000;
+      shareToken(conf.token, conf.expires, conf.email);
       save();
       finishAuth();
     },
@@ -95,7 +107,8 @@ function requestToken(prompt) {
 
 /** Підключити Диск і одразу покласти копію. getData — що зберегти (той самий об'єкт, що й у файлі копії). */
 export async function connect(getData) {
-  await requestToken(conf.consented ? '' : 'consent');
+  // Увійшли в іншому застосунку автора менш ніж годину тому — вікно Google не потрібне
+  if (!tokenValid()) await requestToken(conf.consented ? '' : 'consent');
   conf.enabled = true;
   conf.consented = true;
   save();
@@ -103,7 +116,7 @@ export async function connect(getData) {
 }
 
 export function disconnect() {
-  if (conf.token) window.google?.accounts?.oauth2?.revoke?.(conf.token, () => {});
+  // Вхід у Google не відкликаємо: він спільний з іншими застосунками автора — відключається лише цей
   conf = {};
   save();
 }
@@ -113,50 +126,37 @@ export function disconnect() {
 async function api(url, options = {}) {
   const res = await fetch(url, { ...options, headers: { Authorization: `Bearer ${conf.token}`, ...options.headers } });
   if (res.status === 401) {
+    dropSharedToken(conf.token);
     conf.token = null;
     save();
     throw new AuthError('Сесія Google скінчилась — натисни ще раз');
   }
-  if (!res.ok) throw new Error(`Google Диск відповів ${res.status}`);
+  if (!res.ok) throw Object.assign(new Error(`Google Диск відповів ${res.status}`), { status: res.status });
   return res;
 }
 
 /** Файл копії: збережений id, якщо файл живий; інакше — пошук за назвою (scope drive.file бачить лише свої файли). */
 async function findFile() {
-  if (conf.fileId) {
-    try {
-      const meta = await (await api(`${DRIVE}/files/${conf.fileId}?fields=id,trashed`)).json();
-      if (!meta.trashed) return conf.fileId;
-    } catch (err) {
-      if (err instanceof AuthError) throw err;
-    }
-  }
-  const q = encodeURIComponent(`name='${FILE_NAME}' and trashed=false`);
-  const { files } = await (await api(`${DRIVE}/files?q=${q}&spaces=drive&orderBy=modifiedTime desc&fields=files(id)`)).json();
-  conf.fileId = files?.[0]?.id ?? null;
+  conf.fileId = await locate(api, FILE_NAME, conf.fileId);
   save();
   return conf.fileId;
 }
 
 /** Один файл, щоразу перезаписується: попередні версії Google Диск тримає сам (до 30 днів). */
 async function upload(fileId, data) {
-  const content = JSON.stringify(data);
-  if (fileId) {
-    await api(`${UPLOAD}/files/${fileId}?uploadType=media`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: content,
-    });
-    return;
-  }
-  const boundary = `hp${Date.now()}`;
-  const body = [
-    `--${boundary}`, 'Content-Type: application/json; charset=UTF-8', '',
-    JSON.stringify({ name: FILE_NAME, mimeType: 'application/json', description: 'Хобі-план — резервна копія' }),
-    `--${boundary}`, 'Content-Type: application/json', '', content, `--${boundary}--`,
-  ].join('\r\n');
-  const created = await (await api(`${UPLOAD}/files?uploadType=multipart&fields=id`, {
-    method: 'POST', headers: { 'Content-Type': `multipart/related; boundary=${boundary}` }, body,
-  })).json();
-  conf.fileId = created.id;
+  const file = { name: FILE_NAME, description: 'Хобі-план — резервна копія', content: JSON.stringify(data) };
+  let res = await writeJson(api, { ...file, id: fileId });
+  // Інший телефон щойно завів копію — копія в нас ціла, тож просто кладемо її в той самий файл
+  if (!res.written) res = await writeJson(api, { ...file, id: res.id });
+  conf.fileId = res.id;
+  save();
+}
+
+/** Чий це Диск — запам'ятати раз: без пошти спільний ключ з іншого застосунку не підхоплюємо (див. google-token.js). */
+async function learnEmail() {
+  if (conf.email) return;
+  conf.email = await whoIs(conf.token);
+  noteEmail(conf.token, conf.email);
   save();
 }
 
@@ -165,12 +165,49 @@ export async function backupNow(getData) {
   if (!tokenValid()) throw new AuthError('Потрібно увійти в Google — натисни «Зберегти зараз»');
   running = true;
   try {
+    await learnEmail();
     await upload(await findFile(), getData());
     conf.last = Date.now();
     save();
   } finally {
     running = false;
   }
+  // Налаштування бота — не копія: збій тут копію не валить
+  try {
+    await syncBotFile();
+  } catch (err) {
+    if (err instanceof AuthError) throw err;
+  }
+}
+
+// ---------- спільні налаштування бота ----------
+
+/**
+ * Звірити адресу й ключ бота з bot-settings.json — лише коли ключ Google ще живий, без вікна входу.
+ * Свій новіший чи файлу нема — на Диск. Новіший з Диска сам не підключається: подія 'bot-config' з { url, key, updated }
+ * віддає його застосунку, а той спершу дивиться, що вже є в боті (як і при підключенні руками).
+ */
+let botSyncing = null;
+
+export function syncBotFile() {
+  if (!driveOn() || !tokenValid() || !navigator.onLine) return Promise.resolve();
+  // Старт і тижнева копія можуть збігтися — один обмін на двох, інакше на Диску з'явилось би два файли
+  botSyncing ??= botFileRound().finally(() => { botSyncing = null; });
+  return botSyncing;
+}
+
+async function botFileRound() {
+  conf.botFileId = await botFileExchange(api, conf.botFileId, {
+    mine: BK.forDrive(declinedAt()),
+    declinedAt: declinedAt(),
+    isBad: BK.isBad,
+    // Новіший з Диска — спільний для застосунків на пристрої; той самий бот — лише ключ, інший — з вибором даних
+    apply: (theirs) => {
+      BK.publish(theirs.url, theirs.key, theirs.updated);
+      if (!adoptShared()) setBotAt(theirs.updated);
+    },
+  });
+  save();
 }
 
 /** Зберегти з натискання: ключ мертвий — спершу оновити (вікно Google мелькне). */
@@ -184,11 +221,11 @@ export async function fetchBackup() {
   if (!tokenValid()) await requestToken('');
   const id = await findFile();
   if (!id) throw new Error('На Диску копії ще немає');
-  return (await api(`${DRIVE}/files/${id}?alt=media`)).json();
+  return readJson(api, id);
 }
 
 /**
- * Раз на тиждень, сама. Ключ живий — тихо у фоні. Ні — лише з натискання (gesture), яке людина й так зробила:
+ * Раз на день, сама. Ключ живий — тихо у фоні. Ні — лише з натискання (gesture), яке людина й так зробила:
  * вікно Google мелькне й закриється; поза натисканням браузер його заблокував би. Повертає true, якщо поклала.
  */
 export async function maybeBackup(getData, { gesture = false } = {}) {

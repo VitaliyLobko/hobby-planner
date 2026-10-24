@@ -90,6 +90,9 @@ a { color: var(--accent); }
 .small { font-size: 13px; }
 .lead { margin: 0; }
 .error { color: var(--bad-fg); padding: 16px; }
+.error-text { color: var(--bad-fg); }
+.key-card { background: var(--bad-bg); color: var(--bad-fg); }
+.key-card .btn { background: var(--bad-fg); color: var(--bad-bg); }
 
 /* ---------- каркас ---------- */
 .topbar {
@@ -98,6 +101,34 @@ a { color: var(--accent); }
 }
 .topbar h1 { margin: 0; font-size: 28px; font-weight: 800; letter-spacing: -0.5px; }
 .topbar svg { width: 22px; height: 22px; }
+.topbar-actions { display: flex; flex: none; align-items: center; gap: 8px; }
+.sync-chip {
+  display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 4px 12px;
+  border: 1px solid var(--line); border-radius: 16px; background: var(--surface); color: var(--muted);
+  font: inherit; font-size: 13px; font-variant-numeric: tabular-nums; cursor: pointer;
+}
+.sync-chip[hidden] { display: none; }
+.topbar .sync-chip svg { width: 16px; height: 16px; }
+.sync-chip.idle { color: var(--ok-fg); }
+.sync-chip.error, .sync-chip.key { color: var(--bad-fg); border-color: var(--bad-fg); }
+.today-card { display: grid; gap: 12px; padding: 16px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.tc-top { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; }
+.tc-date, .tc-week { display: flex; flex-direction: column; min-width: 0; }
+.tc-date span, .tc-week span { color: var(--muted); font-size: 13px; }
+.tc-date b { font-size: 22px; font-weight: 800; line-height: 1.2; }
+.tc-week { align-items: flex-end; color: var(--text); text-decoration: none; }
+.tc-week b { font-size: 22px; font-weight: 800; line-height: 1.2; font-variant-numeric: tabular-nums; }
+.tc-bar { height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
+.tc-bar span { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
+.tc-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.tc-tag { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 12px; background: var(--surface-2); font-size: 13px; font-weight: 600; }
+.tc-tag svg { width: 15px; height: 15px; flex: none; }
+.tc-tag.streak { background: var(--min-bg); color: var(--min-fg); }
+.nb-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; padding-top: 12px; border-top: 1px solid var(--line); }
+.nb-tile { display: flex; flex-direction: column; gap: 2px; min-width: 0; padding: 10px 12px; border-radius: 12px; background: var(--surface-2); color: var(--text); text-decoration: none; }
+.nb-label, .nb-sub { color: var(--muted); font-size: 12px; }
+.nb-tile b { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.nb-sub.over { color: var(--bad-fg); }
 
 .view { padding: 0 16px; }
 .stack { display: flex; flex-direction: column; gap: 12px; }
@@ -150,6 +181,13 @@ a { color: var(--accent); }
   padding: 14px;
 }
 .card h2 { margin: 0 0 10px; font-size: 15px; font-weight: 800; }
+
+/* налаштування групами, як у Стрілецькому журналі: рамка з назвою на лінії, всередині — розділи через лінію */
+.settings-group { min-width: 0; margin: 22px 0 14px; padding: 2px 16px 4px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.settings-group > legend { padding: 0 8px; margin-left: -6px; border-radius: 6px; background: var(--surface); color: var(--accent); font-size: 13px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.settings-group > .card { padding: 14px 0; border: 0; border-radius: 0; background: none; }
+/* лінія між розділами — від кольору тексту: у темній темі var(--line) майже зливався з тлом */
+.settings-group > .card + .card { border-top: 1px solid color-mix(in srgb, var(--text) 20%, transparent); }
 
 .view-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; }
 .week-pill { display: flex; flex-direction: column; align-items: flex-end; text-decoration: none; color: var(--text); }
@@ -321,6 +359,7 @@ button.link-btn { padding: 0; border: 0; background: none; color: var(--accent);
 .act-head .tile { width: 40px; height: 40px; border-radius: 11px; }
 .act-head .act-name { min-width: 0; overflow-wrap: anywhere; line-height: 1.2; }
 .act-box .act-head { padding-right: 84px; }
+.act-box.has-list .act-head { padding-right: 126px; }
 .act-tidy .act-sub { font-size: 13px; }
 .act-tidy .goal-line { margin-top: 0; }
 .act-tidy .goal-line .segs { flex: 1; }
@@ -825,3 +864,14 @@ input[type="text"], input[type="search"], input[type="number"], input[type="time
   background: color-mix(in srgb, var(--accent) 16%, var(--surface-2)); color: var(--accent);
   font-size: 12px; font-weight: 800; font-variant-numeric: tabular-nums;
 }
+
+/* список заняття */
+.watch { display: flex; flex-direction: column; gap: 8px; }
+.watch-add { display: flex; gap: 8px; align-items: center; }
+.watch-add input { flex: 1; min-width: 0; }
+.watch-head { margin-top: 6px; }
+.watch-row { min-height: 40px; }
+.watch-row .remind-text { font-weight: 500; }
+.watch-del { flex: none; color: var(--text-2); }
+.watch-del .ico svg { width: 18px; height: 18px; }
+.watch-seen { display: flex; flex-direction: column; gap: 8px; padding-top: 8px; }
