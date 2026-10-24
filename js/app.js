@@ -2509,9 +2509,9 @@ function confirmRestore(data) {
   });
 }
 
-/** Тихі години: бот нічого не пише, що настало — прийде після них. */
+/** Тихі години: бот нічого не пише, що настало — прийде після них. Тут же — час вечірнього підсумку. */
 function quietBlock() {
-  const q = { on: false, from: '23:00', to: '07:00', ...state.meta.find((m) => m.id === 'quiet'), id: 'quiet' };
+  const q = { on: false, from: '23:00', to: '07:00', evening: '21:00', ...state.meta.find((m) => m.id === 'quiet'), id: 'quiet' };
   const store = () => save({ meta: { put: [{ ...q }] } }, { render: false });
   const times = h('div', { class: 'date-pair' },
     h('label', {}, 'з', timeField({ value: q.from, label: 'Тихі години з', onChange: (v) => { q.from = v; store(); } })),
@@ -2521,7 +2521,10 @@ function quietBlock() {
     h('span', { class: 'flabel' }, 'Тихі години'),
     chips([['off', 'Вимкнено'], ['on', 'Увімкнено']], q.on ? 'on' : 'off', (v) => { q.on = v === 'on'; times.hidden = !q.on; store(); }),
     times,
-    h('p', { class: 'muted small' }, 'У цей час бот мовчить — і про вікна, і «Не забудь», і вагу. Що настало, прийде одним повідомленням після них.'));
+    h('p', { class: 'muted small' }, 'У цей час бот мовчить — і про вікна, і «Не забудь», і вагу. Що настало, прийде одним повідомленням після них.'),
+    h('span', { class: 'flabel' }, 'Вечірній підсумок'),
+    h('label', {}, 'о', timeField({ value: q.evening || '21:00', label: 'Вечірній підсумок о', onChange: (v) => { q.evening = v; store(); } })),
+    h('p', { class: 'muted small' }, 'Одне повідомлення за день: справи, вага, гроші з Марнотрату й план на завтра. Потрапляє в тихі години — прийде за хвилину до них.'));
 }
 
 function botSection() {
