@@ -7,6 +7,8 @@ const KEYS = {
   since: 'hobby-planner:sync-since',
   pushed: 'hobby-planner:sync-pushed',
   last: 'hobby-planner:sync-last',
+  at: 'hobby-planner:bot-at',
+  declined: 'hobby-planner:bot-declined',
 };
 
 function get(k) {
@@ -23,14 +25,38 @@ export function botConfig() {
   return { url: get(KEYS.url) ?? '', key: get(KEYS.key) ?? '' };
 }
 
-/** Нова адреса чи ключ — синхронізація з нуля: усе, що є, їде в бот ще раз. */
-export function setBotConfig(url, key) {
+/**
+ * Нова адреса чи ключ — синхронізація з нуля: усе, що є, їде в бот ще раз.
+ * at — коли налаштування змінено (своє — зараз, з Диска — час того запису); за ним спільний файл вирішує, хто новіший.
+ */
+export function setBotConfig(url, key, at = Date.now()) {
+  const on = Boolean(url?.trim() && key?.trim());
   set(KEYS.url, url ? url.trim().replace(/\/+$/, '') : null);
   set(KEYS.key, key ? key.trim() : null);
   set(KEYS.since, null);
   set(KEYS.pushed, null);
   set(KEYS.last, null);
+  set(KEYS.at, on ? at : null);
+  if (on) set(KEYS.declined, null);
 }
+
+/** Від'єднати бота тут: запис з Диска, старіший за цю мить, його назад не підключає. */
+export function declineBot() {
+  setBotConfig(null, null);
+  set(KEYS.declined, Date.now());
+}
+
+/** Те саме налаштування прийшло з Диска з іншим часом — лише час, без синхронізації з нуля. */
+export const setBotAt = (at) => set(KEYS.at, at);
+
+/** Для спільного файлу bot-settings.json на Диску: { url, key, updated } або null — бот не підключений. */
+export function sharedConfig() {
+  const { url, key } = botConfig();
+  return url && key ? { url, key, updated: Number(get(KEYS.at) || 0) } : null;
+}
+
+/** Коли бота від'єднано на цьому пристрої (0 — не від'єднували). */
+export const declinedAt = () => Number(get(KEYS.declined) || 0);
 
 export const lastSync = () => Number(get(KEYS.last) || 0);
 

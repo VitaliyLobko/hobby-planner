@@ -2,6 +2,7 @@
 // Не залежить від бота: якщо з ним щось станеться, дані лишаються на Диску власника.
 // Вхід — Google Identity Services, OAuth-клієнт той самий, що в shooting-log: origin спільний (vitaliylobko.github.io).
 // Ключ Диска діє годину й у фоні не продовжується — тож оновлюємо його з натискання, яке людина й так робить.
+import { sharedConfig, declinedAt, setBotAt } from './sync.js';
 
 const CLIENT_ID = '252063766250-9hhqp9hdefccgp508bv983usv5h17lsf.apps.googleusercontent.com';
 const SCOPE = 'https://www.googleapis.com/auth/drive.file';
@@ -171,6 +172,75 @@ export async function backupNow(getData) {
   } finally {
     running = false;
   }
+  // Налаштування бота — не копія: збій тут копію не валить
+  try {
+    await syncBotFile();
+  } catch (err) {
+    if (err instanceof AuthError) throw err;
+  }
+}
+
+// ---------- спільні налаштування бота ----------
+
+// Адреса й ключ Telegram-бота для всіх застосунків автора (Хобі-план, Вага, Марнотрат): OAuth-клієнт один,
+// тож drive.file показує цей файл кожному з них. Перемагає новіший запис (поле updated).
+const BOT_FILE = 'bot-settings.json';
+const botStamp = (x) => Number(x?.updated) || 0;
+
+/**
+ * Звірити адресу й ключ бота з bot-settings.json — лише коли ключ Google ще живий, без вікна входу.
+ * Свій новіший чи файлу нема — на Диск. Новіший з Диска сам не підключається: подія 'bot-config' з { url, key, updated }
+ * віддає його застосунку, а той спершу дивиться, що вже є в боті (як і при підключенні руками).
+ */
+let botSyncing = null;
+
+export function syncBotFile() {
+  if (!driveOn() || !tokenValid() || !navigator.onLine) return Promise.resolve();
+  // Старт і тижнева копія можуть збігтися — один обмін на двох, інакше на Диску з'явилось би два файли
+  botSyncing ??= botFileRound().finally(() => { botSyncing = null; });
+  return botSyncing;
+}
+
+async function botFileRound() {
+  let fileId = conf.botFileId;
+  if (fileId) {
+    try {
+      const meta = await (await api(`${DRIVE}/files/${fileId}?fields=id,trashed`)).json();
+      if (meta.trashed) fileId = null;
+    } catch (err) {
+      if (err instanceof AuthError) throw err;
+      fileId = null;
+    }
+  }
+  if (!fileId) {
+    const q = encodeURIComponent(`name='${BOT_FILE}' and trashed=false`);
+    const { files } = await (await api(`${DRIVE}/files?q=${q}&spaces=drive&orderBy=modifiedTime desc&fields=files(id)`)).json();
+    fileId = files?.[0]?.id ?? null;
+  }
+  const remote = fileId ? await (await api(`${DRIVE}/files/${fileId}?alt=media`)).json() : null;
+  const mine = sharedConfig();
+  const theirs = remote?.url && remote?.key ? { url: remote.url, key: remote.key, updated: botStamp(remote) } : null;
+  if (theirs && theirs.updated > declinedAt() && (!mine || theirs.updated > mine.updated)) {
+    if (mine && mine.url === theirs.url.trim().replace(/\/+$/, '') && mine.key === theirs.key.trim()) setBotAt(theirs.updated);
+    else window.dispatchEvent(new CustomEvent('bot-config', { detail: theirs }));
+  } else if (mine && (!theirs || mine.updated > theirs.updated)) {
+    const content = JSON.stringify({ app: 'bot-settings', format: 1, url: mine.url, key: mine.key, updated: mine.updated || Date.now() });
+    if (fileId) {
+      await api(`${UPLOAD}/files/${fileId}?uploadType=media`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: content });
+    } else {
+      const boundary = `bs${Date.now()}`;
+      const body = [
+        `--${boundary}`, 'Content-Type: application/json; charset=UTF-8', '',
+        JSON.stringify({ name: BOT_FILE, mimeType: 'application/json', description: 'Telegram-бот: адреса й ключ для застосунків' }),
+        `--${boundary}`, 'Content-Type: application/json', '', content, `--${boundary}--`,
+      ].join('\r\n');
+      fileId = (await (await api(`${UPLOAD}/files?uploadType=multipart&fields=id`, {
+        method: 'POST', headers: { 'Content-Type': `multipart/related; boundary=${boundary}` }, body,
+      })).json()).id;
+    }
+  }
+  conf.botFileId = fileId;
+  save();
 }
 
 /** Зберегти з натискання: ключ мертвий — спершу оновити (вікно Google мелькне). */

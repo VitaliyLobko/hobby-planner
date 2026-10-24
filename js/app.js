@@ -2,7 +2,7 @@
 import { loadAll, write, uid, replaceAll } from './db.js';
 import * as M from './model.js';
 import { $, h, icon, toast, sheet, closeSheet, chips, swipeable, swipeStep, fold, timeField, vibrate } from './ui.js';
-import { initSync, syncNow, scheduleSync, botConfig, setBotConfig, lastSync, holdSync, fetchRestore, markRestored } from './sync.js';
+import { initSync, syncNow, scheduleSync, botConfig, setBotConfig, declineBot, sharedConfig, lastSync, holdSync, fetchRestore, markRestored } from './sync.js';
 import * as Drive from './drive.js';
 import { CHANGES, changesSince } from './changes.js';
 
@@ -2597,7 +2597,51 @@ async function connectSync(status) {
   const res = await syncNow();
   status.textContent = syncStatusText(res);
   toast(res.ok ? 'Бот підключено' : res.error);
+  // Бот працює — адреса й ключ у спільний bot-settings.json (якщо ключ Google ще живий; ні — з наступною копією)
+  if (res.ok) Drive.syncBotFile().catch(() => {});
 }
+
+/**
+ * Підключити бота: спершу дивимось, що вже є в боті — на новому телефоні перший обмін інакше затер би там заняття.
+ * at — час налаштування (з Диска — час того запису). fromDrive — збій зв'язку повертає, як було, а не лишає бота наполовину.
+ */
+async function connectBot(url, key, status, { at, fromDrive = false } = {}) {
+  const prev = botConfig();
+  const prevAt = sharedConfig()?.updated;
+  holdSync(true);
+  setBotConfig(url, key, at);
+  status.textContent = 'Перевіряю бота…';
+  let data;
+  try {
+    data = await fetchRestore();
+  } catch (err) {
+    if (fromDrive) setBotConfig(prev.url || null, prev.key || null, prevAt);
+    holdSync(false);
+    status.textContent = fromDrive ? '' : err.message;
+    if (!fromDrive) toast(err.message);
+    return;
+  }
+  if (data.activities?.length || data.items?.length) {
+    status.textContent = '';
+    chooseBotData(data);
+    return;
+  }
+  holdSync(false);
+  await connectSync(status);
+}
+
+// Новіші адреса й ключ з Google Диска (спільний bot-settings.json) — той самий шлях, що й «Зберегти й синхронізувати»
+let adoptingBot = false;
+window.addEventListener('bot-config', async ({ detail }) => {
+  if (adoptingBot) return;
+  adoptingBot = true;
+  try {
+    toast('Бот з Google Диска — підключаю');
+    await connectBot(detail.url, detail.key, $('sync-status') ?? h('p'), { at: detail.updated, fromDrive: true });
+  } finally {
+    adoptingBot = false;
+  }
+});
 
 const restoreCounts = (data) => `Занять: ${data.activities?.length ?? 0}, справ у плані: ${data.items?.length ?? 0}, нагадувань: ${data.reminders?.length ?? 0}.`;
 
@@ -2635,7 +2679,7 @@ function chooseBotData(data) {
       })))), {
     onClose: () => {
       if (chosen) return;
-      setBotConfig(null, null);
+      declineBot();
       holdSync(false);
       toast('Бота не підключено — дані не чіпали');
       runRepeats().then(render);
@@ -2693,26 +2737,7 @@ function botSection() {
     h('div', { class: 'btn-grid' },
       button('check', 'Зберегти й синхронізувати', 'primary', async () => {
         if (!url.value.trim().startsWith('https://') || !key.value.trim()) { toast('Потрібні адреса (https://…) і ключ'); return; }
-        // Спершу дивимось, що вже є в боті: на новому телефоні перший обмін інакше затер би там заняття
-        holdSync(true);
-        setBotConfig(url.value, key.value);
-        status.textContent = 'Перевіряю бота…';
-        let data;
-        try {
-          data = await fetchRestore();
-        } catch (err) {
-          holdSync(false);
-          status.textContent = err.message;
-          toast(err.message);
-          return;
-        }
-        if (data.activities?.length || data.items?.length) {
-          status.textContent = '';
-          chooseBotData(data);
-          return;
-        }
-        holdSync(false);
-        await connectSync(status);
+        await connectBot(url.value, key.value, status);
       }),
       cfg.key ? button('refresh', 'Відновити з бота', '', async () => {
         try {
@@ -2722,7 +2747,7 @@ function botSection() {
         }
       }) : null,
       cfg.key ? button('skip', 'Від’єднати бота', '', () => {
-        setBotConfig(null, null);
+        declineBot();
         toast('Бота від’єднано: нагадування для нових справ не прийдуть');
         runRepeats().then(render);
       }) : null),
@@ -3100,7 +3125,8 @@ async function init() {
     timerGoals();
   }, 1000);
   await runRepeats();
-  if (Drive.driveOn()) { Drive.preload(); driveTick(); }
+  // Ключ Google ще живий (вхід менш ніж годину тому) — звірити бота зі спільним bot-settings.json
+  if (Drive.driveOn()) { Drive.preload(); driveTick(); Drive.syncBotFile().catch(() => {}); }
   route();
   // З ярлика «Є кілька хвилин?» — одразу до справи, «Що нового» покажемо наступного запуску
   if (!new URLSearchParams(location.search).has('quick')) showWhatsNew();
