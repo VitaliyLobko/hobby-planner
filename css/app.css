@@ -328,6 +328,7 @@ button.link-btn { padding: 0; border: 0; background: none; color: var(--accent);
 .act-head .tile { width: 40px; height: 40px; border-radius: 11px; }
 .act-head .act-name { min-width: 0; overflow-wrap: anywhere; line-height: 1.2; }
 .act-box .act-head { padding-right: 84px; }
+.act-box.has-list .act-head { padding-right: 126px; }
 .act-tidy .act-sub { font-size: 13px; }
 .act-tidy .goal-line { margin-top: 0; }
 .act-tidy .goal-line .segs { flex: 1; }
@@ -832,3 +833,14 @@ input[type="text"], input[type="search"], input[type="number"], input[type="time
   background: color-mix(in srgb, var(--accent) 16%, var(--surface-2)); color: var(--accent);
   font-size: 12px; font-weight: 800; font-variant-numeric: tabular-nums;
 }
+
+/* список заняття */
+.watch { display: flex; flex-direction: column; gap: 8px; }
+.watch-add { display: flex; gap: 8px; align-items: center; }
+.watch-add input { flex: 1; min-width: 0; }
+.watch-head { margin-top: 6px; }
+.watch-row { min-height: 40px; }
+.watch-row .remind-text { font-weight: 500; }
+.watch-del { flex: none; color: var(--text-2); }
+.watch-del .ico svg { width: 18px; height: 18px; }
+.watch-seen { display: flex; flex-direction: column; gap: 8px; padding-top: 8px; }

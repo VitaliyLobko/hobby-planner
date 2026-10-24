@@ -393,6 +393,7 @@ function itemSheet(item) {
         window.addEventListener('popstate', () => setTimeout(() => moveSheet(item)), { once: true });
         closeSheet();
       }) : null,
+      a.watchList ? button('list', item.topic ? 'Інше зі списку' : 'Обрати зі списку', '', () => openWatchFrom(a, item)) : null,
       button('skip', 'Пропустити', 'danger', () => { closeSheet(); mark(item, 'skipped'); }),
       // Поставив помилково — прибрати зовсім: не пропуск і не рахується; «Скасувати» в тості поверне
       button('trash', 'Прибрати з плану', 'ghost', () => { closeSheet(); unplan(current()); })));
@@ -415,6 +416,142 @@ function itemSheet(item) {
     box.append(h('div', { class: 'btn-grid' }, button('undo', 'Повернути в план', '', () => { closeSheet(); mark(current(), 'planned'); })));
   }
   sheet(`${a.name} · ${slot?.label ?? ''}`, box);
+}
+
+// ---------- список заняття: фільми, книги, ігри — додав, переглянув, «порадь» ----------
+
+// Скільки назв пропонує «Порадь» за раз
+const PICK_COUNT = 7;
+const titleKey = (t) => t.toLocaleLowerCase('uk').replace(/\s+/g, ' ').trim();
+
+/** Змінити список заняття: fn отримує копію поточного й повертає новий. Заняття береться свіже — його могла змінити синхронізація. */
+async function saveWatch(id, fn) {
+  const cur = act(id);
+  if (cur) await save({ activities: { put: [{ ...cur, watch: fn([...(cur.watch ?? [])]) }] } });
+}
+
+/** Назви з поля — по рядку: вставив список стовпчиком — додались усі; маркери «-», «1.» зрізаються, повтори пропускаються. */
+function parseTitles(text, have) {
+  const seen = new Set(have.map((w) => titleKey(w.title)));
+  const out = [];
+  for (const line of text.split(/\r?\n/)) {
+    const title = line.replace(/^\s*(?:[-•*·]|\d+[.)])\s*/, '').trim().slice(0, 120);
+    if (!title || seen.has(titleKey(title))) continue;
+    seen.add(titleKey(title));
+    out.push({ id: uid(), title, done: '', added: M.ymd() });
+  }
+  return out;
+}
+
+/** n випадкових без повторів (Фішер — Єйтс). */
+function sample(list, n) {
+  const a = [...list];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a.slice(0, n);
+}
+
+/**
+ * Список заняття. item — запис плану, з якого відкрили: «Обрати» пише назву в його «Що саме?».
+ * Відкрили з картки заняття — «Обрати» йде в сьогоднішній ще не зроблений запис, якщо такий є.
+ */
+function watchSheet(a, item = null) {
+  const id = a.id;
+  const today = M.ymd();
+  const target = () => (item ? state.plan.find((p) => p.id === item.id && p.status === 'planned') : null)
+    ?? state.plan.find((p) => p.activityId === id && p.date === today && p.status === 'planned');
+  let picks = null;
+  let seenOpen = false;
+  const body = h('div', { class: 'sheet-body watch' });
+  const add = async (text) => {
+    const fresh = parseTitles(text, act(id)?.watch ?? []);
+    input.value = '';
+    if (!fresh.length) { if (text.trim()) toast('Це вже є в списку'); return; }
+    await saveWatch(id, (w) => [...w, ...fresh]);
+    paint();
+    if (fresh.length > 1) toast(`Додано ${fresh.length} ${plural(fresh.length, 'назву', 'назви', 'назв')}`);
+    input.focus();
+  };
+  const input = h('input', {
+    type: 'text', maxlength: 120, enterkeyhint: 'done', 'aria-label': `Додати до списку «${a.name}»`,
+    placeholder: 'Назва — або встав список стовпчиком',
+    onKeydown: (e) => { if (e.key === 'Enter') { e.preventDefault(); add(input.value); } },
+    // Поле в один рядок з'їло б переноси — багаторядкову вставку розбираємо самі
+    onPaste: (e) => {
+      const text = e.clipboardData?.getData('text') ?? '';
+      if (/\n/.test(text.trim())) { e.preventDefault(); add(text); }
+    },
+  });
+  const toggle = async (w) => {
+    await saveWatch(id, (list) => list.map((x) => (x.id === w.id ? { ...x, done: x.done ? '' : today } : x)));
+    paint();
+    if (!w.done) {
+      vibrate(15);
+      toast(`Переглянуто: ${w.title}`, { label: 'Скасувати', run: async () => { await saveWatch(id, (list) => list.map((x) => (x.id === w.id ? { ...x, done: '' } : x))); paint(); } });
+    }
+  };
+  const remove = async (w) => {
+    const at = (act(id)?.watch ?? []).findIndex((x) => x.id === w.id);
+    await saveWatch(id, (list) => list.filter((x) => x.id !== w.id));
+    paint();
+    toast(`Видалено: ${w.title}`, {
+      label: 'Скасувати',
+      run: async () => {
+        await saveWatch(id, (list) => (list.some((x) => x.id === w.id) ? list : [...list.slice(0, at), w, ...list.slice(at)]));
+        paint();
+      },
+    });
+  };
+  const choose = async (w) => {
+    const cur = target();
+    if (!cur) { toast('Сьогодні цього заняття немає в плані'); return; }
+    closeSheet();
+    await save({ plan: { put: [{ ...cur, topic: w.title.slice(0, 80) }] } });
+    toast(`${a.name}: ${w.title}`);
+  };
+  const roll = () => {
+    picks = sample((act(id)?.watch ?? []).filter((w) => !w.done), PICK_COUNT).map((w) => w.id);
+    vibrate(10);
+    paint();
+  };
+  const row = (w, pick = false) => h('div', { class: `remind-row watch-row${w.done ? ' done' : ''}` },
+    h('button', {
+      type: 'button', class: 'remind-check', 'aria-pressed': String(Boolean(w.done)),
+      'aria-label': w.done ? `Ще не переглянуто: ${w.title}` : `Переглянуто: ${w.title}`, onClick: () => toggle(w),
+    }, w.done ? icon('check') : null),
+    h('span', { class: 'remind-text' }, h('span', {}, w.title),
+      w.done ? h('span', { class: 'muted small' }, `переглянуто ${M.dayMonth(w.done)}`) : null),
+    pick && !w.done && target() ? h('button', {
+      type: 'button', class: 'remind-later', 'aria-label': `Обрати на сьогодні: ${w.title}`, onClick: () => choose(w),
+    }, icon('next'), 'Обрати') : null,
+    pick ? null : h('button', { type: 'button', class: 'icon-btn watch-del', 'aria-label': `Видалити: ${w.title}`, onClick: () => remove(w) }, icon('trash')));
+  const paint = () => {
+    const list = act(id)?.watch ?? [];
+    const left = list.filter((w) => !w.done);
+    const seen = list.filter((w) => w.done).sort((x, y) => y.done.localeCompare(x.done));
+    const shown = (picks ?? []).map((pid) => list.find((w) => w.id === pid)).filter(Boolean);
+    body.replaceChildren(...[
+      h('div', { class: 'watch-add' }, input,
+        h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Додати', onClick: () => add(input.value) }, icon('plus'))),
+      left.length ? h('div', { class: 'btn-grid' },
+        button('dice', picks ? 'Ще раз' : `Порадь ${Math.min(PICK_COUNT, left.length)}`, 'primary', roll)) : null,
+      shown.length ? formBox(left.length > PICK_COUNT ? 'Навмання зі списку' : 'Усе, що лишилось', ...shown.map((w) => row(w, true))) : null,
+      h('h3', { class: 'form-box-title watch-head' }, left.length ? `Ще не переглянуто · ${left.length}` : 'Ще не переглянуто'),
+      left.length ? left.map((w) => row(w)) : h('p', { class: 'muted small' }, list.length ? 'Усе переглянуто 🎉 Додай нове.' : 'Список порожній — додай першу назву.'),
+      seen.length ? fold(h('span', { class: 'flabel' }, `Переглянуто · ${seen.length}`),
+        h('div', { class: 'watch-seen' }, seen.map((w) => row(w))), { open: seenOpen, onToggle: (o) => { seenOpen = o; } }) : null,
+    ].flat().filter(Boolean));
+  };
+  paint();
+  sheet(`${a.name} · список`, body);
+}
+
+/** Відкрити список з іншої шторки — уже після history.back() її, інакше він закрив би нову. */
+function openWatchFrom(a, item) {
+  window.addEventListener('popstate', () => setTimeout(() => watchSheet(a, item)), { once: true });
+  closeSheet();
 }
 
 function moveSheet(item) {
@@ -1937,6 +2074,9 @@ function editActivity(orig) {
         weekChips(rep.days, pickRepDays),
         repWins,
         h('p', { class: 'muted small' }, "У ці дні справа сама з'являється в плані на тиждень уперед — у кожному обраному вікні (усі три — тричі на день). Прибрав чи переніс якусь — назад не повернеться. Без днів — розкладу немає."))),
+    formBox('Список',
+      chips([['off', 'Немає'], ['on', 'Вести список']], d.watchList ? 'on' : 'off', (v) => { d.watchList = v === 'on'; }),
+      h('p', { class: 'muted small' }, 'Фільми, книги, ігри — що хочеш спробувати. Відкривається значком на картці заняття; «Порадь 7» вибере навмання з не переглянутого. Вимкнеш — назви не зникнуть.')),
     h('div', { class: 'btn-grid' },
       button('check', 'Зберегти', 'primary', async () => {
         d.name = name.value.trim();
@@ -1944,6 +2084,8 @@ function editActivity(orig) {
         d.minutes = Math.max(0, Math.round(Number(minutes.value) || 0));
         d.minVersion = minVersion.value.trim();
         d.repeat = repeatFrom(orig?.repeat, rep);
+        // Список міг змінитись, поки відкритий редактор (синхронізація) — його не затираємо
+        if (orig) d.watch = act(orig.id)?.watch ?? d.watch;
         if (rep.days.length && !rep.slots.length) toast('Розклад без вікон не діє — обери хоч одне вікно');
         closeSheet();
         if (fresh.g && d.group === fresh.g.id) await saveGroups([...actGroups(), fresh.g]);
@@ -2180,7 +2322,13 @@ function actRow(a, heat, drag = true) {
       moveAmong(wrap, siblingRows(wrap).indexOf(wrap) + dir);
     },
   }, icon('grip')) : null;
-  box.append(h('div', { class: 'act-side' }, toggle, grip));
+  const list = a.watchList ? h('button', {
+    type: 'button', class: 'heat-toggle watch-open',
+    'aria-label': `Список «${a.name}»: ${(a.watch ?? []).filter((w) => !w.done).length} не переглянуто`,
+    onClick: () => watchSheet(act(a.id) ?? a),
+  }, icon('list')) : null;
+  if (list) box.classList.add('has-list');
+  box.append(h('div', { class: 'act-side' }, list, toggle, grip));
   if (panel) wrap.append(panel);
   return wrap;
 }
