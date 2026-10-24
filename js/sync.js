@@ -1,5 +1,7 @@
 // Синхронізація з Telegram-ботом (Cloudflare Worker): план їде в бот, відмітки з бота — назад.
 // Без адреси й ключа нічого не робить: застосунок працює і без бота.
+// Адреса й ключ — спільні з Вагою й Марнотратом (bot-key.js): вставлені там підхоплюються тут, і навпаки.
+import * as BK from './bot-key.js';
 
 const KEYS = {
   url: 'hobby-planner:bot-url',
@@ -38,9 +40,41 @@ export function setBotConfig(url, key, at = Date.now()) {
   set(KEYS.pushed, null);
   set(KEYS.last, null);
   set(KEYS.at, on ? at : null);
-  if (on) set(KEYS.declined, null);
-  else set(KEYS.choosing, null);
+  if (on) {
+    set(KEYS.declined, null);
+    BK.publish(url, key, at);
+  } else set(KEYS.choosing, null);
 }
+
+/** Новий ключ до того самого бота — та сама база: лише ключ, без синхронізації з нуля й без вибору даних. */
+function setBotKey(key, at) {
+  set(KEYS.key, key);
+  set(KEYS.at, at);
+}
+
+/**
+ * Звірити з ключем, спільним для застосунків (вставили у Вазі чи Марнотраті, прийшов з Диска, а свій бот відкинув).
+ * Той самий бот — просто новий ключ; інший бот — подія 'bot-config' (підключення з вибором даних, як з Диска).
+ * true — щось змінилось.
+ */
+export function adoptShared() {
+  const cand = BK.current(declinedAt());
+  const own = botConfig();
+  if (!cand || (cand.url === own.url && cand.key === own.key)) return false;
+  if (own.url && cand.url === own.url) setBotKey(cand.key, cand.updated);
+  else window.dispatchEvent(new CustomEvent('bot-config', { detail: cand }));
+  return true;
+}
+
+/** Новий ключ до того самого бота, вставлений тут руками, — і для решти застосунків на пристрої. */
+export function changeKey(key) {
+  const at = Date.now();
+  setBotKey(key.trim(), at);
+  BK.publish(botConfig().url, key, at);
+}
+
+/** Бот відкинув усі ключі, що є на пристрої: показати «встав новий ключ». */
+export const keyProblem = () => BK.keyProblem(declinedAt());
 
 /** Від'єднати бота тут: запис з Диска, старіший за цю мить, його назад не підключає. */
 export function declineBot() {
@@ -118,7 +152,7 @@ async function call(path, body, keepalive = false) {
     headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
     body: JSON.stringify(body),
   });
-  if (res.status === 401) throw new Error('Ключ не підходить — візьми новий у бота командою /key');
+  if (res.status === 401) throw Object.assign(new Error('Ключ доступу не підходить — візьми новий командою /key у Telegram-боті'), { status: 401 });
   if (!res.ok) throw new Error(`Бот відповів помилкою ${res.status}`);
   return res.json();
 }
@@ -128,7 +162,9 @@ export async function fetchRestore() {
   try {
     return await call('/api/restore', {});
   } catch (err) {
-    throw err instanceof TypeError ? new Error('Немає зв’язку з ботом') : err;
+    // Підключали з чужим ключем — більше його не підхоплюємо (інакше підключення повторювалось би щоразу)
+    if (err.status === 401) BK.markBad(botConfig());
+    throw err instanceof TypeError ? new Error('Немає зв’язку з сервером синхронізації') : err;
   }
 }
 
@@ -222,9 +258,16 @@ export async function syncNow({ keepalive = false, onlyPending = false } = {}) {
     set(KEYS.pushed, startedAt);
     set(KEYS.since, data.now);
     set(KEYS.last, Date.now());
+    BK.markOk({ url, key });
     result = { ok: true };
   } catch (err) {
-    result = { ok: false, error: err instanceof TypeError ? 'Немає зв’язку з ботом' : err.message };
+    result = { ok: false, error: err instanceof TypeError ? 'Немає зв’язку з сервером синхронізації' : err.message };
+    if (err.status === 401) {
+      BK.markBad({ url, key });
+      result.keyBad = true;
+      // Є інший ключ, якого бот ще не відкидав (Вага, Марнотрат, Диск) — одразу з ним
+      if (adoptShared()) again = true;
+    }
   } finally {
     running = false;
   }

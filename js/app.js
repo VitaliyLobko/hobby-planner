@@ -2,7 +2,7 @@
 import { loadAll, write, uid, replaceAll } from './db.js';
 import * as M from './model.js';
 import { $, h, icon, toast, sheet, closeSheet, chips, swipeable, swipeStep, fold, timeField, vibrate } from './ui.js';
-import { initSync, syncNow, scheduleSync, botConfig, setBotConfig, declineBot, sharedConfig, lastSync, holdSync, holdChoice, choosingBot, fetchRestore, markRestored } from './sync.js';
+import { initSync, syncNow, scheduleSync, botConfig, setBotConfig, declineBot, sharedConfig, lastSync, holdSync, holdChoice, choosingBot, fetchRestore, markRestored, adoptShared, keyProblem, changeKey } from './sync.js';
 import * as Drive from './drive.js';
 import { CHANGES, changesSince } from './changes.js';
 
@@ -665,6 +665,16 @@ async function endPause(p) {
   toast('Паузу завершено — з поверненням!');
 }
 
+/** Бот відкидає ключ — на головній, а не лише в налаштуваннях: інакше відмітки тихо не їдуть на інші пристрої. */
+function keyBanner() {
+  if (!keyProblem()) return null;
+  return h('section', { class: 'card pause-card key-card' },
+    h('div', {},
+      h('b', {}, 'Ключ доступу не підходить'),
+      h('p', { class: 'small' }, 'Відмітки не йдуть на інші пристрої. Візьми новий ключ командою /key у Telegram-боті й встав у будь-якому застосунку — тут, у Вазі чи Марнотраті: решта на цьому пристрої візьмуть його самі, інші — з Google Диска.')),
+    button('check', 'Вставити ключ', '', () => { folds.set('set-bot', true); location.hash = '#settings'; }));
+}
+
 function pauseBanner(today) {
   const p = M.pauseOn(today, pauses());
   if (!p) return null;
@@ -970,6 +980,7 @@ function viewToday() {
         streak >= MIN_STREAK ? h('div', { class: 'day-left streak' }, icon('flame'), `${streak} ${plural(streak, 'день', 'дні', 'днів')} поспіль`) : null),
       h('a', { class: 'week-pill', href: '#week', 'aria-label': `Тиждень: ${done} з ${target}` },
         h('span', { class: 'muted small' }, 'Тиждень'), h('b', {}, `${done} / ${target}`))),
+    keyBanner(),
     pauseBanner(today),
     remindersToday(today, now),
     button('clock', 'Є кілька хвилин?', 'quick-btn', quickSheet),
@@ -2590,6 +2601,7 @@ const BOT_WORKER = 'https://hobby-bot.hobbyplanner338.workers.dev';
 
 function syncStatusText(res) {
   if (res && !res.ok && res.error) return res.error;
+  if (keyProblem()) return 'Ключ доступу не підходить — візьми новий командою /key у Telegram-боті';
   const at = lastSync();
   if (!at) return 'Ще не синхронізовано';
   const d = new Date(at);
@@ -2615,10 +2627,14 @@ async function connectBot(url, key, status, { at, fromDrive = false } = {}) {
   holdSync(true);
   setBotConfig(url, key, at);
   holdChoice(true);
-  status.textContent = 'Перевіряю бота…';
+  status.textContent = 'Перевіряю сервер…';
   await askBotData(status, () => {
-    // Бот з Диска не відповів — як було; підключений руками лишається чекати вибору (обмін стоїть до нього)
-    if (fromDrive) setBotConfig(prev.url || null, prev.key || null, prevAt);
+    // Бот з Диска не відповів — як було, і вибору вже не чекаємо (інакше обмін зі старим ботом стояв би назавжди);
+    // підключений руками лишається чекати вибору (обмін стоїть до нього)
+    if (fromDrive) {
+      setBotConfig(prev.url || null, prev.key || null, prevAt);
+      holdChoice(false);
+    }
     return !fromDrive;
   });
 }
@@ -2654,7 +2670,7 @@ window.addEventListener('bot-config', async ({ detail }) => {
   if (adoptingBot) return;
   adoptingBot = true;
   try {
-    toast('Бот з Google Диска — підключаю');
+    toast('Нова адреса сервера — підключаю');
     await connectBot(detail.url, detail.key, $('sync-status') ?? h('p'), { at: detail.updated, fromDrive: true });
   } finally {
     adoptingBot = false;
@@ -2677,7 +2693,7 @@ async function applyRestore(data) {
   slotsCfg = state.meta.find((m) => m.id === 'slots') ?? structuredClone(M.DEFAULT_SLOTS);
   markRestored(data.now);
   holdSync(false);
-  toast('Дані взято з бота');
+  toast('Дані взято з бази');
   render();
 }
 
@@ -2685,11 +2701,11 @@ async function applyRestore(data) {
 function chooseBotData(data) {
   let chosen = false;
   const pick = (fn) => async () => { chosen = true; holdChoice(false); closeSheet(); await fn(); };
-  sheet('У боті вже є дані', h('div', { class: 'sheet-body' },
+  sheet('У базі вже є дані', h('div', { class: 'sheet-body' },
     h('p', {}, restoreCounts(data)),
-    h('p', { class: 'muted small' }, 'Новий телефон — бери з бота. Якщо ж правильні дані тут, бот отримає їх і віддасть своє: що змінено і тут, і там, — лишиться новіше.'),
+    h('p', { class: 'muted small' }, 'Новий телефон — бери з бази. Якщо ж правильні дані тут, база отримає їх і віддасть своє: що змінено і тут, і там, — лишиться новіше.'),
     h('div', { class: 'btn-grid' },
-      button('refresh', 'Взяти з бота', 'primary', pick(() => applyRestore(data))),
+      button('refresh', 'Взяти з бази', 'primary', pick(() => applyRestore(data))),
       button('check', 'Залишити ці', '', pick(async () => {
         holdSync(false);
         await connectSync($('sync-status') ?? h('p'));
@@ -2699,19 +2715,19 @@ function chooseBotData(data) {
       if (chosen) return;
       declineBot();
       holdSync(false);
-      toast('Бота не підключено — дані не чіпали');
+      toast('Синхронізацію не ввімкнено — дані не чіпали');
       runRepeats().then(render);
     },
   });
 }
 
-/** «Відновити з бота» на вже підключеному телефоні. */
+/** «Відновити з бази» на вже підключеному телефоні. */
 function confirmRestore(data) {
   holdSync(true);
   let chosen = false;
-  sheet('Відновити з бота?', h('div', { class: 'sheet-body' },
+  sheet('Відновити з бази?', h('div', { class: 'sheet-body' },
     h('p', {}, restoreCounts(data)),
-    h('p', { class: 'muted small' }, 'Заняття, план і нагадування на цьому телефоні заміняться тими, що в боті. Зроби спершу резервну копію, якщо сумніваєшся.'),
+    h('p', { class: 'muted small' }, 'Заняття, план і нагадування на цьому телефоні заміняться тими, що в базі. Зроби спершу резервну копію, якщо сумніваєшся.'),
     h('div', { class: 'btn-grid' },
       button('refresh', 'Відновити', 'danger', async () => { chosen = true; closeSheet(); await applyRestore(data); }),
       button('undo', 'Скасувати', '', () => closeSheet()))), {
@@ -2740,35 +2756,46 @@ function quietBlock() {
 function botSection() {
   const cfg = botConfig();
   const url = h('input', { type: 'url', id: 'f-bot-url', value: cfg.url || BOT_WORKER, inputmode: 'url', autocomplete: 'off', spellcheck: 'false' });
-  const key = h('input', { type: 'password', id: 'f-bot-key', value: cfg.key, autocomplete: 'off', placeholder: 'Ключ із команди /key' });
-  const status = h('p', { class: 'muted small', id: 'sync-status', 'aria-live': 'polite' }, cfg.key ? syncStatusText() : '');
-  // Бот підключено — блок згорнутий, у заголовку видно, що він працює
-  const head = h('span', { class: 'slot-head' }, h('h2', {}, 'Telegram-бот'), cfg.key ? badge('done', 'Підключено') : null);
+  const key = h('input', { type: 'password', id: 'f-bot-key', value: cfg.key, autocomplete: 'off', placeholder: 'команда /key у Telegram-боті' });
+  const status = h('p', { class: keyProblem() ? 'small error-text' : 'muted small', id: 'sync-status', 'aria-live': 'polite' }, cfg.key || keyProblem() ? syncStatusText() : 'Не ввімкнено');
+  // Синхронізацію ввімкнено — блок згорнутий, у заголовку видно, що він працює
+  const head = h('span', { class: 'slot-head' }, h('h2', {}, 'Синхронізація'), cfg.key ? badge('done', 'Увімкнено') : null);
+  const save = async () => {
+    const u = url.value.trim().replace(/\/+$/, '');
+    if (!u.startsWith('https://') || !key.value.trim()) { toast('Потрібні адреса (https://…) і ключ'); return; }
+    // Той самий бот, новий ключ — та сама база: без вибору «чиї дані лишити»
+    if (cfg.key && u === cfg.url) {
+      changeKey(key.value);
+      await connectSync(status);
+      render();
+      return;
+    }
+    await connectBot(u, key.value, status);
+  };
   return folded('set-bot', head, h('div', { class: 'form fold-body' },
-    h('p', { class: 'muted small' },
-      'Нагадування з кнопками приходять у Telegram, відмітки звідти повертаються сюди. Напиши ',
-      h('a', { href: BOT_URL, target: '_blank', rel: 'noopener' }, '@hobby_planner_bot'),
-      ' команду /key і встав ключ нижче.'),
-    h('label', { for: 'f-bot-url' }, 'Адреса бота'), url,
-    h('label', { for: 'f-bot-key' }, 'Ключ'), key,
     status,
+    h('p', { class: 'muted small' },
+      'План, заняття й нагадування лежать у спільній базі на сервері — однакові на всіх пристроях; без інтернету все піде пізніше. Цю ж базу читає Telegram-бот: нагадує з кнопками, відмітки звідти повертаються сюди. Ключ доступу дає команда /key у ',
+      h('a', { href: BOT_URL, target: '_blank', rel: 'noopener' }, '@hobby_planner_bot'),
+      '; досить вставити в одному застосунку — тут, у Вазі чи Марнотраті.'),
+    h('label', { for: 'f-bot-url' }, 'Адреса сервера'), url,
+    h('label', { for: 'f-bot-key' }, 'Ключ доступу'), key,
     h('div', { class: 'btn-grid' },
-      button('check', 'Зберегти й синхронізувати', 'primary', async () => {
-        if (!url.value.trim().startsWith('https://') || !key.value.trim()) { toast('Потрібні адреса (https://…) і ключ'); return; }
-        await connectBot(url.value, key.value, status);
-      }),
-      cfg.key ? button('refresh', 'Відновити з бота', '', async () => {
-        try {
-          confirmRestore(await fetchRestore());
-        } catch (err) {
-          toast(err.message);
-        }
-      }) : null,
-      cfg.key ? button('skip', 'Від’єднати бота', '', () => {
+      button('check', 'Зберегти', cfg.key ? '' : 'primary', save),
+      cfg.key ? button('refresh', 'Обмінятися зараз', 'primary', async () => { await connectSync(status); render(); }) : null,
+      cfg.key ? button('skip', 'Вимкнути синхронізацію', '', () => {
         declineBot();
-        toast('Бота від’єднано: нагадування для нових справ не прийдуть');
+        toast('Синхронізацію вимкнено лише тут: нагадування для нових справ не прийдуть');
         runRepeats().then(render);
       }) : null),
+    cfg.key ? h('div', { class: 'btn-grid' }, button('undo', 'Відновити з бази', 'ghost', async () => {
+      try {
+        confirmRestore(await fetchRestore());
+      } catch (err) {
+        toast(err.message);
+      }
+    })) : null,
+    cfg.key ? h('h3', {}, 'Telegram-бот') : null,
     cfg.key ? quietBlock() : null), { def: !cfg.key, cls: 'card' });
 }
 
@@ -2781,12 +2808,13 @@ function viewSettings() {
         h('p', { class: 'muted small' }, 'Стандартні: будні — ранок 7–12, обід 12–18, вечір 18–21; вихідні — ранок 9–12, день 12–18, вечір 18–21.'),
         button('refresh', 'Стандартні вікна', 'ghost', resetSlots)),
       { def: false, persist: true, cls: 'card' })]),
-    settingsGroup('Дані', [botSection(), folded('set-backup', h('h2', {}, 'Резервна копія'), h('div', { class: 'fold-body' },
-      h('p', { class: 'muted small' }, 'Дані живуть лише в цьому браузері. Копія — файл JSON, його можна відновити на іншому пристрої.'),
+    settingsGroup('Дані', [botSection(), driveBlock(), h('section', { class: 'card' },
+      h('h2', {}, 'Копія у файл'),
+      h('p', { class: 'muted small' }, 'Файл JSON з усіма даними — про всяк випадок; його можна відновити на іншому пристрої.'),
       h('div', { class: 'btn-grid' },
         button('move', 'Зберегти копію', '', exportBackup),
         button('undo', 'Відновити з файлу', '', () => file.click())),
-      file, driveBlock()), { def: false, persist: true, cls: 'card' })]),
+      file)]),
     settingsGroup('Вигляд', [h('section', { class: 'card' }, h('h2', {}, 'Тема'),
       chips(THEMES, themePref(), (v) => { remember('theme', v); applyTheme(); }))]));
 }
@@ -2808,17 +2836,17 @@ function aboutPanel() {
         h('p', { class: 'muted small' }, 'Хобі-план — щоденний план хобі по вікнах дня (ранок, обід, вечір) і звичка не пропускати. Працює без інтернету.'))),
     more('Де мої дані', h('div', { class: 'muted small' },
       h('p', {}, 'План, заняття й нагадування лежать у браузері на цьому пристрої. Сервера в застосунку немає, автор не отримує ні даних, ні статистики.'),
-      h('p', {}, 'Telegram-бот — за бажанням: план їде на твій власний Cloudflare Worker, щоб бот нагадував, а телефон і комп’ютер бачили те саме.'),
+      h('p', {}, 'Синхронізація — за бажанням: план лягає в базу на твоєму власному Cloudflare Worker, щоб Telegram-бот нагадував, а телефон і комп’ютер бачили те саме.'),
       h('p', {}, 'Google Диск — теж за бажанням: раз на день копія лягає у твій Диск, застосунок бачить лише свої файли.'),
-      h('p', {}, 'Резервна копія — «Резервна копія» → «Зберегти копію». Нею ж переносиш дані на інший пристрій.'))),
+      h('p', {}, 'Резервна копія — «Копія у файл» → «Зберегти копію». Нею ж переносиш дані на інший пристрій.'))),
     more('З чого почати', h('ol', { class: 'about-steps' },
       h('li', {}, 'Встанови застосунок: Android — Chrome → ⋮ → «Встановити застосунок»; iPhone — Safari → «Поділитися» → «На екран „Додому“».'),
       h('li', {}, '«Заняття» — заведи свої хобі: скільки разів на тиждень, скільки хвилин, мінімальна версія.'),
       h('li', {}, '«План» — тапом розстав заняття по вікнах дня. Повторюється щотижня — постав постійний розклад у картці заняття.'),
       h('li', {}, '«Сьогодні» — свайп по справі вправо — зробив, вліво — перенести. ▶ на картці вмикає таймер.'),
       h('li', {}, 'Рівень заняття росте від зарахованих справ: повна — 10 досвіду, мінімум — 5, плюс 1 за кожні 10 хв таймера. На картці заняття — ціль тижня, рівень і вікно, де воно найкраще виходить (◎); 📅 — теплова карта за 12 тижнів.'),
-      h('li', {}, 'Нагадування в Telegram — «Telegram-бот» вище. На телефоні й комп’ютері — той самий ключ, тоді план однаковий на обох.'),
-      h('li', {}, 'Без бота й Google Диска дані лише на цьому пристрої — час від часу зберігай копію.'))),
+      h('li', {}, 'Нагадування в Telegram — Налаштування → «Дані» → «Синхронізація». На телефоні й комп’ютері — той самий ключ, тоді план однаковий на обох.'),
+      h('li', {}, 'Без синхронізації й Google Диска дані лише на цьому пристрої — час від часу зберігай копію.'))),
     more('Що й коли пише бот', h('div', { class: 'muted small' },
       h('p', {}, 'За 10 хв до першого вікна — план дня.'),
       h('p', {}, 'Почалось вікно — його справи з кнопками. За 30 хв до кінця — ще раз, якщо щось не відмічено. Поки в вікні йде таймер — мовчить.'),
@@ -2827,7 +2855,7 @@ function aboutPanel() {
       h('p', {}, 'Таймер дійшов до звичних хвилин заняття — «Зараховуємо?».'),
       h('p', {}, '«Не забудь» — на початку свого часу, щогодини й за 15 хв до кінця, поки не «Зроблено». Вага — у час зважування з «Ваги», через годину ще раз.'),
       h('p', {}, 'Тихі години — бот мовчить, що настало, прийде одним повідомленням після них. Пауза — про заняття й вагу мовчить, «Не забудь» і таймер — пише.'),
-      h('p', {}, 'Обмін із ботом — за кілька секунд після зміни, коли відкриваєш і згортаєш застосунок, і щохвилини, поки він на екрані. Одне заняття у вікні — одна справа: дубль із двох пристроїв бот прибере сам.'))),
+      h('p', {}, 'Синхронізація — за кілька секунд після зміни, коли відкриваєш і згортаєш застосунок, і щохвилини, поки він на екрані. Одне заняття у вікні — одна справа: дубль із двох пристроїв бот прибере сам.'))),
     h('p', { class: 'muted small' },
       link('https://github.com/VitaliyLobko/hobby-planner/issues/new', 'Повідомити про помилку'), ' · ',
       link('https://github.com/VitaliyLobko/hobby-planner', 'Вихідний код')));
@@ -2866,17 +2894,18 @@ function driveBlock() {
     status.textContent = driveStatusText();
     render();
   };
+  const title = h('h2', {}, 'Google Диск · щоденна копія');
   const about = h('p', { class: 'muted small' },
-    'Раз на день застосунок сам кладе копію у файл hobby-planner-backup.json на твоєму Google Диску — окремо від бота. Попередні версії файлу Google тримає до 30 днів.');
+    'Копія — файл hobby-planner-backup.json на твоєму Google Диску, окремо від бази; там же адреса сервера й ключ доступу для інших пристроїв. Попередні версії файлу Google тримає до 30 днів.');
   if (!Drive.driveOn()) {
-    return h('div', { class: 'drive-block' }, h('h3', { class: 'form-box-title' }, 'Google Диск'), about,
-      button('plus', 'Підключити Google Диск', '', run(() => Drive.connect(backupData), 'Google Диск підключено, копію збережено')));
+    return h('section', { class: 'card' }, title, about,
+      button('plus', 'Підключити Google Диск', 'primary', run(() => Drive.connect(backupData), 'Google Диск підключено, копію збережено')));
   }
-  return h('div', { class: 'drive-block' }, h('h3', { class: 'form-box-title' }, 'Google Диск'), about, status,
+  return h('section', { class: 'card' }, title, status, about,
     h('div', { class: 'btn-grid' },
-      button('check', 'Зберегти зараз', '', run(() => Drive.backupByTap(backupData), 'Копію збережено на Google Диск')),
+      button('check', 'Зберегти зараз', 'primary', run(() => Drive.backupByTap(backupData), 'Копію збережено на Google Диск')),
       button('undo', 'Відновити з Диска', '', run(async () => { restoreSheet(await Drive.fetchBackup()); return ''; })),
-      button('skip', 'Відключити Диск', 'ghost', run(() => { Drive.disconnect(); }, 'Google Диск відключено — копія на ньому лишається'))));
+      button('skip', 'Відключити', '', run(() => { Drive.disconnect(); }, 'Google Диск відключено — копія на ньому лишається'))));
 }
 
 // ---------- маршрути ----------
@@ -3116,13 +3145,24 @@ async function init() {
       await save({ plan: { put } }, { render: false, remote: true });
       scheduleSync();
     },
-    onStatus: (res) => { const el = $('sync-status'); if (el) el.textContent = syncStatusText(res); },
+    onStatus: (res) => {
+      const el = $('sync-status');
+      if (el) el.textContent = syncStatusText(res);
+      // Ключ відкинуто чи знову прийнято — плашка на головній
+      if (res.keyBad || (res.ok && document.querySelector('.key-card'))) render();
+    },
   });
   // Згорнули — одразу шлемо боту, що змінилось (почав, переніс, відмітив): інакше він нагадує за старим планом
   // Згорнули — шлемо, лише якщо щось змінили; відкрили — забираємо нове, якщо обміну не було щойно
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') syncNow({ keepalive: true, onlyPending: true });
-    else if (Date.now() - lastSync() > 15000) syncNow();
+    else if (adoptShared() || Date.now() - lastSync() > 15000) syncNow();
+  });
+  // Ключ вставили у Вазі чи Марнотраті на цьому пристрої
+  addEventListener('storage', (e) => {
+    if (e.key !== 'vitaliylobko:bot') return;
+    if (adoptShared()) syncNow();
+    render();
   });
   // Поки застосунок на екрані — раз на 2 хв, і не одразу після обміну, що вже був (тап, відкриття)
   const SYNC_EVERY = 2 * 60 * 1000;
@@ -3133,7 +3173,10 @@ async function init() {
   if (choosingBot()) {
     holdSync(true);
     askBotData(h('p'), () => true);
-  } else syncNow();
+  } else {
+    adoptShared();
+    syncNow();
+  }
   // Живий лічильник таймера: міняємо лише текст цифр, без перемальовки екрана
   setInterval(() => {
     for (const el of document.querySelectorAll('[data-timer]')) {

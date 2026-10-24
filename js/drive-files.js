@@ -67,11 +67,13 @@ const botStamp = (x) => Number(x?.updated) || 0;
  * Звірити адресу й ключ бота з bot-settings.json. Повертає id файлу (зберегти в налаштуваннях застосунку).
  * mine — { url, key, updated } цього застосунку або null; declinedAt — коли бота тут відключили (0 — ні);
  * apply({ url, key, updated }, mine) — новіший запис з Диска (як підключати — вирішує застосунок).
+ * isBad(запис) — бот уже відкидав цей ключ: такий запис з Диска не береться, а робочий mine його перезаписує.
  */
-export async function syncBotFile(api, cachedId, { mine, declinedAt = 0, apply }) {
+export async function syncBotFile(api, cachedId, { mine, declinedAt = 0, apply, isBad = () => false }) {
   let id = await locate(api, BOT_FILE, cachedId);
   const remote = id ? await readJson(api, id) : null;
-  const theirs = remote?.url && remote?.key ? { url: remote.url, key: remote.key, updated: botStamp(remote) } : null;
+  const found = remote?.url && remote?.key ? { url: remote.url, key: remote.key, updated: botStamp(remote) } : null;
+  const theirs = found && !isBad(found) ? found : null;
   if (theirs && theirs.updated > declinedAt && (!mine || theirs.updated > mine.updated)) {
     apply(theirs, mine);
   } else if (mine && (!theirs || mine.updated > theirs.updated)) {

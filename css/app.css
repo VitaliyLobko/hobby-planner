@@ -90,6 +90,9 @@ a { color: var(--accent); }
 .small { font-size: 13px; }
 .lead { margin: 0; }
 .error { color: var(--bad-fg); padding: 16px; }
+.error-text { color: var(--bad-fg); }
+.key-card { background: var(--bad-bg); color: var(--bad-fg); }
+.key-card .btn { background: var(--bad-fg); color: var(--bad-bg); }
 
 /* ---------- каркас ---------- */
 .topbar {

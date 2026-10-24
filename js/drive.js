@@ -2,7 +2,8 @@
 // Не залежить від бота: якщо з ним щось станеться, дані лишаються на Диску власника.
 // Вхід — Google Identity Services, OAuth-клієнт той самий, що в shooting-log: origin спільний (vitaliylobko.github.io).
 // Ключ Диска діє годину й у фоні не продовжується — тож оновлюємо його з натискання, яке людина й так робить.
-import { sharedConfig, declinedAt, setBotAt } from './sync.js';
+import { declinedAt, setBotAt, adoptShared } from './sync.js';
+import * as BK from './bot-key.js';
 import { sharedToken, shareToken, dropSharedToken, noteEmail, whoIs } from './google-token.js';
 import { locate, readJson, writeJson, syncBotFile as botFileExchange } from './drive-files.js';
 
@@ -197,11 +198,13 @@ export function syncBotFile() {
 
 async function botFileRound() {
   conf.botFileId = await botFileExchange(api, conf.botFileId, {
-    mine: sharedConfig(),
+    mine: BK.forDrive(declinedAt()),
     declinedAt: declinedAt(),
-    apply: (theirs, mine) => {
-      if (mine && mine.url === theirs.url.trim().replace(/\/+$/, '') && mine.key === theirs.key.trim()) setBotAt(theirs.updated);
-      else window.dispatchEvent(new CustomEvent('bot-config', { detail: theirs }));
+    isBad: BK.isBad,
+    // Новіший з Диска — спільний для застосунків на пристрої; той самий бот — лише ключ, інший — з вибором даних
+    apply: (theirs) => {
+      BK.publish(theirs.url, theirs.key, theirs.updated);
+      if (!adoptShared()) setBotAt(theirs.updated);
     },
   });
   save();
