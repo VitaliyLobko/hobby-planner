@@ -9,6 +9,7 @@ const KEYS = {
   last: 'hobby-planner:sync-last',
   at: 'hobby-planner:bot-at',
   declined: 'hobby-planner:bot-declined',
+  choosing: 'hobby-planner:bot-choosing',
 };
 
 function get(k) {
@@ -38,6 +39,7 @@ export function setBotConfig(url, key, at = Date.now()) {
   set(KEYS.last, null);
   set(KEYS.at, on ? at : null);
   if (on) set(KEYS.declined, null);
+  else set(KEYS.choosing, null);
 }
 
 /** Від'єднати бота тут: запис з Диска, старіший за цю мить, його назад не підключає. */
@@ -96,6 +98,16 @@ let held = false;
 export function holdSync(on) {
   held = on;
 }
+
+/**
+ * Вибір «узяти з бота чи залишити ці» ще не зроблено — пам'ятаємо й після перезапуску: інакше перший же обмін
+ * при відкритті віддав би боту все з цього телефона (і стартові заняття з новими id — дублями).
+ */
+export function holdChoice(on) {
+  set(KEYS.choosing, on ? '1' : null);
+}
+
+export const choosingBot = () => get(KEYS.choosing) === '1';
 
 // ponytail: keepalive обмежує тіло 64 КБ — більший запит падає як «немає зв'язку» й піде при наступному відкритті
 async function call(path, body, keepalive = false) {
@@ -157,7 +169,7 @@ export async function syncNow({ keepalive = false, onlyPending = false } = {}) {
   clearTimeout(timer);
   const { url, key } = botConfig();
   if (!hooks || !url || !key) return { ok: false, off: true };
-  if (held) return { ok: false, held: true };
+  if (held || choosingBot()) return { ok: false, held: true };
   if (onlyPending && !running && !hasPending()) return { ok: true, idle: true };
   if (running) { again = true; return { ok: false, busy: true }; }
   running = true;

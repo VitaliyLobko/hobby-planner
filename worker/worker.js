@@ -15,7 +15,7 @@
 const APP_URL = 'https://vitaliylobko.github.io/hobby-planner/';
 const WEIGHT_URL = 'https://vitaliylobko.github.io/weight-log/';
 const MONEY_URL = 'https://vitaliylobko.github.io/marnotrat/';
-const ORIGINS = ['https://vitaliylobko.github.io', 'http://127.0.0.1:8093', 'http://127.0.0.1:8094'];
+const ORIGINS = ['https://vitaliylobko.github.io', 'http://127.0.0.1:8093', 'http://127.0.0.1:8094', 'http://127.0.0.1:8095', 'http://127.0.0.1:8096', 'http://127.0.0.1:8098'];
 const DEFAULT_TZ = 'Europe/Kyiv';
 const MIN = 60000;
 // Нагадування вікна: на початку й ще раз за 30 хв до кінця, якщо справи не відмічені
@@ -56,6 +56,11 @@ const SCHEMA = [
   'CREATE TABLE IF NOT EXISTS rem_state (key TEXT PRIMARY KEY, last_at INTEGER DEFAULT 0, snooze_at INTEGER, msg_id INTEGER, n INTEGER DEFAULT 0)',
   // Марнотрат: підсумки дня в гривнях — { e: витрати, i: доходи, cats: [[категорія, сума]] }
   'CREATE TABLE IF NOT EXISTS money_days (date TEXT PRIMARY KEY, data TEXT NOT NULL)',
+  // Записи «Ваги» й Марнотрату (/api/records): новіший updated перемагає, видалене лишається рядком deleted = 1
+  `CREATE TABLE IF NOT EXISTS records (
+    app TEXT NOT NULL, store TEXT NOT NULL, id TEXT NOT NULL, data TEXT, updated INTEGER DEFAULT 0,
+    deleted INTEGER DEFAULT 0, srv INTEGER DEFAULT 0, PRIMARY KEY (app, store, id))`,
+  'CREATE INDEX IF NOT EXISTS records_srv ON records(app, srv)',
 ];
 
 export default {
@@ -68,6 +73,7 @@ export default {
       if (url.pathname === '/api/sync' && request.method === 'POST') return cors(request, await onSync(request, env));
       if (url.pathname === '/api/weights' && request.method === 'POST') return cors(request, await onWeights(request, env));
       if (url.pathname === '/api/money' && request.method === 'POST') return cors(request, await onMoney(request, env));
+      if (url.pathname === '/api/records' && request.method === 'POST') return cors(request, await onRecords(request, env));
       if (url.pathname === '/api/restore' && request.method === 'POST') return cors(request, await onRestore(request, env));
       if (url.pathname === '/' && request.method === 'GET') return await onSetup(url, env);
       return new Response('Not found', { status: 404 });
@@ -2316,6 +2322,10 @@ async function recordWeight(env, chatId, { kg, note }, now) {
     ON CONFLICT(date) DO UPDATE SET kg = excluded.kg, updated = excluded.updated, srv = excluded.srv,
       note = CASE WHEN excluded.note != '' THEN excluded.note ELSE weights.note END`)
     .bind(date, kg, note, now, now).run();
+  // Те саме — у записи «Ваги» (/api/records): застосунок забере вагу з бота звідти
+  const row = await env.DB.prepare('SELECT kg, note FROM weights WHERE date = ?').bind(date).first();
+  await env.DB.prepare(RECORD_UPSERT)
+    .bind('weight-log', 'weights', date, JSON.stringify({ id: date, kg: row.kg, note: row.note ?? '', updated: now }), now, 0, now).run();
 
   const st = await weighState(env);
   if (st.date === date) {
@@ -2408,17 +2418,101 @@ async function onWeights(request, env) {
       ON CONFLICT(date) DO UPDATE SET kg = excluded.kg, note = excluded.note, updated = excluded.updated, srv = excluded.srv
       WHERE excluded.updated > weights.updated`)
       .bind(w.date, w.kg, String(w.note ?? '').slice(0, 200), Number(w.updated) || 0, now)));
-    // Зважився в «Вазі» — нагадування за сьогодні більше не потрібне
-    const st = await weighState(env);
-    if (st.date && put.some((w) => w.date === st.date) && (st.next || st.msg)) {
-      await closeWeighMessage(env, await owner(env), st.msg);
-      await setWeighState(env, { ...st, next: null, msg: null });
-    }
+    // «Вага» до /api/records на іншому телефоні — те саме і в записах, щоб нова версія теж побачила
+    const packed = put.map((w) => {
+      const rec = { id: w.date, kg: w.kg, note: String(w.note ?? '').slice(0, 200), updated: Number(w.updated) || 0 };
+      return { store: 'weights', id: w.date, updated: rec.updated, deleted: 0, data: JSON.stringify(rec) };
+    });
+    await env.DB.prepare(RECORDS_UPSERT_JSON).bind('weight-log', now, JSON.stringify(packed)).run();
+    await weighedInApp(env, put.map((w) => w.date));
   }
   const since = Number(body.since) || 0;
   const { results } = await env.DB.prepare('SELECT date, kg, note, updated FROM weights WHERE srv > ? ORDER BY date')
     .bind(since).all();
   return json({ now, weights: results });
+}
+
+// ---------- записи «Ваги» й Марнотрату ----------
+
+// Які сховища кожного застосунку бот приймає; решту відкидає
+const RECORD_STORES = { 'weight-log': ['weights', 'waists', 'settings'], marnotrat: ['coins', 'ops', 'meta'] };
+// За раз — не більше (перший обмін застосунок шле частинами): запис до 20 КБ, частина до 900 КБ
+const RECORDS_MAX = 400;
+const RECORD_MAX_LEN = 20000;
+const RECORDS_BODY_MAX = 900000;
+// Зміни віддаються із запасом від since — як у /api/sync: запис, що прийшов поки йшла відповідь, не загубиться
+const RECORDS_MARGIN = 10000;
+const RECORD_UPSERT = `INSERT INTO records (app, store, id, data, updated, deleted, srv) VALUES (?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(app, store, id) DO UPDATE SET data = excluded.data, updated = excluded.updated, deleted = excluded.deleted, srv = excluded.srv
+  WHERE excluded.updated > records.updated`;
+// Уся частина — одним запитом (json_each по одному JSON-параметру), а не запитом на запис: D1 рахує запити за виклик
+const RECORDS_UPSERT_JSON = `INSERT INTO records (app, store, id, data, updated, deleted, srv)
+  SELECT ?1, j.value ->> '$.store', j.value ->> '$.id', j.value ->> '$.data', j.value ->> '$.updated', j.value ->> '$.deleted', ?2
+  FROM json_each(?3) AS j WHERE true
+  ON CONFLICT(app, store, id) DO UPDATE SET data = excluded.data, updated = excluded.updated, deleted = excluded.deleted, srv = excluded.srv
+  WHERE excluded.updated > records.updated`;
+const WEIGHTS_UPSERT_JSON = `INSERT INTO weights (date, kg, note, updated, srv)
+  SELECT j.value ->> '$.id', j.value ->> '$.kg', j.value ->> '$.note', j.value ->> '$.updated', ?1
+  FROM json_each(?2) AS j WHERE true
+  ON CONFLICT(date) DO UPDATE SET kg = excluded.kg, note = excluded.note, updated = excluded.updated, srv = excluded.srv
+  WHERE excluded.updated > weights.updated`;
+const WEIGHTS_DELETE_JSON = `DELETE FROM weights WHERE EXISTS (SELECT 1 FROM json_each(?1) AS j
+  WHERE j.value ->> '$.id' = weights.date AND j.value ->> '$.updated' >= weights.updated)`;
+
+/**
+ * Обмін записами застосунку: put — [{ store, id, data, updated, deleted }], новіший updated перемагає;
+ * у відповідь — усе, що змінилось у боті після since (зокрема своє ж — застосунок порівняє updated).
+ * Вага «Ваги» ще й у таблиці weights: з неї бот бере вагу для підсумків, нагадувань і статистики.
+ */
+async function onRecords(request, env) {
+  if (!await authorized(request, env)) return json({ error: 'unauthorized' }, 401);
+  const body = await request.json().catch(() => null);
+  const stores = RECORD_STORES[body?.app];
+  if (!stores || !Array.isArray(body.put)) return json({ error: 'bad request' }, 400);
+  const now = Date.now();
+  const put = body.put
+    .filter((r) => stores.includes(r?.store) && typeof r.id === 'string' && r.id && r.id.length <= 200 && Number.isFinite(r.updated))
+    .map((r) => ({ store: r.store, id: r.id, updated: Math.round(r.updated), deleted: r.deleted ? 1 : 0, data: r.deleted ? null : JSON.stringify(r.data ?? null) }))
+    .filter((r) => r.data === null || r.data.length <= RECORD_MAX_LEN)
+    .slice(0, RECORDS_MAX);
+  const stmts = [];
+  if (put.length) {
+    const packed = JSON.stringify(put);
+    if (packed.length > RECORDS_BODY_MAX) return json({ error: 'too large' }, 413);
+    stmts.push(env.DB.prepare(RECORDS_UPSERT_JSON).bind(body.app, now, packed));
+  }
+  const weights = body.app === 'weight-log' ? put.filter((r) => r.store === 'weights' && /^\d{4}-\d{2}-\d{2}$/.test(r.id)) : [];
+  const weighed = weights.filter((w) => !w.deleted).map((w) => ({ ...JSON.parse(w.data), id: w.id, updated: w.updated }))
+    .filter((w) => Number.isFinite(w.kg) && w.kg > 0)
+    .map((w) => ({ id: w.id, kg: w.kg, note: String(w.note ?? '').slice(0, 200), updated: w.updated }));
+  const unweighed = weights.filter((w) => w.deleted).map((w) => ({ id: w.id, updated: w.updated }));
+  if (weighed.length) stmts.push(env.DB.prepare(WEIGHTS_UPSERT_JSON).bind(now, JSON.stringify(weighed)));
+  if (unweighed.length) stmts.push(env.DB.prepare(WEIGHTS_DELETE_JSON).bind(JSON.stringify(unweighed)));
+  if (body.app === 'weight-log' && 'remind' in body) {
+    stmts.push(/^\d{2}:\d{2}$/.test(body.remind ?? '')
+      ? env.DB.prepare(META_UPSERT).bind('weigh_time', body.remind)
+      : env.DB.prepare("DELETE FROM meta WHERE k = 'weigh_time'"));
+  }
+  if (stmts.length) await env.DB.batch(stmts);
+  if (weighed.length) await weighedInApp(env, weighed.map((w) => w.id));
+  // Перший обмін іде частинами: зміни з бота потрібні лише у відповідь на останню
+  if (body.pull === false) return json({ now, rows: [] });
+  const since = Math.max(0, (Number(body.since) || 0) - RECORDS_MARGIN);
+  const { results } = await env.DB.prepare('SELECT store, id, data, updated, deleted FROM records WHERE app = ? AND srv > ?')
+    .bind(body.app, since).all();
+  return json({
+    now,
+    rows: results.map((r) => ({ store: r.store, id: r.id, updated: r.updated, deleted: Boolean(r.deleted), data: r.deleted ? null : JSON.parse(r.data) })),
+  });
+}
+
+/** Зважився в «Вазі» за сьогодні — нагадування за сьогодні більше не потрібне. */
+async function weighedInApp(env, dates) {
+  const st = await weighState(env);
+  if (st.date && dates.includes(st.date) && (st.next || st.msg)) {
+    await closeWeighMessage(env, await owner(env), st.msg);
+    await setWeighState(env, { ...st, next: null, msg: null });
+  }
 }
 
 // ---------- вага й гроші в підсумках ----------

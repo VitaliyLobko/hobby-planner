@@ -2,7 +2,7 @@
 import { loadAll, write, uid, replaceAll } from './db.js';
 import * as M from './model.js';
 import { $, h, icon, toast, sheet, closeSheet, chips, swipeable, swipeStep, fold, timeField, vibrate } from './ui.js';
-import { initSync, syncNow, scheduleSync, botConfig, setBotConfig, declineBot, sharedConfig, lastSync, holdSync, fetchRestore, markRestored } from './sync.js';
+import { initSync, syncNow, scheduleSync, botConfig, setBotConfig, declineBot, sharedConfig, lastSync, holdSync, holdChoice, choosingBot, fetchRestore, markRestored } from './sync.js';
 import * as Drive from './drive.js';
 import { CHANGES, changesSince } from './changes.js';
 
@@ -68,7 +68,7 @@ const slotAdvice = (id, today = M.ymd(), now = M.nowHm()) => M.slotAdvice(M.slot
  * remote — зміни, що приїхали з бота: зберігаємо їхній updated і не шлемо назад.
  */
 async function save(changes, { render: redraw = true, remote = false } = {}) {
-  // Копія на Диск раз на тиждень — з цього натискання, поки браузер ще пускає вікно Google; дані бере пізніше, вже нові
+  // Копія на Диск раз на день — з цього натискання, поки браузер ще пускає вікно Google; дані бере пізніше, вже нові
   if (!remote) driveTick(true);
   const at = await write(changes, { keep: remote });
   for (const [name, { put = [], del = [] }] of Object.entries(changes)) {
@@ -2572,7 +2572,11 @@ function restoreSheet(data) {
     h('div', { class: 'btn-grid' },
       button('check', 'Відновити', 'danger', async () => {
         closeSheet();
-        await replaceAll(data);
+        // Свіжа мітка часу: інакше бот вважав би свої записи новішими й мовчки повернув би їх замість відновлених
+        const at = Date.now();
+        const fresh = (list) => (list ?? []).map((r) => ({ ...r, updated: at }));
+        await replaceAll({ ...data, activities: fresh(data.activities), plan: fresh(data.plan), reminders: fresh(data.reminders), meta: fresh(data.meta) });
+        scheduleSync();
         Object.assign(state, await loadAll());
         slotsCfg = state.meta.find((m) => m.id === 'slots') ?? structuredClone(M.DEFAULT_SLOTS);
         toast('Відновлено');
@@ -2610,15 +2614,28 @@ async function connectBot(url, key, status, { at, fromDrive = false } = {}) {
   const prevAt = sharedConfig()?.updated;
   holdSync(true);
   setBotConfig(url, key, at);
+  holdChoice(true);
   status.textContent = 'Перевіряю бота…';
+  await askBotData(status, () => {
+    // Бот з Диска не відповів — як було; підключений руками лишається чекати вибору (обмін стоїть до нього)
+    if (fromDrive) setBotConfig(prev.url || null, prev.key || null, prevAt);
+    return !fromDrive;
+  });
+}
+
+/**
+ * Що вже є в боті: є дані — шторка вибору, порожньо — звичайний обмін. failed(err) — збій зв'язку;
+ * true — показати помилку. Вибір не зроблено, доки не натиснуто кнопку чи не закрито шторку (holdChoice).
+ */
+async function askBotData(status, failed) {
   let data;
   try {
     data = await fetchRestore();
   } catch (err) {
-    if (fromDrive) setBotConfig(prev.url || null, prev.key || null, prevAt);
+    const loud = failed(err);
     holdSync(false);
-    status.textContent = fromDrive ? '' : err.message;
-    if (!fromDrive) toast(err.message);
+    status.textContent = loud ? err.message : '';
+    if (loud) toast(err.message);
     return;
   }
   if (data.activities?.length || data.items?.length) {
@@ -2626,6 +2643,7 @@ async function connectBot(url, key, status, { at, fromDrive = false } = {}) {
     chooseBotData(data);
     return;
   }
+  holdChoice(false);
   holdSync(false);
   await connectSync(status);
 }
@@ -2666,7 +2684,7 @@ async function applyRestore(data) {
 /** Підключення, а в боті вже є дані: узяти їх сюди чи залишити ці. Закрили, не обравши, — бота не підключаємо. */
 function chooseBotData(data) {
   let chosen = false;
-  const pick = (fn) => async () => { chosen = true; closeSheet(); await fn(); };
+  const pick = (fn) => async () => { chosen = true; holdChoice(false); closeSheet(); await fn(); };
   sheet('У боті вже є дані', h('div', { class: 'sheet-body' },
     h('p', {}, restoreCounts(data)),
     h('p', { class: 'muted small' }, 'Новий телефон — бери з бота. Якщо ж правильні дані тут, бот отримає їх і віддасть своє: що змінено і тут, і там, — лишиться новіше.'),
@@ -2791,7 +2809,7 @@ function aboutPanel() {
     more('Де мої дані', h('div', { class: 'muted small' },
       h('p', {}, 'План, заняття й нагадування лежать у браузері на цьому пристрої. Сервера в застосунку немає, автор не отримує ні даних, ні статистики.'),
       h('p', {}, 'Telegram-бот — за бажанням: план їде на твій власний Cloudflare Worker, щоб бот нагадував, а телефон і комп’ютер бачили те саме.'),
-      h('p', {}, 'Google Диск — теж за бажанням: раз на тиждень копія лягає у твій Диск, застосунок бачить лише свої файли.'),
+      h('p', {}, 'Google Диск — теж за бажанням: раз на день копія лягає у твій Диск, застосунок бачить лише свої файли.'),
       h('p', {}, 'Резервна копія — «Резервна копія» → «Зберегти копію». Нею ж переносиш дані на інший пристрій.'))),
     more('З чого почати', h('ol', { class: 'about-steps' },
       h('li', {}, 'Встанови застосунок: Android — Chrome → ⋮ → «Встановити застосунок»; iPhone — Safari → «Поділитися» → «На екран „Додому“».'),
@@ -2817,7 +2835,7 @@ function aboutPanel() {
 
 // ---------- копія на Google Диск ----------
 
-/** Раз на тиждень: ключ Google живий — тихо; ні — лише з натискання (gesture). */
+/** Раз на день: ключ Google живий — тихо; ні — лише з натискання (gesture). */
 function driveTick(gesture = false) {
   Drive.maybeBackup(backupData, { gesture })
     .then((done) => { if (done) toast('Копію збережено на Google Диск'); })
@@ -2830,7 +2848,7 @@ function driveStatusText() {
   const d = new Date(at);
   const day = M.ymd(d) === M.ymd() ? 'сьогодні' : M.dayMonth(M.ymd(d));
   const left = Math.ceil((at + Drive.BACKUP_EVERY_DAYS * 864e5 - Date.now()) / 864e5);
-  return `Остання копія: ${day} о ${M.nowHm(d)} · ${left > 0 ? `наступна — за ${left} ${plural(left, 'день', 'дні', 'днів')}` : 'наступна — з найближчого натискання'}`;
+  return `Остання копія: ${day} о ${M.nowHm(d)} · ${left > 1 ? `наступна — за ${left} ${plural(left, 'день', 'дні', 'днів')}` : left === 1 ? 'наступна — завтра' : 'наступна — з найближчого натискання'}`;
 }
 
 /** Google Диск: підключити, зберегти зараз, відновити, відключити. Окремо від бота — на випадок, якщо з ним щось станеться. */
@@ -2849,7 +2867,7 @@ function driveBlock() {
     render();
   };
   const about = h('p', { class: 'muted small' },
-    'Раз на тиждень застосунок сам кладе копію у файл hobby-planner-backup.json на твоєму Google Диску — окремо від бота. Попередні версії файлу Google тримає до 30 днів.');
+    'Раз на день застосунок сам кладе копію у файл hobby-planner-backup.json на твоєму Google Диску — окремо від бота. Попередні версії файлу Google тримає до 30 днів.');
   if (!Drive.driveOn()) {
     return h('div', { class: 'drive-block' }, h('h3', { class: 'form-box-title' }, 'Google Диск'), about,
       button('plus', 'Підключити Google Диск', '', run(() => Drive.connect(backupData), 'Google Диск підключено, копію збережено')));
@@ -3111,7 +3129,11 @@ async function init() {
   setInterval(() => {
     if (document.visibilityState === 'visible' && Date.now() - lastSync() > SYNC_EVERY / 2) syncNow();
   }, SYNC_EVERY);
-  syncNow();
+  // Минулого разу закрили застосунок посеред вибору «узяти з бота чи залишити ці» — питаємо знову, а не обмінюємось
+  if (choosingBot()) {
+    holdSync(true);
+    askBotData(h('p'), () => true);
+  } else syncNow();
   // Живий лічильник таймера: міняємо лише текст цифр, без перемальовки екрана
   setInterval(() => {
     for (const el of document.querySelectorAll('[data-timer]')) {
