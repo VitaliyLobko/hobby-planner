@@ -1105,7 +1105,17 @@ function viewToday() {
     remindersToday(today, now),
     button('clock', 'Є кілька хвилин?', 'quick-btn', quickSheet),
     ...cards,
-    h('p', { class: 'swipe-hint' }, '← перенести · зробив →', h('br'), 'натисни на справу — усі дії, на вікно — згорнути'));
+    swipeHintFresh(today)
+      ? h('p', { class: 'swipe-hint' }, '← перенести · зробив →', h('br'), 'натисни на справу — усі дії, на вікно — згорнути')
+      : null);
+}
+
+// Рядок-підказка про свайпи — лише перший тиждень після показу анімації, далі жести вже звичні
+const SWIPE_HINT_DAYS = 7;
+
+function swipeHintFresh(today) {
+  const at = recall('swipe-peek');
+  return !at || (/^\d{4}-\d{2}-\d{2}$/.test(at) && M.addDays(at, SWIPE_HINT_DAYS) > today);
 }
 
 /** Один раз за весь час: перша відкрита справа сама від'їжджає вправо — підказка, що під нею «Зробив». */
@@ -1115,7 +1125,7 @@ function swipePeek(view) {
   if ($('layer').childElementCount || !view.isConnected) return;
   const card = view.querySelector('.slot-group[open] .item-card:is(.st-planned, .st-missed, .st-active)');
   if (!card) return;
-  remember('swipe-peek', '1');
+  remember('swipe-peek', M.ymd());
   card.classList.add('peek');
   card.addEventListener('animationend', () => card.classList.remove('peek'), { once: true });
 }
@@ -1145,11 +1155,17 @@ function weekCellBody(its) {
     its.map(({ a, st }) => h('span', { class: `wico s-${st}`, style: actStyle(a) }, icon(a.icon))));
 }
 
+/** Назва стовпця вікна: у будні й вихідні назви різні — обидві через «/». */
+function slotColumnName(sid) {
+  const names = [slotsCfg.weekday, slotsCfg.weekend].map((list) => list?.find((s) => s.id === sid)?.label);
+  return [...new Set(names.filter(Boolean))].join(' / ') || sid;
+}
+
 /** Тиждень рядками: день — рядок, вікна — стовпці, праворуч скільки зараховано з запланованого. */
 function weekRows(days, today, now) {
   const grid = h('div', { class: 'wgrid' }, h('span'),
     ...M.SLOT_IDS.map((sid) => h('span', { class: 'wslot' }, icon(M.SLOT_ICONS[sid]),
-      h('span', {}, slotsCfg.weekday.find((s) => s.id === sid)?.label ?? sid))),
+      h('span', {}, slotColumnName(sid)))),
     h('span'));
   days.forEach((d, i) => {
     const paused = M.pauseOn(d, pauses());
@@ -1218,7 +1234,7 @@ function slotPickSheet(date, slot) {
     const b = h('button', {
       type: 'button', class: 'pick', 'data-id': a.id, style: actStyle(a),
       onClick: async () => { await togglePick(date, slot.id, a); sync(); },
-    }, h('span', { class: 'pick-name' }, h('span', { class: 'dot', 'aria-hidden': 'true' }), a.name),
+    }, icon('check', 'ico pick-check'), h('span', { class: 'pick-name' }, icon(a.icon, 'ico pick-ico'), a.name),
     a.minutes ? h('span', { class: 'pick-why' }, `~${minText(a.minutes)}`) : null);
     b.dataset.find = searchKey(`${a.name} ${groupOf(a)?.name ?? ''}`);
     return b;
@@ -1333,7 +1349,7 @@ function planSlot(date, slot, wk, today, now) {
       type: 'button', class: `pick${on ? ' on' : ''}`, 'aria-pressed': String(on), style: actStyle(a),
       onClick: () => togglePick(date, slot.id, a),
     },
-    h('span', { class: 'pick-name' }, h('span', { class: 'dot', 'aria-hidden': 'true' }), a.name),
+    icon('check', 'ico pick-check'), h('span', { class: 'pick-name' }, icon(a.icon, 'ico pick-ico'), a.name),
     h('span', { class: 'pick-why' }, goalSegs(cnt, goal, 'mini'),
       [a.minutes ? `~${minText(a.minutes)}` : '', fit, miss ? 'був пропуск' : ''].filter(Boolean).join(' · ')));
   };
@@ -2462,7 +2478,7 @@ function actRow(a, heat, drag = true) {
       toggle.setAttribute('aria-expanded', String(Boolean(panel)));
       remember('heat-open', [...heatOpen].join(','));
     },
-  }, icon('calendar'));
+  }, icon('chart'));
   // Порядок тягнемо лише у «Своєму» сортуванні: в інших місце на екрані — не order
   const grip = drag ? h('button', {
     type: 'button', class: 'drag-handle', 'aria-label': `Перетягнути «${a.name}» (стрілки вгору/вниз)`,
@@ -2991,7 +3007,7 @@ function botSection() {
   };
   const explain = h('p', { class: 'muted small' },
     'План, заняття й нагадування лежать у спільній базі на сервері — однакові на всіх пристроях; без інтернету все піде пізніше. Цю ж базу читає Telegram-бот: нагадує з кнопками, відмітки звідти повертаються сюди. Ключ доступу дає команда /key у ',
-    h('a', { href: BOT_URL, target: '_blank', rel: 'noopener' }, '@hobby_planner_bot'),
+    h('a', { class: 'tap-link', href: BOT_URL, target: '_blank', rel: 'noopener' }, '@hobby_planner_bot'),
     '; досить вставити в одному застосунку — тут, у Вазі чи Марнотраті.');
   return folded('set-bot', head, h('div', { class: 'form fold-body' },
     status,
@@ -3149,6 +3165,8 @@ function render() {
     if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   }
   $('fab').hidden = !VIEWS[tab].fab;
+  // Під «+» лишаємо місце, щоб остання картка не ховалась під кнопкою
+  document.body.classList.toggle('has-fab', Boolean(VIEWS[tab].fab));
 }
 
 function route() {

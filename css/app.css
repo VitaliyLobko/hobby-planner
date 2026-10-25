@@ -75,9 +75,15 @@ body {
   -webkit-tap-highlight-color: transparent;
   overflow-x: hidden;
 }
+/* Екран із «+»: ще висота кнопки, щоб остання картка не ховалась під нею */
+body.has-fab {
+  padding-bottom: calc(var(--tabs-h) + env(safe-area-inset-bottom) + 96px);
+}
 
 button { font: inherit; color: inherit; cursor: pointer; }
 a { color: var(--accent); }
+/* Посилання в тексті — зона дотику 44 px без зміни рядка */
+.tap-link { display: inline-block; padding: 12px 0; margin: -12px 0; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .ico { display: inline-flex; flex: none; }
@@ -236,7 +242,8 @@ a { color: var(--accent); }
 .b-moved { background: var(--move-bg); color: var(--move-fg); }
 .b-skipped, .b-missed { background: var(--bad-bg); color: var(--bad-fg); }
 .b-active { background: var(--ok-solid); color: #fff; }
-.b-free { background: transparent; border: 1px dashed var(--line-strong); }
+/* Пунктир у тижні означає «заплановано», тому «Вільно» — суцільною рамкою */
+.b-free { background: transparent; border: 1px solid var(--line-strong); color: var(--text-2); }
 
 .timer-box { margin-left: auto; display: flex; align-items: center; gap: 8px; flex: none; }
 .timer { font-size: 15px; font-weight: 800; font-variant-numeric: tabular-nums; }
@@ -322,16 +329,27 @@ button.link-btn { padding: 0; border: 0; background: none; color: var(--accent);
 .plan-item { align-items: flex-start; }
 .act-text.grow { flex: 1; align-items: stretch; gap: 6px; }
 .plan-item .icon-btn { width: 40px; height: 40px; }
-.pick-row { display: flex; flex-wrap: wrap; gap: 8px; }
+/* Дві колонки однакової ширини: кнопки стоять рівно, погляд іде стовпцем */
+.pick-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .pick {
+  position: relative; min-width: 0;
   min-height: 44px; padding: 6px 12px; border-radius: 12px;
   border: 1.5px solid var(--line-strong); background: var(--surface); color: var(--text);
   display: flex; flex-direction: column; align-items: flex-start; gap: 1px; text-align: left;
 }
 /* Обране заняття — у його кольорі, а не білою плашкою: у темній темі біле сліпить */
 .pick.on { background: color-mix(in srgb, var(--c) 24%, var(--surface)); color: var(--text); border-color: var(--c); }
-.pick-name { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 700; }
+.pick-name { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 700; overflow-wrap: anywhere; }
 .dot { width: 10px; height: 10px; border-radius: 3px; background: var(--c); }
+.pick-ico { color: var(--c); }
+/* Обране — не лише кольором: галочка в куті, поверх рамки, щоб кнопка не міняла розмір */
+.pick-check {
+  display: none; position: absolute; top: -7px; right: -7px;
+  width: 22px; height: 22px; border-radius: 50%; align-items: center; justify-content: center;
+  background: var(--c); color: #fff; box-shadow: 0 0 0 2px var(--surface);
+}
+.pick-check svg { width: 14px; height: 14px; stroke-width: 3; }
+.pick.on .pick-check { display: inline-flex; }
 .pick-why { font-size: 12px; font-weight: 600; opacity: .8; }
 .pick-why .segs { margin-right: 6px; }
 
@@ -379,7 +397,7 @@ button.link-btn { padding: 0; border: 0; background: none; color: var(--accent);
 .heat-toggle { flex: none; border-radius: 12px; }
 .heat-toggle .ico svg { width: 20px; height: 20px; }
 .heat-toggle.on { color: var(--text); background: var(--surface-2); }
-.drag-handle { flex: none; border-radius: 12px; cursor: grab; touch-action: none; }
+.drag-handle { flex: none; border-radius: 12px; cursor: grab; touch-action: none; color: var(--muted); }
 .act-wrap.dragging .drag-handle { cursor: grabbing; }
 /* Поки йде пошук, порядок не тягаємо: між видимими картками сховані */
 .act-list.searching .drag-handle { display: none; }
@@ -484,7 +502,8 @@ button.link-btn { padding: 0; border: 0; background: none; color: var(--accent);
 .plan-tools .btn { min-width: 0; padding-inline: 8px; white-space: normal; line-height: 1.2; text-align: center; }
 
 /* «Є кілька хвилин»: кнопка на «Сьогодні» і картки ідей у шторці */
-.quick-btn { align-self: stretch; }
+/* Вторинна дія з рамкою: сіра плашка без рамки читалась як неактивна */
+.btn.quick-btn { align-self: stretch; background: var(--surface); border: 1.5px solid var(--line-strong); }
 .quick-card { display: flex; align-items: center; gap: 12px; }
 .quick-card .act-text { flex: 1; }
 .quick-card .btn { flex: none; min-height: 40px; padding: 0 12px; }
@@ -613,6 +632,7 @@ input[type="text"], input[type="search"], input[type="number"], input[type="time
   min-height: 44px; min-width: 0; padding: 3px; border: 0; border-radius: 10px;
   display: flex; align-items: stretch; justify-content: stretch;
   background: color-mix(in srgb, var(--surface-2) 60%, transparent); color: var(--text-2);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
 }
 .wcell.weekend { background: var(--weekend-bg); }
 .wcell.now { box-shadow: inset 0 0 0 2px var(--now-ring); }
@@ -632,7 +652,7 @@ input[type="text"], input[type="search"], input[type="number"], input[type="time
 .s-min { background: color-mix(in srgb, var(--c) 45%, var(--surface)); border-style: solid; color: var(--text); }
 .s-planned { background: transparent; }
 .s-active { background: color-mix(in srgb, var(--c) 14%, var(--surface)); border-style: solid; }
-.s-skipped, .s-missed { background: transparent; border-color: var(--line-strong); color: var(--text-2); opacity: .55; }
+.s-skipped, .s-missed { background: transparent; border-color: var(--muted); color: var(--text-2); opacity: .7; }
 .wsum { display: grid; place-content: center; font-size: 12px; color: var(--text-2); }
 .wsum.full { color: var(--ok-fg); }
 .wsum.short { color: var(--bad-fg); }
