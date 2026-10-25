@@ -20,6 +20,7 @@ const ASSETS = [
   './js/bot-key.js',
   './js/drive.js',
   './js/changes.js',
+  './js/week-image.js',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/icon-maskable-512.png',

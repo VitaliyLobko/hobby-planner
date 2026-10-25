@@ -56,6 +56,8 @@ const SCHEMA = [
   'CREATE TABLE IF NOT EXISTS rem_state (key TEXT PRIMARY KEY, last_at INTEGER DEFAULT 0, snooze_at INTEGER, msg_id INTEGER, n INTEGER DEFAULT 0)',
   // Марнотрат: підсумки дня в гривнях — { e: витрати, i: доходи, cats: [[категорія, сума]] }
   'CREATE TABLE IF NOT EXISTS money_days (date TEXT PRIMARY KEY, data TEXT NOT NULL)',
+  // «Варто було?» про великі покупки: ok 1 — варто, 0 — ні
+  'CREATE TABLE IF NOT EXISTS money_verdicts (id TEXT PRIMARY KEY, date TEXT NOT NULL, cat TEXT, v REAL, ok INTEGER, at INTEGER)',
   // Записи «Ваги» й Марнотрату (/api/records): новіший updated перемагає, видалене лишається рядком deleted = 1
   `CREATE TABLE IF NOT EXISTS records (
     app TEXT NOT NULL, store TEXT NOT NULL, id TEXT NOT NULL, data TEXT, updated INTEGER DEFAULT 0,
@@ -252,6 +254,8 @@ async function webhookSecret(env) {
 }
 
 const elapsed = (it, now) => (it.spent || 0) + (it.runningSince ? Math.max(0, Math.floor((now - it.runningSince) / 1000)) : 0);
+// Для підсумків, як itemSeconds у js/model.js: «Зроблено» без таймера — звичні хвилини заняття, мінімум — 0
+const itemSec = (it, minutes) => it.spent || (it.status === 'done' ? (minutes || 0) * 60 : 0);
 
 function duration(sec) {
   if (sec > 0 && sec < 30) return '<1 хв';
@@ -543,6 +547,7 @@ async function onTelegram(request, env) {
   else if (cb && String(cb.data || '').startsWith('qm:')) await onQuickMinutes(env, cb, chatId);
   else if (cb && String(cb.data || '').startsWith('n:')) await onNextWeekButton(env, cb, chatId);
   else if (cb && String(cb.data || '').startsWith('h:')) await onHelpButton(env, cb, chatId);
+  else if (cb && String(cb.data || '').startsWith('mv:')) await onMoneyVerdict(env, cb, chatId);
   else if (cb) await onButton(env, cb, chatId);
   else if (msg?.voice || msg?.audio) await onVoice(env, msg, chatId);
   else if (msg?.text) await onCommand(env, msg.text.trim(), chatId);
@@ -973,10 +978,14 @@ async function onSync(request, env) {
     put('templates', JSON.stringify(body.templates));
     put('templates_at', appAt.templates);
   }
-  // Групи занять — теж лише зберігаємо: група в занятті їде разом із ним, а назви й іконки — тут
+  // Групи занять — теж лише зберігаємо: група в занятті їде разом із ним, а назви, іконки й кольори — тут.
+  // Колір групи обов'язково: заняття без свого кольору (color: '') фарбуються кольором групи
   if (Array.isArray(body.groups) && fresher('groups')) {
     const list = body.groups.filter((g) => g?.id && typeof g.name === 'string')
-      .map(({ id, name, icon }) => ({ id: String(id), name: name.slice(0, 60), icon: typeof icon === 'string' ? icon : '' }));
+      .map(({ id, name, icon, color }) => ({
+        id: String(id), name: name.slice(0, 60), icon: typeof icon === 'string' ? icon : '',
+        color: typeof color === 'string' ? color.slice(0, 20) : '',
+      }));
     put('groups', JSON.stringify(list));
     put('groups_at', appAt.groups);
   }
@@ -1464,7 +1473,7 @@ async function sendEvening(env, chatId, now, { paused = false } = {}) {
     // Справи: заголовок з підсумком і серією, нижче — лише вікна, де щось було
     any = true;
     const done = items.filter((x) => x.status === 'done' || x.status === 'min');
-    const sec = done.reduce((s, x) => s + (x.spent || 0), 0);
+    const sec = done.reduce((s, x) => s + itemSec(x, (acts.get(x.activityId) ?? MISSING).minutes), 0);
     lines.push('', `📋 <b>Справи</b> · зараховано ${done.length} з ${items.length}${sec ? ` · ${dur(sec)}` : ''}`);
     const streak = streakLine(await dayStreak(env, date, await pausesOf(env)), false);
     if (streak) lines.push(`<i>${streak}</i>`);
@@ -1518,7 +1527,7 @@ async function sendToday(env, chatId, now, title, morning = false) {
   } else {
     lines.push(...planLines(date, items, cfg, acts, tz, now));
     const done = items.filter((x) => x.status === 'done' || x.status === 'min');
-    const sec = done.reduce((s, x) => s + (x.spent || 0), 0);
+    const sec = done.reduce((s, x) => s + itemSec(x, (acts.get(x.activityId) ?? MISSING).minutes), 0);
     lines.push(...remindLines);
     const minutes = items.reduce((s, x) => s + ((acts.get(x.activityId) ?? MISSING).minutes || 0), 0);
     lines.push('', morning
@@ -1595,7 +1604,7 @@ async function sendWeek(env, chatId, now, { offerNext = false } = {}) {
   const actLines = [];
   for (const a of acts) {
     const mine = items.filter((x) => x.activityId === a.id);
-    const sec = mine.reduce((s, x) => s + (x.spent || 0), 0);
+    const sec = mine.reduce((s, x) => s + itemSec(x, a.minutes), 0);
     const target = weekTarget(a, start, pauses);
     doneAll += Math.min(mine.length, target);
     targetAll += target;
@@ -1618,7 +1627,7 @@ async function sendWeek(env, chatId, now, { offerNext = false } = {}) {
   const weight = await weightWeekLines(env, start, end);
   const money = await moneyWeekLines(env, start, end);
   lines.push(...weight, ...money);
-  const keyboard = [[{ text: 'Відкрити тиждень', url: `${APP_URL}#week` }, ...(money.length ? [{ text: 'Марнотрат', url: MONEY_URL }] : [])]];
+  const keyboard = [...await moneyReviewRows(env, start, end), [{ text: 'Відкрити тиждень', url: `${APP_URL}#week` }, ...(money.length ? [{ text: 'Марнотрат', url: MONEY_URL }] : [])]];
   // Неділя ввечері: наступний тиждень одним дотиком — тими самими справами
   if (offerNext) {
     const next = addDays(start, 7);
@@ -2570,6 +2579,11 @@ async function moneyDayLines(env, date, now) {
     const top = (d.cats ?? []).slice(0, 3);
     if (top.length) lines.push(`<blockquote>${top.map(([name, v]) => `${esc(name)} — ${uahNum(v)}`).join('\n')}</blockquote>`);
   }
+  const streak = m.noSpend?.date === date ? m.noSpend.streak : 0;
+  if (streak > 1) lines.push(`🌱 ${streak} ${plural(streak, 'день', 'дні', 'днів')} без трат поспіль`);
+  else if (streak === 1) lines.push('🌱 День без трат');
+  const cmp = biggestToday(m.big ?? [], date);
+  if (cmp) lines.push(`<i>Найбільша покупка тижня — ${uah(cmp.v)} на «${esc(cmp.cat)}», ${timesMore(cmp.ratio)}, ніж зазвичай</i>`);
   if (m.plan) lines.push(m.left >= 0 ? `<i>Лишилось у бюджеті місяця: ${uah(m.left)}</i>` : `<i>Понад бюджет місяця: ${uah(-m.left)}</i>`);
   if (now - (m.at || 0) > MONEY_STALE_MS) {
     const tz = tzOf(env);
@@ -2577,6 +2591,57 @@ async function moneyDayLines(env, date, now) {
     lines.push(`<i>Дані Марнотрату станом на ${at.date === date ? at.hm : `${dayMonth(at.date)}, ${at.hm}`}</i>`);
   }
   return lines;
+}
+
+/** Сьогоднішня велика покупка, якщо вона найбільша за тиждень і хоча б удвічі більша за звичайну в категорії. */
+function biggestToday(big, date) {
+  const week = big.filter((b) => b.date > addDays(date, -7) && b.date <= date);
+  const top = week.reduce((a, b) => (!a || b.v > a.v ? b : a), null);
+  return top && top.date === date && top.ratio >= 2 ? top : null;
+}
+
+function timesMore(r) {
+  if (r < 2.5) return 'удвічі більше';
+  if (r < 3.5) return 'утричі більше';
+  const n = Math.round(r);
+  return `у ${n} ${plural(n, 'раз', 'рази', 'разів')} більше`;
+}
+
+/** Великі покупки тижня без оцінки — рядок кнопок «👍 сума категорія · 👎». */
+async function moneyReviewRows(env, start, end) {
+  const m = await moneyMeta(env);
+  const big = (m?.big ?? []).filter((b) => b.date >= start && b.date <= end);
+  if (!big.length) return [];
+  const { results } = await env.DB.prepare(`SELECT id FROM money_verdicts WHERE id IN (${big.map(() => '?').join(',')})`).bind(...big.map((b) => b.id)).all();
+  const done = new Set(results.map((r) => r.id));
+  return big.filter((b) => !done.has(b.id)).slice(0, 5).map((b) => [
+    { text: `👍 ${uahNum(b.v)} · ${b.cat}`.slice(0, 60), callback_data: `mv:${b.id}:1` },
+    { text: '👎 не варто', callback_data: `mv:${b.id}:0` },
+  ]);
+}
+
+/** «Варто було?»: оцінку — в базу, рядок кнопок — на відповідь. */
+async function onMoneyVerdict(env, cb, chatId) {
+  const [, id, v] = String(cb.data).split(':');
+  if (v !== '1' && v !== '0') {
+    await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id });
+    return;
+  }
+  const b = ((await moneyMeta(env))?.big ?? []).find((x) => x.id === id);
+  if (!b) {
+    await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: 'Цієї покупки вже немає в даних Марнотрату' });
+    return;
+  }
+  const ok = v === '1';
+  await env.DB.prepare('INSERT INTO money_verdicts (id, date, cat, v, ok, at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET ok = excluded.ok, at = excluded.at')
+    .bind(id, b.date, b.cat, b.v, ok ? 1 : 0, Date.now()).run();
+  const rows = cb.message?.reply_markup?.inline_keyboard ?? [];
+  const label = `${ok ? '👍' : '👎'} ${uahNum(b.v)} · ${b.cat} — ${ok ? 'варто' : 'не варто'}`.slice(0, 60);
+  await tg(env, 'editMessageReplyMarkup', {
+    chat_id: chatId, message_id: cb.message.message_id,
+    reply_markup: { inline_keyboard: rows.map((row) => (row.some((k) => String(k.callback_data || '').startsWith(`mv:${id}:`)) ? [{ text: label, callback_data: `mv:${id}:x` }] : row)) },
+  });
+  await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: ok ? 'Записав: варто' : 'Записав: не варто' });
 }
 
 const DAYS_SHORT = ['Нд', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
@@ -2601,6 +2666,14 @@ async function moneyWeekLines(env, start, end) {
   }
   const top = [...cats].sort((a, b) => b[1] - a[1]).slice(0, 5);
   if (top.length) lines.push(`<blockquote>${top.map(([name, v]) => `${esc(name)} — ${uahNum(v)}`).join('\n')}</blockquote>`);
+  const m = await moneyMeta(env);
+  const free = (m.noSpend?.days ?? []).filter((d) => d >= start && d <= end).length;
+  if (free) lines.push(`🌱 Днів без трат: ${free} з 7`);
+  const big = (m.big ?? []).filter((b) => b.date >= start && b.date <= end);
+  const ask = big.length && (await moneyReviewRows(env, start, end)).length ? ' — <i>варто було? Кнопки нижче</i>' : '';
+  if (big.length) lines.push(`🛍 Великі покупки: ${big.map((b) => `${uahNum(b.v)} · ${esc(b.cat)}`).join(', ')}${ask}`);
+  const no = await env.DB.prepare('SELECT SUM(v) AS s FROM money_verdicts WHERE ok = 0 AND date > ?').bind(addDays(end, -28)).first('s');
+  if (no) lines.push(`<i>«Не варто» за 4 тижні: ${uah(no)}</i>`);
   if (e > 0) {
     const per = Array.from({ length: 7 }, (_, k) => addDays(start, k)).map((d) => [d, days.get(d)?.e || 0]);
     const max = Math.max(...per.map(([, v]) => v));
@@ -2611,7 +2684,7 @@ async function moneyWeekLines(env, start, end) {
 
 /**
  * Марнотрат шле підсумки днів від from (на заміну всьому, що тут від from) і бюджет місяця { plan, left }.
- * Операцій, рахунків і коментарів бот не отримує — лише суми.
+ * Операцій, рахунків і коментарів бот не отримує — лише суми; великі покупки — категорією й сумою.
  */
 async function onMoney(request, env) {
   if (!await authorized(request, env)) return json({ error: 'unauthorized' }, 401);
@@ -2630,10 +2703,17 @@ async function onMoney(request, env) {
   }));
   const budget = body.budget && Number.isFinite(body.budget.plan) && body.budget.plan > 0
     ? { plan: num(body.budget.plan), left: num(body.budget.left) } : { plan: 0, left: 0 };
+  // Великі покупки — категорія й сума, без рахунків і коментарів; дні без трат — дати
+  const big = (Array.isArray(body.big) ? body.big : [])
+    .filter((b) => typeof b?.id === 'string' && b.id.length <= 40 && ymd.test(b.date ?? '') && typeof b.cat === 'string' && Number.isFinite(b.v))
+    .slice(0, 20).map((b) => ({ id: b.id, date: b.date, cat: b.cat.slice(0, 40), v: num(b.v), ratio: Number.isFinite(b.ratio) ? num(b.ratio) : null }));
+  const ns = body.noSpend;
+  const noSpend = ns && ymd.test(ns.date ?? '') && Number.isInteger(ns.streak)
+    ? { date: ns.date, streak: Math.max(0, Math.min(ns.streak, 9999)), days: (Array.isArray(ns.days) ? ns.days : []).filter((d) => ymd.test(d)).slice(0, 60) } : null;
   await env.DB.batch([
     env.DB.prepare('DELETE FROM money_days WHERE date >= ?').bind(body.from),
     ...days.map((d) => env.DB.prepare('INSERT INTO money_days (date, data) VALUES (?, ?)').bind(d.date, d.data)),
-    env.DB.prepare(META_UPSERT).bind('money', JSON.stringify({ at: now, ...budget })),
+    env.DB.prepare(META_UPSERT).bind('money', JSON.stringify({ at: now, ...budget, big, noSpend })),
   ]);
   return json({ now });
 }

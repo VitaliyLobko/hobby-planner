@@ -27,9 +27,12 @@ export function h(tag, attrs = {}, ...children) {
 /** Іконка з власного набору чи Lucide: розмітка SVG своя, не з даних, тому innerHTML тут безпечний. */
 export function icon(name, cls = 'ico') {
   const span = h('span', { class: cls, 'aria-hidden': 'true' });
-  span.innerHTML = `<svg viewBox="0 0 24 24">${ICONS[name] ?? LUCIDE[name] ?? ''}</svg>`;
+  span.innerHTML = `<svg viewBox="0 0 24 24">${iconMarkup(name)}</svg>`;
   return span;
 }
+
+/** Вміст <svg> іконки — для малювання поза DOM (картинка підсумку). */
+export const iconMarkup = (name) => ICONS[name] ?? LUCIDE[name] ?? '';
 
 /**
  * Згортана група на <details>. Відкритість зберігає той, хто викликає (onToggle):
@@ -270,6 +273,10 @@ export function chips(items, value, onChange, { multi = false } = {}) {
   return row;
 }
 
+// Смуга біля країв екрана, звідки Android веде жест «Назад»
+const EDGE_PX = 24;
+const fromEdge = (e) => e.clientX < EDGE_PX || e.clientX > window.innerWidth - EDGE_PX;
+
 /**
  * Картка зі свайпом: вправо — onRight, вліво — onLeft, тап — onTap.
  * Спрацьовує, якщо протягнути далі третини ширини: короткий рух — це ще прокрутка, а не дія.
@@ -302,7 +309,7 @@ export function swipeable(card, { onRight, onLeft, onTap, rightLabel, leftLabel 
 
   card.addEventListener('pointerdown', (e) => {
     if (e.button !== 0 || e.target.closest('button, a, input')) return;
-    start = { x: e.clientX, y: e.clientY, id: e.pointerId };
+    start = { x: e.clientX, y: e.clientY, id: e.pointerId, edge: fromEdge(e) };
     axis = null; dx = 0; tapArmed = false;
     body.style.transition = 'none';
   });
@@ -313,6 +320,8 @@ export function swipeable(card, { onRight, onLeft, onTap, rightLabel, leftLabel 
     if (!axis) {
       if (Math.abs(mx) < 8 && Math.abs(my) < 8) return;
       axis = Math.abs(mx) > Math.abs(my) ? 'x' : 'y';
+      // Від самого краю — системне «Назад» Android, а не «Зробив»
+      if (axis === 'x' && start.edge) { start = null; axis = null; return; }
       if (axis === 'x') card.setPointerCapture(start.id);
     }
     if (axis !== 'x') return;
@@ -354,7 +363,7 @@ export function swipeStep(el, step, ignore = 'input, textarea, select, .swipe') 
   let start = null;
   el.addEventListener('pointerdown', (e) => {
     // У полі вводу рух — це виділення тексту, на картці — її власний свайп
-    if (e.button !== 0 || e.target.closest(ignore)) return;
+    if (e.button !== 0 || e.target.closest(ignore) || fromEdge(e)) return;
     start = { x: e.clientX, y: e.clientY, id: e.pointerId, axis: null };
   });
   el.addEventListener('pointermove', (e) => {
