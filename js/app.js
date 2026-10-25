@@ -280,13 +280,26 @@ async function mark(item, status) {
   const levelBefore = levelNow(item.activityId);
   // Будь-яка відмітка зупиняє таймер: відрізок, що йшов, додається до витраченого
   const next = { ...item, status, doneAt: M.counts(status) ? M.nowHm() : null, spent: M.elapsed(item), runningSince: null };
-  await save({ plan: { put: [next] } });
-  if (status === 'planned') return;
   const a = act(item.activityId) ?? MISSING;
+  // Курс по порядку: «Зробив» закриває урок із «що саме» (порожнє — наступний) і пише його в справу
+  const lesson = status === 'done' ? lessonFor(a, item.topic) : null;
+  const changes = { plan: { put: [next] } };
+  if (lesson) {
+    if (!item.topic) next.topic = lesson.title.slice(0, 80);
+    changes.activities = { put: [{ ...a, watch: a.watch.map((w) => (w.id === lesson.id ? { ...w, done: M.ymd() } : w)) }] };
+  }
+  await save(changes);
+  if (status === 'planned') return;
   const level = levelNow(item.activityId);
   if (level > levelBefore) celebrate(a, level);
-  toast(level > levelBefore ? `🎉 ${a.name} — рівень ${level}!` : `${a.name}: ${M.STATUS[status].toLowerCase()}`,
-    { label: 'Скасувати', run: () => save({ plan: { put: [prev] } }) });
+  const what = lesson ? `пройдено «${lesson.title}»` : M.STATUS[status].toLowerCase();
+  toast(level > levelBefore ? `🎉 ${a.name} — рівень ${level}!` : `${a.name}: ${what}`, {
+    label: 'Скасувати',
+    run: async () => {
+      await save({ plan: { put: [prev] } });
+      if (lesson) await saveWatch(a.id, (list) => list.map((w) => (w.id === lesson.id ? { ...w, done: '' } : w)));
+    },
+  });
 }
 
 /** Старт таймера. Одночасно йде лише один: інший, що йшов, стає на паузу з накопиченим часом. */
@@ -428,6 +441,18 @@ const pickCount = () => {
 };
 const titleKey = (t) => t.toLocaleLowerCase('uk').replace(/\s+/g, ' ').trim();
 
+// Список «По порядку» — уроки курсу: наступний — перший не пройдений у порядку додавання
+const lessonMode = (a) => Boolean(a?.watchList && a.watchOrder);
+const nextLesson = (a) => (lessonMode(a) ? (a.watch ?? []).find((w) => !w.done) ?? null : null);
+const lessonNo = (a, w) => (a.watch ?? []).findIndex((x) => x.id === w.id) + 1;
+
+/** Урок, який закриває «Зробив»: з «що саме», а без нього — наступний; у «що саме» щось інше — жодного. */
+function lessonFor(a, topic) {
+  if (!lessonMode(a)) return null;
+  if (!topic) return nextLesson(a);
+  return (a.watch ?? []).find((w) => !w.done && titleKey(w.title.slice(0, 80)) === titleKey(topic)) ?? null;
+}
+
 /** Змінити список заняття: fn отримує копію поточного й повертає новий. Заняття береться свіже — його могла змінити синхронізація. */
 async function saveWatch(id, fn) {
   const cur = act(id);
@@ -468,6 +493,11 @@ function watchSheet(a, item = null) {
     ?? state.plan.find((p) => p.activityId === id && p.date === today && p.status === 'planned');
   let picks = null;
   let seenOpen = false;
+  const order = () => lessonMode(act(id) ?? a);
+  const W = () => (order()
+    ? { done: 'пройдено', Done: 'Пройдено', left: 'Ще не пройдено' }
+    : { done: 'переглянуто', Done: 'Переглянуто', left: 'Ще не переглянуто' });
+  const label = (w) => (order() ? `${lessonNo(act(id) ?? a, w)}. ${w.title}` : w.title);
   const body = h('div', { class: 'sheet-body watch' });
   const add = async (text) => {
     const fresh = parseTitles(text, act(id)?.watch ?? []);
@@ -493,7 +523,7 @@ function watchSheet(a, item = null) {
     paint();
     if (!w.done) {
       vibrate(15);
-      toast(`Переглянуто: ${w.title}`, { label: 'Скасувати', run: async () => { await saveWatch(id, (list) => list.map((x) => (x.id === w.id ? { ...x, done: '' } : x))); paint(); } });
+      toast(`${W().Done}: ${w.title}`, { label: 'Скасувати', run: async () => { await saveWatch(id, (list) => list.map((x) => (x.id === w.id ? { ...x, done: '' } : x))); paint(); } });
     }
   };
   const remove = async (w) => {
@@ -523,16 +553,26 @@ function watchSheet(a, item = null) {
   const row = (w, pick = false) => h('div', { class: `remind-row watch-row${w.done ? ' done' : ''}` },
     h('button', {
       type: 'button', class: 'remind-check', 'aria-pressed': String(Boolean(w.done)),
-      'aria-label': w.done ? `Ще не переглянуто: ${w.title}` : `Переглянуто: ${w.title}`, onClick: () => toggle(w),
+      'aria-label': w.done ? `${W().left}: ${w.title}` : `${W().Done}: ${w.title}`, onClick: () => toggle(w),
     }, w.done ? icon('check') : null),
-    h('span', { class: 'remind-text' }, h('span', {}, w.title),
-      w.done ? h('span', { class: 'muted small' }, `переглянуто ${M.dayMonth(w.done)}`) : null),
+    h('span', { class: 'remind-text' }, h('span', {}, label(w)),
+      w.done ? h('span', { class: 'muted small' }, `${W().done} ${M.dayMonth(w.done)}`) : null),
     pick && !w.done && target() ? h('button', {
       type: 'button', class: 'remind-later', 'aria-label': `Обрати на сьогодні: ${w.title}`, onClick: () => choose(w),
     }, icon('next'), 'Обрати') : null,
     pick ? null : h('button', { type: 'button', class: 'icon-btn watch-del', 'aria-label': `Видалити: ${w.title}`, onClick: () => remove(w) }, icon('trash')));
+  // Курс: «Урок N» до кінця списку — оглавлення не треба набирати руками
+  const count = h('input', { type: 'number', inputmode: 'numeric', min: 1, max: 200, placeholder: 'Скільки', 'aria-label': 'Скільки уроків додати' });
+  const addNumbered = () => {
+    const n = Math.min(200, Math.max(0, Math.round(Number(count.value) || 0)));
+    if (!n) { count.focus(); return; }
+    const from = (act(id)?.watch ?? []).length + 1;
+    count.value = '';
+    add(Array.from({ length: n }, (_, i) => `Урок ${from + i}`).join('\n'));
+  };
   const paint = () => {
     const list = act(id)?.watch ?? [];
+    if (order()) { paintCourse(list); return; }
     const left = list.filter((w) => !w.done);
     const seen = list.filter((w) => w.done).sort((x, y) => y.done.localeCompare(x.done));
     const shown = (picks ?? []).map((pid) => list.find((w) => w.id === pid)).filter(Boolean);
@@ -551,8 +591,26 @@ function watchSheet(a, item = null) {
         h('div', { class: 'watch-seen' }, seen.map((w) => row(w))), { open: seenOpen, onToggle: (o) => { seenOpen = o; } }) : null,
     ].flat().filter(Boolean));
   };
+  const paintCourse = (list) => {
+    const left = list.filter((w) => !w.done);
+    const done = list.length - left.length;
+    const next = left[0];
+    body.replaceChildren(...[
+      list.length ? formBox(`Пройдено ${done} з ${list.length}`,
+        h('span', { class: 'bar', style: actStyle(a), role: 'img', 'aria-label': `Пройдено ${done} з ${list.length}` },
+          h('span', { style: { width: `${Math.round((done / list.length) * 100)}%` } })),
+        next ? row(next, true) : h('p', { class: 'muted small' }, 'Курс пройдено 🎉')) : null,
+      h('div', { class: 'watch-add' }, input,
+        h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Додати', onClick: () => add(input.value) }, icon('plus'))),
+      h('div', { class: 'watch-add' }, count, button('plus', 'Додати номерами', '', addNumbered)),
+      h('h3', { class: 'form-box-title watch-head' }, left.length ? `${W().left} · ${left.length}` : W().left),
+      left.length ? left.map((w) => row(w)) : h('p', { class: 'muted small' }, list.length ? 'Усе пройдено. Додай нові уроки.' : 'Додай уроки: по одному, вставкою оглавлення стовпчиком або номерами.'),
+      done ? fold(h('span', { class: 'flabel' }, `${W().Done} · ${done}`),
+        h('div', { class: 'watch-seen' }, list.filter((w) => w.done).map((w) => row(w))), { open: seenOpen, onToggle: (o) => { seenOpen = o; } }) : null,
+    ].flat().filter(Boolean));
+  };
   paint();
-  sheet(`${a.name} · список`, body);
+  sheet(`${a.name} · ${lessonMode(a) ? 'уроки' : 'список'}`, body);
 }
 
 /** Відкрити список з іншої шторки — уже після history.back() її, інакше він закрив би нову. */
@@ -570,6 +628,9 @@ function moveSheet(item) {
 }
 
 // ---------- «Сьогодні» ----------
+
+/** Секунди справи для підсумків; «Зроблено» без таймера — звичні хвилини заняття. */
+const secOf = (p) => M.itemSeconds(p, act(p.activityId)?.minutes);
 
 function weekTotals(start) {
   const acts = activeActs();
@@ -596,7 +657,9 @@ function itemCard(item, slot, date, today, now) {
   if (st === 'done' && item.doneAt) text = `Зроблено ${item.doneAt}`;
   const warn = open && missedLast(a.id, date, today, now);
   const plan = open ? (a.minutes ? `~${a.minutes} хв` : '') : (sec ? `витрачено ${M.duration(sec)}` : '');
-  const sub = [item.topic, plan].filter(Boolean).join(' · ');
+  // Курс: «що саме» не задане — підказуємо наступний урок; «Зробив» його й закриє
+  const lesson = open && !item.topic ? nextLesson(a) : null;
+  const sub = [item.topic || (lesson ? `далі ${lessonNo(a, lesson)}. ${lesson.title}` : ''), plan].filter(Boolean).join(' · ');
   const card = h('article', { class: `card item-card st-${st}`, style: actStyle(a) },
     h('div', { class: 'swipe-body' },
       h('div', { class: 'act-row' }, tile(a),
@@ -653,7 +716,8 @@ function slotGroup(date, slot, today, now) {
       type: 'button', class: 'link-btn', onClick: () => slotPickSheet(date, slot),
     }, icon('plus'), items.length ? 'Додати ще' : 'Запланувати'));
   return folded(`today:${date}:${slot.id}`, head, body,
-    { def: hasOpen || !ended, cls: `card slot-group${isNow ? ' is-now' : ''}` });
+    // Порожнє вікно, що ще не настало, — одним рядком «Вільно»: очі — на поточне й заплановане
+    { def: hasOpen || isNow || (!ended && items.length > 0), cls: `card slot-group${isNow ? ' is-now' : ''}` });
 }
 
 // ---------- пауза ----------
@@ -969,6 +1033,48 @@ function quickSheet() {
     list));
 }
 
+/**
+ * Підсумок тижня на «Сьогодні»: у неділю з початку останнього вікна — цей тиждень, у понеділок — минулий.
+ * «Сховати» ховає саме цей тиждень; наступного підсумок з'явиться знову.
+ */
+function weekSummary(today, now) {
+  const dow = M.parseYmd(today).getDay();
+  const slots = M.slotsFor(today, slotsCfg);
+  const evening = dow === 0 && slots.length && now >= slots[slots.length - 1].from;
+  if (!evening && dow !== 1) return null;
+  const start = M.weekStart(dow === 1 ? M.addDays(today, -1) : today);
+  if (recall('week-sum-hidden') === start) return null;
+  const { done, target: total } = weekTotals(start);
+  if (!total) return null;
+  const rows = activeActs().map((a) => ({ a, cnt: M.weekCount(state.plan, a.id, start), goal: target(a, start), sec: M.weekSeconds(state.plan, a.id, start, a.minutes) }))
+    .filter((x) => x.goal || x.cnt);
+  const sec = rows.reduce((s, x) => s + x.sec, 0);
+  const perDay = M.weekDays(start).map((d) => [d, state.plan.filter((p) => p.date === d && M.counts(p.status)).length]);
+  // Найкращий день — лише коли він справді один і в ньому хоч дві справи
+  const [bestDay, best] = perDay.reduce((m, x) => (x[1] > m[1] ? x : m), ['', 0]);
+  const bestOne = best >= 2 && perDay.filter((x) => x[1] === best).length === 1;
+  const streak = M.dayStreak(state.plan, dow === 1 ? M.addDays(today, -1) : today, pauses());
+  const facts = [
+    sec ? `${M.duration(sec)} на хобі` : '',
+    bestOne ? `найкращий день — ${M.parseYmd(bestDay).toLocaleDateString('uk', { weekday: 'long' })} (${best})` : '',
+    streak >= MIN_STREAK ? `серія ${streak} ${plural(streak, 'день', 'дні', 'днів')}` : '',
+  ].filter(Boolean);
+  const open = () => { remember('plan-mode', 'week'); planDate = start; location.hash = '#plan'; };
+  return h('section', { class: 'card week-sum' },
+    h('div', { class: 'ws-head' },
+      h('div', {}, h('h2', {}, dow === 1 ? 'Минулий тиждень' : 'Підсумок тижня'), h('span', { class: 'muted small' }, M.rangeTitle(start))),
+      h('b', { class: 'ws-total' }, `${done} / ${total}`)),
+    facts.length ? h('p', { class: 'muted small ws-facts' }, facts.join(' · ')) : null,
+    h('div', { class: 'ws-rows' }, rows.map(({ a, cnt, goal }) => h('div', { class: 'ws-row', style: actStyle(a) },
+      h('span', { class: 'ws-name' }, a.name),
+      goalSegs(cnt, goal, 'mini') ?? h('span'),
+      h('b', {}, goal ? `${cnt}/${goal}` : String(cnt)),
+      goal && cnt >= goal ? icon('check', 'ico ws-ok') : h('span', { class: 'ws-ok', 'aria-hidden': 'true' })))),
+    h('div', { class: 'btn-grid ws-btns' },
+      button('calendar', 'У Плані', '', open),
+      button('skip', 'Сховати', 'ghost', () => { remember('week-sum-hidden', start); render(); })));
+}
+
 function viewToday() {
   const today = M.ymd();
   const now = M.nowHm();
@@ -995,10 +1101,23 @@ function viewToday() {
       neighbours(today)),
     keyBanner(),
     pauseBanner(today),
+    weekSummary(today, now),
     remindersToday(today, now),
     button('clock', 'Є кілька хвилин?', 'quick-btn', quickSheet),
     ...cards,
     h('p', { class: 'swipe-hint' }, '← перенести · зробив →', h('br'), 'натисни на справу — усі дії, на вікно — згорнути'));
+}
+
+/** Один раз за весь час: перша відкрита справа сама від'їжджає вправо — підказка, що під нею «Зробив». */
+function swipePeek(view) {
+  if (recall('swipe-peek') || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  // Поверх відкрита шторка («Що нового» тощо) — підказку не побачать, покажемо наступного разу
+  if ($('layer').childElementCount || !view.isConnected) return;
+  const card = view.querySelector('.slot-group[open] .item-card:is(.st-planned, .st-missed, .st-active)');
+  if (!card) return;
+  remember('swipe-peek', '1');
+  card.classList.add('peek');
+  card.addEventListener('animationend', () => card.classList.remove('peek'), { once: true });
 }
 
 // ---------- «План» ----------
@@ -1547,7 +1666,7 @@ function viewWeek() {
     off ? h('p', { class: 'pause-note' }, icon('moon'), `Пауза ${off} ${plural(off, 'день', 'дні', 'днів')} — цілі тижня менші`) : null);
   for (const a of activeActs()) {
     const cnt = M.weekCount(state.plan, a.id, start);
-    const sec = M.weekSeconds(state.plan, a.id, start);
+    const sec = M.weekSeconds(state.plan, a.id, start, a.minutes);
     const goal = target(a, start);
     const pct = goal ? Math.min(100, Math.round((cnt / goal) * 100)) : 100;
     // Серія — станом на кінець переглянутого тижня (минулий тиждень показує тодішню)
@@ -1611,7 +1730,7 @@ function viewMonth() {
     const st = M.shownStatus(p, slotOfItem(p), today, now);
     return st !== 'planned' && st !== 'active' && !(st === 'missed' && M.pauseOn(p.date, pauses()));
   });
-  const totalSec = counted.reduce((s, p) => s + (p.spent || 0), 0);
+  const totalSec = counted.reduce((s, p) => s + secOf(p), 0);
   const rate = closed.length ? Math.round((counted.length / closed.length) * 100) : null;
 
   const totals = h('section', { class: 'card stat-totals' },
@@ -1623,7 +1742,7 @@ function viewMonth() {
   const per = state.activities
     .map((a) => {
       const mine = counted.filter((p) => p.activityId === a.id);
-      return { a, cnt: mine.length, sec: mine.reduce((s, p) => s + (p.spent || 0), 0) };
+      return { a, cnt: mine.length, sec: mine.reduce((s, p) => s + secOf(p), 0) };
     })
     .filter((x) => x.cnt || !x.a.archived)
     .sort((x, y) => (y.sec - x.sec) || (y.cnt - x.cnt) || (x.a.order - y.a.order));
@@ -1639,16 +1758,16 @@ function viewMonth() {
 
   // По днях: стовпчик хвилин, складений з кольорів занять; день паузи — штрихований
   const daySec = (d) => counted.filter((p) => p.date === d);
-  const maxDay = Math.max(1, ...days.map((d) => daySec(d).reduce((s, p) => s + (p.spent || 0), 0)));
+  const maxDay = Math.max(1, ...days.map((d) => daySec(d).reduce((s, p) => s + secOf(p), 0)));
   const chart = h('div', { class: 'month-chart', role: 'img', 'aria-label': `Хвилини по днях, ${M.monthTitle(first)}` },
     days.map((d) => {
       const mine = daySec(d);
-      const sec = mine.reduce((s, p) => s + (p.spent || 0), 0);
+      const sec = mine.reduce((s, p) => s + secOf(p), 0);
       const label = `${M.dayMonth(d)}: ${mine.length ? `${mine.length} · ${M.duration(sec)}` : 'нічого'}`;
       return h('div', { class: `mc-col${d === today ? ' today' : ''}${M.pauseOn(d, pauses()) ? ' paused' : ''}`, title: label },
         h('div', { class: 'mc-bar' },
           mine.map((p) => h('i', {
-            style: { ...actStyle(act(p.activityId)), height: `${sec ? Math.max(4, (100 * (p.spent || 0)) / maxDay) : 8}%` },
+            style: { ...actStyle(act(p.activityId)), height: `${sec ? Math.max(4, (100 * secOf(p)) / maxDay) : 8}%` },
           }))),
         h('span', { class: 'mc-day' }, String(M.parseYmd(d).getDate())));
     }));
@@ -1664,7 +1783,7 @@ function viewMonth() {
     totals,
     folded('month-acts', h('h2', {}, 'По заняттях'), byAct, { persist: true, cls: 'card' }),
     folded('month-days', h('h2', {}, 'По днях'), h('div', { class: 'fold-body' }, chart,
-      h('p', { class: 'muted small' }, 'Висота — хвилини за день; без таймера справа показана низьким стовпчиком. Штрих — пауза.')),
+      h('p', { class: 'muted small' }, 'Висота — хвилини за день; «Зроблено» без таймера — звичні хвилини заняття, мінімум без таймера — низьким стовпчиком. Штрих — пауза.')),
     { persist: true, cls: 'card' }));
   swipeStep(root, step);
   return root;
@@ -2099,8 +2218,9 @@ function editActivity(orig) {
         repWins,
         h('p', { class: 'muted small' }, "У ці дні справа сама з'являється в плані на тиждень уперед — у кожному обраному вікні (усі три — тричі на день). Прибрав чи переніс якусь — назад не повернеться. Без днів — розкладу немає."))),
     formBox('Список',
-      chips([['off', 'Немає'], ['on', 'Вести список']], d.watchList ? 'on' : 'off', (v) => { d.watchList = v === 'on'; }),
-      h('p', { class: 'muted small' }, 'Фільми, книги, ігри — що хочеш спробувати. Відкривається значком на картці заняття; «Порадь 7» вибере навмання з не переглянутого. Вимкнеш — назви не зникнуть.')),
+      chips([['off', 'Немає'], ['on', 'Навмання'], ['order', 'По порядку']], d.watchList ? (d.watchOrder ? 'order' : 'on') : 'off',
+        (v) => { d.watchList = v !== 'off'; d.watchOrder = v === 'order'; }),
+      h('p', { class: 'muted small' }, 'Навмання — фільми, книги, ігри: «Порадь» вибере з не переглянутого. По порядку — уроки курсу: наступний урок підказується в справі, «Зробив» його закриває, видно «7 з 40». Відкривається значком на картці заняття; вимкнеш — назви не зникнуть.')),
     h('div', { class: 'btn-grid' },
       button('check', 'Зберегти', 'primary', async () => {
         d.name = name.value.trim();
@@ -2175,19 +2295,26 @@ function fitLine(a) {
 }
 
 /**
- * Картка заняття: угорі іконка й назва (праворуч від них — теплова карта й ⋮⋮), далі параметри одним рядком,
- * ціль тижня на всю ширину, унизу дрібно — рівень, де виходить, серія.
+ * Картка заняття: угорі іконка й назва (праворуч від них — розгортка прогресу й ⋮⋮), далі параметри одним рядком,
+ * ціль тижня на всю ширину, унизу — серія й рівень коротко. Смужка рівня й «де виходить» — у розгортці.
  */
 function actCard(a) {
   const where = (a.slots ?? []).map((id) => slotsCfg.weekday.find((s) => s.id === id)?.label).filter(Boolean).join(', ');
-  const meta = [`${a.weeklyTarget}×/тиж`, a.minutes ? `~${a.minutes} хв` : '', where, a.minVersion ? `мін.: ${a.minVersion}` : '']
-    .filter(Boolean).join(' · ');
+  const course = lessonMode(a) && a.watch?.length ? `уроки ${a.watch.filter((w) => w.done).length}/${a.watch.length}` : '';
+  const meta = [`${a.weeklyTarget}×/тиж`, a.minutes ? `~${a.minutes} хв` : '', where, course].filter(Boolean).join(' · ');
+  const foot = [a.archived ? null : weekStreakBadge(a), levelChip(a)].filter(Boolean);
   return h('button', { type: 'button', class: `card act-card act-tidy${a.archived ? ' archived' : ''}`, style: actStyle(a), onClick: () => editActivity(a) },
     h('span', { class: 'act-head' }, tile(a), h('span', { class: 'act-name' }, a.name)),
     h('span', { class: 'act-sub' }, meta),
     a.archived ? null : weekGoalLine(a),
     M.repeatOn(a) ? h('span', { class: 'repeat-line' }, icon('refresh'), repeatText(a)) : null,
-    h('span', { class: 'act-foot' }, levelLine(a), fitLine(a), a.archived ? null : weekStreakBadge(a)));
+    foot.length ? h('span', { class: 'act-foot' }, foot) : null);
+}
+
+/** Рівень коротко для списку; перший рівень з порожньою смужкою — лише шум, його не показуємо. */
+function levelChip(a) {
+  const { level } = M.levelOf(M.activityXp(state.plan, a.id));
+  return level > 1 ? h('span', { class: 'lvl-chip' }, icon('trophy'), `Рів. ${level}`) : null;
 }
 
 // ---------- теплова карта заняття ----------
@@ -2313,6 +2440,7 @@ function heatPanel(a, heat) {
   }));
   const days = h('span', { class: 'heat-days', 'aria-hidden': 'true' }, M.DAY_SHORT.map((d, i) => h('span', {}, i % 2 ? '' : d)));
   return h('div', { class: 'heat-panel', style: actStyle(a) },
+    h('div', { class: 'heat-stats' }, levelLine(a), fitLine(a)),
     info,
     h('div', { class: 'heat-frame' }, h('span', {}), months, days, grid),
     h('div', { class: 'heat-legend muted small' }, 'менше',
@@ -2327,7 +2455,7 @@ function actRow(a, heat, drag = true) {
   let panel = heatOpen.has(a.id) ? heatPanel(a, heat) : null;
   const toggle = h('button', {
     type: 'button', class: `heat-toggle${panel ? ' on' : ''}`, 'aria-expanded': String(Boolean(panel)),
-    'aria-label': `Теплова карта «${a.name}» за ${HEAT_WEEKS} тижнів`,
+    'aria-label': `Рівень і теплова карта «${a.name}» за ${HEAT_WEEKS} тижнів`,
     onClick: () => {
       if (panel) { panel.remove(); panel = null; heatOpen.delete(a.id); } else { panel = heatPanel(a, heatIndex()); wrap.append(panel); heatOpen.add(a.id); }
       toggle.classList.toggle('on', Boolean(panel));
@@ -2348,7 +2476,7 @@ function actRow(a, heat, drag = true) {
   }, icon('grip')) : null;
   const list = a.watchList ? h('button', {
     type: 'button', class: 'heat-toggle watch-open',
-    'aria-label': `Список «${a.name}»: ${(a.watch ?? []).filter((w) => !w.done).length} не переглянуто`,
+    'aria-label': `${lessonMode(a) ? 'Уроки' : 'Список'} «${a.name}»: ${(a.watch ?? []).filter((w) => !w.done).length} ${lessonMode(a) ? 'не пройдено' : 'не переглянуто'}`,
     onClick: () => watchSheet(act(a.id) ?? a),
   }, icon('list')) : null;
   if (list) box.classList.add('has-list');
@@ -2861,12 +2989,14 @@ function botSection() {
     }
     await connectBot(u, key.value, status);
   };
+  const explain = h('p', { class: 'muted small' },
+    'План, заняття й нагадування лежать у спільній базі на сервері — однакові на всіх пристроях; без інтернету все піде пізніше. Цю ж базу читає Telegram-бот: нагадує з кнопками, відмітки звідти повертаються сюди. Ключ доступу дає команда /key у ',
+    h('a', { href: BOT_URL, target: '_blank', rel: 'noopener' }, '@hobby_planner_bot'),
+    '; досить вставити в одному застосунку — тут, у Вазі чи Марнотраті.');
   return folded('set-bot', head, h('div', { class: 'form fold-body' },
     status,
-    h('p', { class: 'muted small' },
-      'План, заняття й нагадування лежать у спільній базі на сервері — однакові на всіх пристроях; без інтернету все піде пізніше. Цю ж базу читає Telegram-бот: нагадує з кнопками, відмітки звідти повертаються сюди. Ключ доступу дає команда /key у ',
-      h('a', { href: BOT_URL, target: '_blank', rel: 'noopener' }, '@hobby_planner_bot'),
-      '; досить вставити в одному застосунку — тут, у Вазі чи Марнотраті.'),
+    // Уже підключено — пояснення не потрібне щоразу, лишається під «Як це працює»
+    cfg.key ? h('details', { class: 'about-more' }, h('summary', {}, 'Як це працює'), explain) : explain,
     h('label', { for: 'f-bot-url' }, 'Адреса сервера'), url,
     h('label', { for: 'f-bot-key' }, 'Ключ доступу'), key,
     h('div', { class: 'btn-grid' },
@@ -2933,7 +3063,7 @@ function aboutPanel() {
       h('li', {}, '«Заняття» — заведи свої хобі: скільки разів на тиждень, скільки хвилин, мінімальна версія.'),
       h('li', {}, '«План» — тапом розстав заняття по вікнах дня. Повторюється щотижня — постав постійний розклад у картці заняття.'),
       h('li', {}, '«Сьогодні» — свайп по справі вправо — зробив, вліво — перенести. ▶ на картці вмикає таймер.'),
-      h('li', {}, 'Рівень заняття росте від зарахованих справ: повна — 10 досвіду, мінімум — 5, плюс 1 за кожні 10 хв таймера. На картці заняття — ціль тижня, рівень і вікно, де воно найкраще виходить (◎); 📅 — теплова карта за 12 тижнів.'),
+      h('li', {}, 'Рівень заняття росте від зарахованих справ: повна — 10 досвіду, мінімум — 5, плюс 1 за кожні 10 хв таймера. На картці заняття — ціль тижня, серія й рівень; 📅 — смужка рівня, вікно, де заняття найкраще виходить (◎), і теплова карта за 12 тижнів.'),
       h('li', {}, 'Нагадування в Telegram — Налаштування → «Дані» → «Синхронізація». На телефоні й комп’ютері — той самий ключ, тоді план однаковий на обох.'),
       h('li', {}, 'Без синхронізації й Google Диска дані лише на цьому пристрої — час від часу зберігай копію.'))),
     more('Що й коли пише бот', h('div', { class: 'muted small' },
@@ -2945,8 +3075,8 @@ function aboutPanel() {
       h('p', {}, '«Не забудь» — на початку свого часу, щогодини й за 15 хв до кінця, поки не «Зроблено». Вага — у час зважування з «Ваги», через годину ще раз.'),
       h('p', {}, 'Тихі години — бот мовчить, що настало, прийде одним повідомленням після них. Пауза — про заняття й вагу мовчить, «Не забудь» і таймер — пише.'),
       h('p', {}, 'Синхронізація — за кілька секунд після зміни, коли відкриваєш і згортаєш застосунок, і щохвилини, поки він на екрані. Одне заняття у вікні — одна справа: дубль із двох пристроїв бот прибере сам.'))),
-    h('p', { class: 'muted small' },
-      link('https://github.com/VitaliyLobko/hobby-planner/issues/new', 'Повідомити про помилку'), ' · ',
+    h('p', { class: 'muted small about-links' },
+      link('https://github.com/VitaliyLobko/hobby-planner/issues/new', 'Повідомити про помилку'),
       link('https://github.com/VitaliyLobko/hobby-planner', 'Вихідний код')));
 }
 
@@ -3010,7 +3140,9 @@ const TAB_ORDER = ['today', 'plan', 'acts'];
 function render() {
   const { title } = VIEWS[tab];
   $('title').textContent = typeof title === 'function' ? title() : title;
-  $('view').replaceChildren(VIEWS[tab].render());
+  const view = VIEWS[tab].render();
+  $('view').replaceChildren(view);
+  if (tab === 'today') setTimeout(() => swipePeek(view), 700);
   for (const a of document.querySelectorAll('.tabs a')) {
     const on = a.dataset.tab === tab;
     a.classList.toggle('active', on);
