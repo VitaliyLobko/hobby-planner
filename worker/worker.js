@@ -252,6 +252,8 @@ async function webhookSecret(env) {
 }
 
 const elapsed = (it, now) => (it.spent || 0) + (it.runningSince ? Math.max(0, Math.floor((now - it.runningSince) / 1000)) : 0);
+// Для підсумків, як itemSeconds у js/model.js: «Зроблено» без таймера — звичні хвилини заняття, мінімум — 0
+const itemSec = (it, minutes) => it.spent || (it.status === 'done' ? (minutes || 0) * 60 : 0);
 
 function duration(sec) {
   if (sec > 0 && sec < 30) return '<1 хв';
@@ -973,10 +975,14 @@ async function onSync(request, env) {
     put('templates', JSON.stringify(body.templates));
     put('templates_at', appAt.templates);
   }
-  // Групи занять — теж лише зберігаємо: група в занятті їде разом із ним, а назви й іконки — тут
+  // Групи занять — теж лише зберігаємо: група в занятті їде разом із ним, а назви, іконки й кольори — тут.
+  // Колір групи обов'язково: заняття без свого кольору (color: '') фарбуються кольором групи
   if (Array.isArray(body.groups) && fresher('groups')) {
     const list = body.groups.filter((g) => g?.id && typeof g.name === 'string')
-      .map(({ id, name, icon }) => ({ id: String(id), name: name.slice(0, 60), icon: typeof icon === 'string' ? icon : '' }));
+      .map(({ id, name, icon, color }) => ({
+        id: String(id), name: name.slice(0, 60), icon: typeof icon === 'string' ? icon : '',
+        color: typeof color === 'string' ? color.slice(0, 20) : '',
+      }));
     put('groups', JSON.stringify(list));
     put('groups_at', appAt.groups);
   }
@@ -1464,7 +1470,7 @@ async function sendEvening(env, chatId, now, { paused = false } = {}) {
     // Справи: заголовок з підсумком і серією, нижче — лише вікна, де щось було
     any = true;
     const done = items.filter((x) => x.status === 'done' || x.status === 'min');
-    const sec = done.reduce((s, x) => s + (x.spent || 0), 0);
+    const sec = done.reduce((s, x) => s + itemSec(x, (acts.get(x.activityId) ?? MISSING).minutes), 0);
     lines.push('', `📋 <b>Справи</b> · зараховано ${done.length} з ${items.length}${sec ? ` · ${dur(sec)}` : ''}`);
     const streak = streakLine(await dayStreak(env, date, await pausesOf(env)), false);
     if (streak) lines.push(`<i>${streak}</i>`);
@@ -1518,7 +1524,7 @@ async function sendToday(env, chatId, now, title, morning = false) {
   } else {
     lines.push(...planLines(date, items, cfg, acts, tz, now));
     const done = items.filter((x) => x.status === 'done' || x.status === 'min');
-    const sec = done.reduce((s, x) => s + (x.spent || 0), 0);
+    const sec = done.reduce((s, x) => s + itemSec(x, (acts.get(x.activityId) ?? MISSING).minutes), 0);
     lines.push(...remindLines);
     const minutes = items.reduce((s, x) => s + ((acts.get(x.activityId) ?? MISSING).minutes || 0), 0);
     lines.push('', morning
@@ -1595,7 +1601,7 @@ async function sendWeek(env, chatId, now, { offerNext = false } = {}) {
   const actLines = [];
   for (const a of acts) {
     const mine = items.filter((x) => x.activityId === a.id);
-    const sec = mine.reduce((s, x) => s + (x.spent || 0), 0);
+    const sec = mine.reduce((s, x) => s + itemSec(x, a.minutes), 0);
     const target = weekTarget(a, start, pauses);
     doneAll += Math.min(mine.length, target);
     targetAll += target;

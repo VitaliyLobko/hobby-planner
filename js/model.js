@@ -343,12 +343,18 @@ export function weekTarget(a, start, pauses) {
   return days === 7 ? a.weeklyTarget : Math.round((a.weeklyTarget * days) / 7);
 }
 
+/**
+ * Секунди справи для підсумків: таймер — як є; «Зроблено» без таймера — звичні хвилини заняття (приблизно),
+ * мінімум без таймера — 0: скільки він триває, невідомо. Досвід (itemXp) рахує лише справжній таймер.
+ */
+export const itemSeconds = (p, minutes = 0) => p.spent || (p.status === 'done' ? (minutes || 0) * 60 : 0);
+
 /** Хвилини, витрачені на заняття за тиждень (лише зараховані рази). */
-export function weekSeconds(plan, activityId, start) {
+export function weekSeconds(plan, activityId, start, minutes = 0) {
   const end = addDays(start, 6);
   return plan
     .filter((p) => p.activityId === activityId && p.date >= start && p.date <= end && counts(p.status))
-    .reduce((s, p) => s + (p.spent || 0), 0);
+    .reduce((s, p) => s + itemSeconds(p, minutes), 0);
 }
 
 /** Скільки разів заняття зараховано за тиждень (зроблено або мінімум). */
