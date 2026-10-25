@@ -1041,11 +1041,15 @@ function quickSheet() {
 /**
  * Що зроблено за тиждень від start: скільки з цілі, рядки занять і факти (час, найкращий день, серія).
  * Серія — станом на lastDay. Спільне для картки підсумку й картинки.
+ * Лише заняття, що цього тижня були в плані: ціль є в кожного, а нерозплановані — шум.
  */
 function weekReport(start, lastDay) {
-  const { done, target: total } = weekTotals(start);
-  const rows = activeActs().map((a) => ({ a, cnt: M.weekCount(state.plan, a.id, start), goal: target(a, start), sec: M.weekSeconds(state.plan, a.id, start, a.minutes) }))
-    .filter((x) => x.goal || x.cnt);
+  const end = M.addDays(start, 6);
+  const inWeek = new Set(state.plan.filter((p) => p.date >= start && p.date <= end).map((p) => p.activityId));
+  const rows = activeActs().filter((a) => inWeek.has(a.id))
+    .map((a) => ({ a, cnt: M.weekCount(state.plan, a.id, start), goal: target(a, start), sec: M.weekSeconds(state.plan, a.id, start, a.minutes) }));
+  const done = rows.reduce((s, x) => s + Math.min(x.cnt, x.goal), 0);
+  const total = rows.reduce((s, x) => s + x.goal, 0);
   const sec = rows.reduce((s, x) => s + x.sec, 0);
   const perDay = M.weekDays(start).map((d) => [d, state.plan.filter((p) => p.date === d && M.counts(p.status)).length]);
   // Найкращий день — лише коли він справді один і в ньому хоч дві справи
