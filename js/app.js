@@ -1095,13 +1095,13 @@ async function shareWeek(start, title, lastDay) {
 }
 
 /**
- * Підсумок тижня на «Сьогодні»: у неділю з початку останнього вікна — цей тиждень, у понеділок — минулий.
+ * Підсумок тижня на «Сьогодні»: у неділю з кінця останнього вікна — цей тиждень, у понеділок — минулий.
  * «Сховати» ховає саме цей тиждень; наступного підсумок з'явиться знову.
  */
 function weekSummary(today, now) {
   const dow = M.parseYmd(today).getDay();
   const slots = M.slotsFor(today, slotsCfg);
-  const evening = dow === 0 && slots.length && now >= slots[slots.length - 1].from;
+  const evening = dow === 0 && slots.length && now >= slots[slots.length - 1].to;
   if (!evening && dow !== 1) return null;
   const start = M.weekStart(dow === 1 ? M.addDays(today, -1) : today);
   if (recall('week-sum-hidden') === start) return null;
