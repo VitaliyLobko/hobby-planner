@@ -653,7 +653,8 @@ function slotGroup(date, slot, today, now) {
       type: 'button', class: 'link-btn', onClick: () => slotPickSheet(date, slot),
     }, icon('plus'), items.length ? 'Додати ще' : 'Запланувати'));
   return folded(`today:${date}:${slot.id}`, head, body,
-    { def: hasOpen || !ended, cls: `card slot-group${isNow ? ' is-now' : ''}` });
+    // Порожнє вікно, що ще не настало, — одним рядком «Вільно»: очі — на поточне й заплановане
+    { def: hasOpen || isNow || (!ended && items.length > 0), cls: `card slot-group${isNow ? ' is-now' : ''}` });
 }
 
 // ---------- пауза ----------
@@ -999,6 +1000,18 @@ function viewToday() {
     button('clock', 'Є кілька хвилин?', 'quick-btn', quickSheet),
     ...cards,
     h('p', { class: 'swipe-hint' }, '← перенести · зробив →', h('br'), 'натисни на справу — усі дії, на вікно — згорнути'));
+}
+
+/** Один раз за весь час: перша відкрита справа сама від'їжджає вправо — підказка, що під нею «Зробив». */
+function swipePeek(view) {
+  if (recall('swipe-peek') || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  // Поверх відкрита шторка («Що нового» тощо) — підказку не побачать, покажемо наступного разу
+  if ($('layer').childElementCount || !view.isConnected) return;
+  const card = view.querySelector('.slot-group[open] .item-card:is(.st-planned, .st-missed, .st-active)');
+  if (!card) return;
+  remember('swipe-peek', '1');
+  card.classList.add('peek');
+  card.addEventListener('animationend', () => card.classList.remove('peek'), { once: true });
 }
 
 // ---------- «План» ----------
@@ -2175,19 +2188,25 @@ function fitLine(a) {
 }
 
 /**
- * Картка заняття: угорі іконка й назва (праворуч від них — теплова карта й ⋮⋮), далі параметри одним рядком,
- * ціль тижня на всю ширину, унизу дрібно — рівень, де виходить, серія.
+ * Картка заняття: угорі іконка й назва (праворуч від них — розгортка прогресу й ⋮⋮), далі параметри одним рядком,
+ * ціль тижня на всю ширину, унизу — серія й рівень коротко. Смужка рівня й «де виходить» — у розгортці.
  */
 function actCard(a) {
   const where = (a.slots ?? []).map((id) => slotsCfg.weekday.find((s) => s.id === id)?.label).filter(Boolean).join(', ');
-  const meta = [`${a.weeklyTarget}×/тиж`, a.minutes ? `~${a.minutes} хв` : '', where, a.minVersion ? `мін.: ${a.minVersion}` : '']
-    .filter(Boolean).join(' · ');
+  const meta = [`${a.weeklyTarget}×/тиж`, a.minutes ? `~${a.minutes} хв` : '', where].filter(Boolean).join(' · ');
+  const foot = [a.archived ? null : weekStreakBadge(a), levelChip(a)].filter(Boolean);
   return h('button', { type: 'button', class: `card act-card act-tidy${a.archived ? ' archived' : ''}`, style: actStyle(a), onClick: () => editActivity(a) },
     h('span', { class: 'act-head' }, tile(a), h('span', { class: 'act-name' }, a.name)),
     h('span', { class: 'act-sub' }, meta),
     a.archived ? null : weekGoalLine(a),
     M.repeatOn(a) ? h('span', { class: 'repeat-line' }, icon('refresh'), repeatText(a)) : null,
-    h('span', { class: 'act-foot' }, levelLine(a), fitLine(a), a.archived ? null : weekStreakBadge(a)));
+    foot.length ? h('span', { class: 'act-foot' }, foot) : null);
+}
+
+/** Рівень коротко для списку; перший рівень з порожньою смужкою — лише шум, його не показуємо. */
+function levelChip(a) {
+  const { level } = M.levelOf(M.activityXp(state.plan, a.id));
+  return level > 1 ? h('span', { class: 'lvl-chip' }, icon('trophy'), `Рів. ${level}`) : null;
 }
 
 // ---------- теплова карта заняття ----------
@@ -2313,6 +2332,7 @@ function heatPanel(a, heat) {
   }));
   const days = h('span', { class: 'heat-days', 'aria-hidden': 'true' }, M.DAY_SHORT.map((d, i) => h('span', {}, i % 2 ? '' : d)));
   return h('div', { class: 'heat-panel', style: actStyle(a) },
+    h('div', { class: 'heat-stats' }, levelLine(a), fitLine(a)),
     info,
     h('div', { class: 'heat-frame' }, h('span', {}), months, days, grid),
     h('div', { class: 'heat-legend muted small' }, 'менше',
@@ -2327,7 +2347,7 @@ function actRow(a, heat, drag = true) {
   let panel = heatOpen.has(a.id) ? heatPanel(a, heat) : null;
   const toggle = h('button', {
     type: 'button', class: `heat-toggle${panel ? ' on' : ''}`, 'aria-expanded': String(Boolean(panel)),
-    'aria-label': `Теплова карта «${a.name}» за ${HEAT_WEEKS} тижнів`,
+    'aria-label': `Рівень і теплова карта «${a.name}» за ${HEAT_WEEKS} тижнів`,
     onClick: () => {
       if (panel) { panel.remove(); panel = null; heatOpen.delete(a.id); } else { panel = heatPanel(a, heatIndex()); wrap.append(panel); heatOpen.add(a.id); }
       toggle.classList.toggle('on', Boolean(panel));
@@ -2861,12 +2881,14 @@ function botSection() {
     }
     await connectBot(u, key.value, status);
   };
+  const explain = h('p', { class: 'muted small' },
+    'План, заняття й нагадування лежать у спільній базі на сервері — однакові на всіх пристроях; без інтернету все піде пізніше. Цю ж базу читає Telegram-бот: нагадує з кнопками, відмітки звідти повертаються сюди. Ключ доступу дає команда /key у ',
+    h('a', { href: BOT_URL, target: '_blank', rel: 'noopener' }, '@hobby_planner_bot'),
+    '; досить вставити в одному застосунку — тут, у Вазі чи Марнотраті.');
   return folded('set-bot', head, h('div', { class: 'form fold-body' },
     status,
-    h('p', { class: 'muted small' },
-      'План, заняття й нагадування лежать у спільній базі на сервері — однакові на всіх пристроях; без інтернету все піде пізніше. Цю ж базу читає Telegram-бот: нагадує з кнопками, відмітки звідти повертаються сюди. Ключ доступу дає команда /key у ',
-      h('a', { href: BOT_URL, target: '_blank', rel: 'noopener' }, '@hobby_planner_bot'),
-      '; досить вставити в одному застосунку — тут, у Вазі чи Марнотраті.'),
+    // Уже підключено — пояснення не потрібне щоразу, лишається під «Як це працює»
+    cfg.key ? h('details', { class: 'about-more' }, h('summary', {}, 'Як це працює'), explain) : explain,
     h('label', { for: 'f-bot-url' }, 'Адреса сервера'), url,
     h('label', { for: 'f-bot-key' }, 'Ключ доступу'), key,
     h('div', { class: 'btn-grid' },
@@ -2933,7 +2955,7 @@ function aboutPanel() {
       h('li', {}, '«Заняття» — заведи свої хобі: скільки разів на тиждень, скільки хвилин, мінімальна версія.'),
       h('li', {}, '«План» — тапом розстав заняття по вікнах дня. Повторюється щотижня — постав постійний розклад у картці заняття.'),
       h('li', {}, '«Сьогодні» — свайп по справі вправо — зробив, вліво — перенести. ▶ на картці вмикає таймер.'),
-      h('li', {}, 'Рівень заняття росте від зарахованих справ: повна — 10 досвіду, мінімум — 5, плюс 1 за кожні 10 хв таймера. На картці заняття — ціль тижня, рівень і вікно, де воно найкраще виходить (◎); 📅 — теплова карта за 12 тижнів.'),
+      h('li', {}, 'Рівень заняття росте від зарахованих справ: повна — 10 досвіду, мінімум — 5, плюс 1 за кожні 10 хв таймера. На картці заняття — ціль тижня, серія й рівень; 📅 — смужка рівня, вікно, де заняття найкраще виходить (◎), і теплова карта за 12 тижнів.'),
       h('li', {}, 'Нагадування в Telegram — Налаштування → «Дані» → «Синхронізація». На телефоні й комп’ютері — той самий ключ, тоді план однаковий на обох.'),
       h('li', {}, 'Без синхронізації й Google Диска дані лише на цьому пристрої — час від часу зберігай копію.'))),
     more('Що й коли пише бот', h('div', { class: 'muted small' },
@@ -2945,8 +2967,8 @@ function aboutPanel() {
       h('p', {}, '«Не забудь» — на початку свого часу, щогодини й за 15 хв до кінця, поки не «Зроблено». Вага — у час зважування з «Ваги», через годину ще раз.'),
       h('p', {}, 'Тихі години — бот мовчить, що настало, прийде одним повідомленням після них. Пауза — про заняття й вагу мовчить, «Не забудь» і таймер — пише.'),
       h('p', {}, 'Синхронізація — за кілька секунд після зміни, коли відкриваєш і згортаєш застосунок, і щохвилини, поки він на екрані. Одне заняття у вікні — одна справа: дубль із двох пристроїв бот прибере сам.'))),
-    h('p', { class: 'muted small' },
-      link('https://github.com/VitaliyLobko/hobby-planner/issues/new', 'Повідомити про помилку'), ' · ',
+    h('p', { class: 'muted small about-links' },
+      link('https://github.com/VitaliyLobko/hobby-planner/issues/new', 'Повідомити про помилку'),
       link('https://github.com/VitaliyLobko/hobby-planner', 'Вихідний код')));
 }
 
@@ -3010,7 +3032,9 @@ const TAB_ORDER = ['today', 'plan', 'acts'];
 function render() {
   const { title } = VIEWS[tab];
   $('title').textContent = typeof title === 'function' ? title() : title;
-  $('view').replaceChildren(VIEWS[tab].render());
+  const view = VIEWS[tab].render();
+  $('view').replaceChildren(view);
+  if (tab === 'today') setTimeout(() => swipePeek(view), 700);
   for (const a of document.querySelectorAll('.tabs a')) {
     const on = a.dataset.tab === tab;
     a.classList.toggle('active', on);
