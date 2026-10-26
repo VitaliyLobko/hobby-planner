@@ -223,9 +223,26 @@ a { color: var(--accent); }
 .slot-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .slot-name { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 700; color: var(--muted); }
 .slot-head .slot-name { margin-right: auto; }
+/* «+» вікна: коло 36 px, зона дотику 44 px — псевдоелементом, щоб рядок заголовка не ставав вищим */
+.slot-add {
+  position: relative; flex: none; width: 36px; height: 36px; padding: 0; border: 0; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent);
+}
+.slot-add::after { content: ''; position: absolute; inset: -4px; }
+.slot-add .ico svg { width: 22px; height: 22px; stroke-width: 2.5; }
+.slot-add:active { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+/* Поточне вікно без справ — «+» суцільний: головна дія зараз */
+.slot-group.is-now .slot-add.empty { background: var(--ok-solid); color: #fff; }
 /* У «Сьогодні» іконка вікна крупніша — по ній орієнтуються в дні; шрифт звичайний, щоб рядок не рвався */
 .slot-group .slot-name { gap: 8px; }
 .slot-group .slot-name .ico svg { width: 22px; height: 22px; }
+.slot-time { white-space: nowrap; }
+/* Вузький телефон: час вікна — другим рядком цілком, а не «12:00–» / «18:00» */
+@media (max-width: 380px) {
+  .slot-group .slot-sep { display: none; }
+  .slot-group .slot-time { display: block; font-size: 12px; font-weight: 600; }
+}
 .dots { display: inline-flex; gap: 3px; flex: none; }
 .slot-group .card.swipe { border: 0; }
 .slot-group .card.swipe .swipe-body { background: var(--surface-2); }

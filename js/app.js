@@ -197,7 +197,8 @@ function tile(a) {
 }
 
 function slotName(slot) {
-  return h('span', { class: 'slot-name' }, icon(M.SLOT_ICONS[slot.id]), `${slot.label} · ${slot.from}–${slot.to}`);
+  return h('span', { class: 'slot-name' }, icon(M.SLOT_ICONS[slot.id]),
+    h('span', { class: 'slot-label' }, slot.label, h('span', { class: 'slot-sep' }, ' · '), h('span', { class: 'slot-time' }, `${slot.from}–${slot.to}`)));
 }
 
 /** «19:30» → хвилини від півночі; 23:59 — кінець доби, щоб вечір не був на хвилину коротшим. */
@@ -710,16 +711,17 @@ function slotGroup(date, slot, today, now) {
   const isNow = date === today && now >= slot.from && now < slot.to;
   const ended = date < today || (date === today && now >= slot.to);
   const hasOpen = items.some((p) => isOpen(M.shownStatus(p, slot, today, now)));
+  // «+» у заголовку: видно й у згорнутому вікні; тап не згортає вікно, а відкриває шторку саме цього вікна
+  const add = ended ? null : h('button', {
+    type: 'button', class: `slot-add${items.length ? '' : ' empty'}`, 'aria-label': `${items.length ? 'Додати ще' : 'Запланувати'} у вікно ${slot.label}`,
+    onClick: (e) => { e.preventDefault(); e.stopPropagation(); slotPickSheet(date, slot); },
+  }, icon('plus'));
   const head = slotHead(h('span', { class: 'slot-head' },
-    slotName(slot), dots(items), slotBadge(items, slot, date, today, now, isNow)), slot, date, today, now);
+    slotName(slot), dots(items), slotBadge(items, slot, date, today, now, isNow), add), slot, date, today, now);
   const body = h('div', { class: 'slot-items' },
     slotLoad(items.filter((p) => isOpen(M.shownStatus(p, slot, today, now))), slot, date, today, now),
     items.map((p) => itemCard(p, slot, date, today, now)),
-    traceAt(date, slot.id).map((p) => h('p', { class: 'muted small' }, `${(act(p.activityId) ?? MISSING).name} — перенесено`)),
-    // Шторка саме цього вікна — не треба шукати його в «Плані»
-    ended ? null : h('button', {
-      type: 'button', class: 'link-btn', onClick: () => slotPickSheet(date, slot),
-    }, icon('plus'), items.length ? 'Додати ще' : 'Запланувати'));
+    traceAt(date, slot.id).map((p) => h('p', { class: 'muted small' }, `${(act(p.activityId) ?? MISSING).name} — перенесено`)));
   return folded(`today:${date}:${slot.id}`, head, body,
     // Порожнє вікно, що ще не настало, — одним рядком «Вільно»: очі — на поточне й заплановане
     { def: hasOpen || isNow || (!ended && items.length > 0), cls: `card slot-group${isNow ? ' is-now' : ''}` });
