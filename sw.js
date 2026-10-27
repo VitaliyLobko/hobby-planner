@@ -21,6 +21,7 @@ const ASSETS = [
   './js/drive.js',
   './js/changes.js',
   './js/week-image.js',
+  './js/lock.js',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/icon-maskable-512.png',

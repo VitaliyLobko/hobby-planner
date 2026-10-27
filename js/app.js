@@ -6,6 +6,7 @@ import { initSync, syncNow, scheduleSync, botConfig, setBotConfig, declineBot, s
 import * as Drive from './drive.js';
 import { CHANGES, changesSince } from './changes.js';
 import { weekImage } from './week-image.js';
+import { initLock, lockOn, lockDelay, lockAvailable, enableLock, disableLock, setLockDelay, LOCK_DELAYS } from './lock.js';
 
 const state = { activities: [], plan: [], meta: [], reminders: [], tombstones: [] };
 let slotsCfg = structuredClone(M.DEFAULT_SLOTS);
@@ -3111,7 +3112,7 @@ function viewSettings() {
         h('p', { class: 'muted small' }, 'Стандартні: будні — ранок 7–12, обід 12–18, вечір 18–21; вихідні — ранок 9–12, день 12–18, вечір 18–21.'),
         button('refresh', 'Стандартні вікна', 'ghost', resetSlots)),
       { def: false, persist: true, cls: 'card' })]),
-    settingsGroup('Дані', [botSection(), driveBlock(), h('section', { class: 'card' },
+    settingsGroup('Дані', [botSection(), driveBlock(), lockCard(), h('section', { class: 'card' },
       h('h2', {}, 'Копія у файл'),
       h('p', { class: 'muted small' }, 'Файл JSON з усіма даними — про всяк випадок; його можна відновити на іншому пристрої.'),
       h('div', { class: 'btn-grid' },
@@ -3120,6 +3121,33 @@ function viewSettings() {
       file)]),
     settingsGroup('Вигляд', [h('section', { class: 'card' }, h('h2', {}, 'Тема'),
       chips(THEMES, themePref(), (v) => { remember('theme', v); applyTheme(); }))]));
+}
+
+/** «Вхід за відбитком»: увімкнути, через скільки блокувати у фоні, вимкнути з підтвердженням. */
+function lockCard() {
+  const body = h('div', {});
+  const act = (fn, done) => async () => {
+    try {
+      await fn();
+      toast(done);
+    } catch (err) {
+      if (err?.name !== 'NotAllowedError') toast(`Помилка: ${err?.message || err}`);
+    }
+    render();
+  };
+  if (lockOn()) {
+    body.append(
+      h('p', { class: 'muted small' }, 'Блокувати після згортання:'),
+      chips(LOCK_DELAYS.map((m) => [String(m), m ? `${m} хв` : 'Одразу']), String(lockDelay()), (v) => setLockDelay(Number(v))),
+      h('div', { class: 'btn-grid' }, h('button', { type: 'button', class: 'btn', onClick: act(disableLock, 'Вхід за відбитком вимкнено') }, 'Вимкнути')));
+  } else {
+    lockAvailable().then((ok) => body.append(ok
+      ? h('div', { class: 'btn-grid' }, h('button', { type: 'button', class: 'btn primary', onClick: act(enableLock, 'Вхід за відбитком увімкнено') }, 'Увімкнути'))
+      : h('p', { class: 'muted small' }, 'На цьому пристрої немає відбитка, обличчя чи PIN-коду, які браузер може перевірити.')));
+  }
+  return h('section', { class: 'card' }, h('h2', {}, 'Вхід за відбитком'),
+    h('p', { class: 'muted small' }, 'Хобі-план відкривається відбитком, обличчям або PIN-кодом телефона — лише на цьому пристрої. Це захист від чужих очей, дані не шифруються.'),
+    body);
 }
 
 /** Група налаштувань, як у Стрілецькому журналі: рамка з назвою на лінії, розділи всередині — через лінію. */
@@ -3411,6 +3439,7 @@ function timerGoals() {
 
 async function init() {
   applyTheme();
+  initLock({ key: 'hobby-planner:lock', name: 'Хобі-план', icon: 'icons/icon-192.png' });
   registerWorker();
   try {
     Object.assign(state, await loadAll());
