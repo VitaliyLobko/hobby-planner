@@ -77,6 +77,7 @@ export default {
       if (url.pathname === '/api/money' && request.method === 'POST') return cors(request, await onMoney(request, env));
       if (url.pathname === '/api/records' && request.method === 'POST') return cors(request, await onRecords(request, env));
       if (url.pathname === '/api/restore' && request.method === 'POST') return cors(request, await onRestore(request, env));
+      if (url.pathname === '/api/food' && request.method === 'POST') return cors(request, await onFood(request, env));
       if (url.pathname === '/' && request.method === 'GET') return await onSetup(url, env);
       return new Response('Not found', { status: 404 });
     } catch (err) {
@@ -539,6 +540,7 @@ async function onTelegram(request, env) {
   if (chatId !== own) return text('ok');
 
   if (cb && String(cb.data || '').startsWith('w:')) await onWeighButton(env, cb, chatId);
+  else if (cb && String(cb.data || '').startsWith('d:')) await onDayButton(env, cb, chatId);
   else if (cb && String(cb.data || '').startsWith('u:')) await onUndo(env, cb, chatId);
   else if (cb && String(cb.data || '').startsWith('r:')) await onReminderButton(env, cb, chatId);
   else if (cb && String(cb.data || '').startsWith('t:')) await onTimerButton(env, cb, chatId);
@@ -1343,6 +1345,7 @@ async function tick(env) {
   if (!paused) await sendNudges(env, chatId, cfg, await actsMap(env), tz, now);
   await sendDigests(env, chatId, cfg, tz, now, paused);
   if (!paused) await sendWeighReminder(env, chatId, tz, now);
+  if (!paused) await sendDayAsk(env, chatId, tz, now);
 }
 
 /**
@@ -2502,6 +2505,12 @@ async function onRecords(request, env) {
       ? env.DB.prepare(META_UPSERT).bind('weigh_time', body.remind)
       : env.DB.prepare("DELETE FROM meta WHERE k = 'weigh_time'"));
   }
+  // Час вечірнього «Як день за раціоном?» (null — не питати)
+  if (body.app === 'weight-log' && 'dayAsk' in body) {
+    stmts.push(/^\d{2}:\d{2}$/.test(body.dayAsk ?? '')
+      ? env.DB.prepare(META_UPSERT).bind('day_ask_time', body.dayAsk)
+      : env.DB.prepare("DELETE FROM meta WHERE k = 'day_ask_time'"));
+  }
   if (stmts.length) await env.DB.batch(stmts);
   if (weighed.length) await weighedInApp(env, weighed.map((w) => w.id));
   // Перший обмін іде частинами: зміни з бота потрібні лише у відповідь на останню
@@ -2521,6 +2530,191 @@ async function weighedInApp(env, dates) {
   if (st.date && dates.includes(st.date) && (st.next || st.msg)) {
     await closeWeighMessage(env, await owner(env), st.msg);
     await setWeighState(env, { ...st, next: null, msg: null });
+  }
+}
+
+// ---------- раціон «Ваги»: як минув день і що з'їв поза планом ----------
+
+// Позначка дня — запис «Ваги» settings/day:<дата> { status: ok | off | slip, reason, extras }
+const DAY_STATUS = { ok: '✅ За планом', off: '⚠️ Трохи не так', slip: '❌ Зрив' };
+const DAY_REASONS = { hunger: 'Голод', stress: 'Стрес', boredom: 'Нудьга', event: 'Подія', tired: 'Втома' };
+const DAY_ASK_LATE_MIN = 180;
+
+async function dayRecord(env, date) {
+  const row = await env.DB.prepare("SELECT data FROM records WHERE app = 'weight-log' AND store = 'settings' AND id = ? AND deleted = 0")
+    .bind(`day:${date}`).first('data');
+  try { return row ? JSON.parse(row) : null; } catch { return null; }
+}
+
+/** Злити зміну в запис дня: застосунок забере його звідти при обміні, новіший updated перемагає. */
+async function saveDay(env, date, patch, now) {
+  const data = { ...(await dayRecord(env, date)), ...patch, id: `day:${date}`, date, updated: now };
+  await env.DB.prepare(RECORD_UPSERT).bind('weight-log', 'settings', data.id, JSON.stringify(data), now, 0, now).run();
+}
+
+async function dayAskState(env) {
+  try { return JSON.parse(await getMeta(env, 'day_ask') || '{}'); } catch { return {}; }
+}
+
+/** Увечері о часі з «Ваги» — один раз на день, якщо день ще не позначено. */
+async function sendDayAsk(env, chatId, tz, now) {
+  const time = await getMeta(env, 'day_ask_time');
+  if (!time) return;
+  const { date } = local(now, tz);
+  const at = zoned(date, time, tz);
+  if (now < at || now >= at + DAY_ASK_LATE_MIN * MIN) return;
+  if ((await dayAskState(env)).date === date) return;
+  if ((await dayRecord(env, date))?.status) {
+    await setMeta(env, 'day_ask', JSON.stringify({ date, msg: null }));
+    return;
+  }
+  const sent = await tg(env, 'sendMessage', {
+    chat_id: chatId, parse_mode: 'HTML',
+    text: '🍽 <b>Як день за раціоном?</b>',
+    reply_markup: { inline_keyboard: [Object.entries(DAY_STATUS).map(([k, label]) => ({ text: label, callback_data: `d:${k}:${date}` }))] },
+  });
+  await setMeta(env, 'day_ask', JSON.stringify({ date, msg: sent.result?.message_id ?? null }));
+}
+
+/** d:<статус>:<дата> — позначка дня; d:r:<причина>:<дата> — причина зриву. */
+async function onDayButton(env, cb, chatId) {
+  const [, kind, a, b] = String(cb.data).split(':');
+  const now = Date.now();
+  const msgId = cb.message?.message_id;
+  if (kind === 'r' && DAY_REASONS[a] && /^\d{4}-\d{2}-\d{2}$/.test(b ?? '')) {
+    await saveDay(env, b, { reason: a }, now);
+    await tg(env, 'editMessageText', {
+      chat_id: chatId, message_id: msgId, parse_mode: 'HTML',
+      text: `❌ <b>Зрив</b> · ${dayMonth(b)} · причина: ${DAY_REASONS[a].toLowerCase()}\n\n<i>Один день не рахується. Завтра — звичайний сніданок, не менше.</i>`,
+    });
+    await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: 'Записано' });
+    return;
+  }
+  if (!DAY_STATUS[kind] || !/^\d{4}-\d{2}-\d{2}$/.test(a ?? '')) {
+    await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id });
+    return;
+  }
+  await saveDay(env, a, { status: kind, ...(kind === 'slip' ? {} : { reason: null }) }, now);
+  if (kind === 'slip') {
+    await tg(env, 'editMessageText', {
+      chat_id: chatId, message_id: msgId, parse_mode: 'HTML',
+      text: `❌ <b>Зрив</b> · ${dayMonth(a)}\n\n<i>Один день не рахується: ≈0,2 кг результату, не більше. Завтра — звичайний сніданок, не менше.</i>\n\nЩо стало причиною?`,
+      reply_markup: { inline_keyboard: [Object.entries(DAY_REASONS).map(([k, label]) => ({ text: label, callback_data: `d:r:${k}:${a}` }))] },
+    });
+  } else {
+    await tg(env, 'editMessageText', {
+      chat_id: chatId, message_id: msgId, parse_mode: 'HTML', text: `${DAY_STATUS[kind]} · ${dayMonth(a)}`,
+    });
+  }
+  await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: 'Записано' });
+}
+
+// Калорійність їжі з тексту: Claude, якщо задано секрет ANTHROPIC_API_KEY, інакше безкоштовний Workers AI
+const FOOD_MAX_TEXT = 300;
+const FOOD_DAY_LIMIT = 60;
+const FOOD_CLAUDE_MODEL = 'claude-opus-5-5';
+const FOOD_SCHEMA = {
+  type: 'object',
+  properties: {
+    items: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' }, qty: { type: 'string' }, grams: { type: 'number' },
+          kcal: { type: 'number' }, p: { type: 'number' }, f: { type: 'number' }, c: { type: 'number' },
+        },
+        required: ['name', 'qty', 'grams', 'kcal', 'p', 'f', 'c'],
+        additionalProperties: false,
+      },
+    },
+    note: { type: 'string' },
+  },
+  required: ['items', 'note'],
+  additionalProperties: false,
+};
+const FOOD_PROMPT = [
+  'Ти — довідник калорійності їжі для людини в Україні.',
+  'Розбери текст на окремі продукти чи страви. Для кожного: name — коротка назва мовою тексту;',
+  'qty — порція як у тексті («2 скибки», «тарілка»); grams — вага порції в грамах (не названо — типова порція в Україні);',
+  'kcal, p (білки), f (жири), c (вуглеводи) — на всю порцію, грами й ккал, числа без одиниць.',
+  'note — одне коротке речення: що припущено (розмір порції, спосіб приготування), або порожньо.',
+  'Текст не про їжу — items порожній, а в note — чому.',
+].join('\n');
+
+const num1 = (v) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Math.round(Number(v) * 10) / 10 : 0);
+
+function cleanFood(r) {
+  const items = (Array.isArray(r?.items) ? r.items : []).slice(0, 12).map((x) => ({
+    name: String(x?.name ?? '').slice(0, 80), qty: String(x?.qty ?? '').slice(0, 60),
+    grams: num1(x?.grams), kcal: Math.round(num1(x?.kcal)), p: num1(x?.p), f: num1(x?.f), c: num1(x?.c),
+  })).filter((x) => x.name);
+  return { items, note: String(r?.note ?? '').slice(0, 300) };
+}
+
+async function foodByClaude(env, text) {
+  const model = env.FOOD_MODEL || FOOD_CLAUDE_MODEL;
+  // Серверний запасний варіант при відмові — лише для моделей, що його підтримують (не Haiku)
+  const fallback = !model.includes('haiku');
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': env.ANTHROPIC_API_KEY,
+      'anthropic-version': '2026-10-21',
+      ...(fallback ? { 'anthropic-beta': 'server-side-fallback-2026-07-01' } : {}),
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 4000,
+      system: FOOD_PROMPT,
+      messages: [{ role: 'user', content: text }],
+      output_config: { effort: 'low', format: { type: 'json_schema', schema: FOOD_SCHEMA } },
+      ...(fallback ? { fallbacks: 'default' } : {}),
+    }),
+  });
+  if (!res.ok) {
+    console.log('food claude', res.status, (await res.text()).slice(0, 500));
+    throw new Error(res.status === 429 ? 'busy' : 'ai');
+  }
+  const out = await res.json();
+  if (out.stop_reason === 'refusal') return { items: [], note: 'Модель відмовилась відповідати на цей текст.' };
+  if (out.stop_reason === 'max_tokens') throw new Error('ai');
+  const block = (out.content ?? []).find((b) => b.type === 'text');
+  return { ...cleanFood(JSON.parse(block?.text ?? '{}')), source: 'claude' };
+}
+
+async function foodByWorkersAI(env, text) {
+  const out = await env.AI.run(NLU_MODEL, {
+    messages: [{ role: 'system', content: FOOD_PROMPT }, { role: 'user', content: text }],
+    response_format: { type: 'json_schema', json_schema: FOOD_SCHEMA },
+    max_tokens: 800,
+    temperature: 0,
+  });
+  let r = out?.response;
+  if (typeof r === 'string') r = JSON.parse(r);
+  return { ...cleanFood(r), source: 'workers-ai' };
+}
+
+/** POST /api/food { text } → { items: [{ name, qty, grams, kcal, p, f, c }], note, source } — тим самим ключем. */
+async function onFood(request, env) {
+  if (!await authorized(request, env)) return json({ error: 'unauthorized' }, 401);
+  const body = await request.json().catch(() => null);
+  const text = String(body?.text ?? '').trim();
+  if (!text || text.length > FOOD_MAX_TEXT) return json({ error: 'bad request' }, 400);
+  if (!env.ANTHROPIC_API_KEY && !env.AI) return json({ error: 'no-ai' }, 503);
+  // Ліміт на день: ключ застосунку не має стати безкоштовним доступом до моделі, якщо його вкрадуть
+  const today = local(Date.now(), tzOf(env)).date;
+  let calls = {};
+  try { calls = JSON.parse(await getMeta(env, 'food_calls') || '{}'); } catch { /* перший раз */ }
+  const n = calls.date === today ? calls.n : 0;
+  if (n >= FOOD_DAY_LIMIT) return json({ error: 'limit' }, 429);
+  await setMeta(env, 'food_calls', JSON.stringify({ date: today, n: n + 1 }));
+  try {
+    return json(env.ANTHROPIC_API_KEY ? await foodByClaude(env, text) : await foodByWorkersAI(env, text));
+  } catch (err) {
+    console.log('food error', err.stack || err);
+    return json({ error: err.message === 'busy' ? 'busy' : 'ai' }, 502);
   }
 }
 
