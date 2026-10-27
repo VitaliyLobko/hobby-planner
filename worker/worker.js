@@ -78,6 +78,7 @@ export default {
       if (url.pathname === '/api/records' && request.method === 'POST') return cors(request, await onRecords(request, env));
       if (url.pathname === '/api/restore' && request.method === 'POST') return cors(request, await onRestore(request, env));
       if (url.pathname === '/api/food' && request.method === 'POST') return cors(request, await onFood(request, env));
+      if (url.pathname === '/api/food-label' && request.method === 'POST') return cors(request, await onFoodLabel(request, env));
       if (url.pathname === '/' && request.method === 'GET') return await onSetup(url, env);
       return new Response('Not found', { status: 404 });
     } catch (err) {
@@ -2633,10 +2634,10 @@ const FOOD_SCHEMA = {
       items: {
         type: 'object',
         properties: {
-          name: { type: 'string' }, qty: { type: 'string' }, grams: { type: 'number' },
-          kcal: { type: 'number' }, p: { type: 'number' }, f: { type: 'number' }, c: { type: 'number' },
+          name: { type: 'string' }, base: { type: 'string' }, qty: { type: 'string' }, grams: { type: 'number' },
+          k100: { type: 'number' }, p100: { type: 'number' }, f100: { type: 'number' }, c100: { type: 'number' },
         },
-        required: ['name', 'qty', 'grams', 'kcal', 'p', 'f', 'c'],
+        required: ['name', 'base', 'qty', 'grams', 'k100', 'p100', 'f100', 'c100'],
         additionalProperties: false,
       },
     },
@@ -2649,18 +2650,26 @@ const FOOD_PROMPT = [
   'Ти — довідник калорійності їжі для людини в Україні.',
   'Розбери текст на окремі продукти чи страви. Для кожного: name — коротка назва мовою тексту;',
   'qty — порція як у тексті («2 скибки», «тарілка»); grams — вага порції в грамах (не названо — типова порція в Україні);',
-  'kcal, p (білки), f (жири), c (вуглеводи) — на всю порцію, грами й ккал, числа без одиниць.',
+  'base — та сама їжа простою назвою російською без кількості й марки («хлеб белый», «куриная грудка», «гречка вареная»);',
+  'k100, p100 (білки), f100 (жири), c100 (вуглеводи) — на 100 г продукту в тому стані, як їдять (варене — як варене), за таблицями калорійності;',
+  'ккал мають сходитися з 4·білки + 9·жири + 4·вуглеводи (крім алкоголю). Числа без одиниць. Порцію не перемножуй — це зробить застосунок.',
   'note — одне коротке речення: що припущено (розмір порції, спосіб приготування), або порожньо.',
   'Текст не про їжу — items порожній, а в note — чому.',
 ].join('\n');
 
 const num1 = (v) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Math.round(Number(v) * 10) / 10 : 0);
 
+// На 100 г — від моделі, порцію множимо тут: моделі помиляються в множенні. kcal/p/f/c — для старих версій застосунку
 function cleanFood(r) {
-  const items = (Array.isArray(r?.items) ? r.items : []).slice(0, 12).map((x) => ({
-    name: String(x?.name ?? '').slice(0, 80), qty: String(x?.qty ?? '').slice(0, 60),
-    grams: num1(x?.grams), kcal: Math.round(num1(x?.kcal)), p: num1(x?.p), f: num1(x?.f), c: num1(x?.c),
-  })).filter((x) => x.name);
+  const items = (Array.isArray(r?.items) ? r.items : []).slice(0, 12).map((x) => {
+    const grams = num1(x?.grams) || 100;
+    const per = { k100: num1(x?.k100), p100: num1(x?.p100), f100: num1(x?.f100), c100: num1(x?.c100) };
+    return {
+      name: String(x?.name ?? '').slice(0, 80), base: String(x?.base ?? '').slice(0, 80), qty: String(x?.qty ?? '').slice(0, 60),
+      grams, ...per,
+      kcal: Math.round(per.k100 * grams / 100), p: num1(per.p100 * grams / 100), f: num1(per.f100 * grams / 100), c: num1(per.c100 * grams / 100),
+    };
+  }).filter((x) => x.name);
   return { items, note: String(r?.note ?? '').slice(0, 300) };
 }
 
@@ -2715,17 +2724,106 @@ async function onFood(request, env) {
   const text = String(body?.text ?? '').trim();
   if (!text || text.length > FOOD_MAX_TEXT) return json({ error: 'bad request' }, 400);
   if (!env.ANTHROPIC_API_KEY && !env.AI) return json({ error: 'no-ai' }, 503);
-  // Ліміт на день: ключ застосунку не має стати безкоштовним доступом до моделі, якщо його вкрадуть
-  const today = local(Date.now(), tzOf(env)).date;
-  let calls = {};
-  try { calls = JSON.parse(await getMeta(env, 'food_calls') || '{}'); } catch { /* перший раз */ }
-  const n = calls.date === today ? calls.n : 0;
-  if (n >= FOOD_DAY_LIMIT) return json({ error: 'limit' }, 429);
-  await setMeta(env, 'food_calls', JSON.stringify({ date: today, n: n + 1 }));
+  if (!await foodQuota(env)) return json({ error: 'limit' }, 429);
   try {
     return json(env.ANTHROPIC_API_KEY ? await foodByClaude(env, text) : await foodByWorkersAI(env, text));
   } catch (err) {
     console.log('food error', err.stack || err);
+    return json({ error: err.message === 'busy' ? 'busy' : 'ai' }, 502);
+  }
+}
+
+/** Ліміт на день, спільний для тексту й фото: ключ застосунку не має стати безкоштовним доступом до моделі, якщо його вкрадуть. */
+async function foodQuota(env) {
+  const today = local(Date.now(), tzOf(env)).date;
+  let calls = {};
+  try { calls = JSON.parse(await getMeta(env, 'food_calls') || '{}'); } catch { /* перший раз */ }
+  const n = calls.date === today ? calls.n : 0;
+  if (n >= FOOD_DAY_LIMIT) return false;
+  await setMeta(env, 'food_calls', JSON.stringify({ date: today, n: n + 1 }));
+  return true;
+}
+
+// Фото етикетки → значення на 100 г. Картинку застосунок зменшує до ~1024 px JPEG
+const LABEL_MAX_CHARS = 1_400_000;
+const LABEL_VISION_MODEL = '@cf/meta/llama-4-scout-17b-16e-instruct';
+const LABEL_SCHEMA = {
+  type: 'object',
+  properties: {
+    name: { type: 'string' }, k100: { type: 'number' }, p100: { type: 'number' }, f100: { type: 'number' }, c100: { type: 'number' },
+    serving: { type: 'number' }, note: { type: 'string' },
+  },
+  required: ['name', 'k100', 'p100', 'f100', 'c100', 'serving', 'note'],
+  additionalProperties: false,
+};
+const LABEL_PROMPT = [
+  'На фото — упаковка продукту з таблицею харчової цінності (поживна цінність, енергетична цінність).',
+  'Прочитай значення на 100 г чи 100 мл: k100 — ккал, p100 — білки, f100 — жири, c100 — вуглеводи, у грамах.',
+  'Вказано лише на порцію — перерахуй на 100 г за вагою порції. Лише кДж — переведи в ккал (поділи на 4,184).',
+  'name — назва продукту з упаковки коротко, мовою упаковки, або порожньо.',
+  'serving — вага порції або всієї упаковки в грамах, якщо видно, інакше 0.',
+  'note — одне коротке речення, якщо щось не прочиталось чи вгадано, інакше порожньо.',
+  'Таблиці не видно — усі числа 0, а в note — чому. Відповідай лише JSON.',
+].join('\n');
+
+function cleanLabel(r) {
+  return {
+    name: String(r?.name ?? '').slice(0, 80),
+    k100: num1(r?.k100), p100: num1(r?.p100), f100: num1(r?.f100), c100: num1(r?.c100),
+    serving: num1(r?.serving), note: String(r?.note ?? '').slice(0, 300),
+  };
+}
+
+async function labelByClaude(env, media, data) {
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2026-10-21' },
+    body: JSON.stringify({
+      model: env.FOOD_MODEL || FOOD_CLAUDE_MODEL,
+      max_tokens: 2000,
+      system: LABEL_PROMPT,
+      messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: media, data } }, { type: 'text', text: 'Етикетка.' }] }],
+      output_config: { effort: 'low', format: { type: 'json_schema', schema: LABEL_SCHEMA } },
+    }),
+  });
+  if (!res.ok) {
+    console.log('label claude', res.status, (await res.text()).slice(0, 500));
+    throw new Error(res.status === 429 ? 'busy' : 'ai');
+  }
+  const out = await res.json();
+  if (out.stop_reason === 'refusal' || out.stop_reason === 'max_tokens') throw new Error('ai');
+  const block = (out.content ?? []).find((b) => b.type === 'text');
+  return { ...cleanLabel(JSON.parse(block?.text ?? '{}')), source: 'claude' };
+}
+
+async function labelByWorkersAI(env, dataUrl) {
+  const out = await env.AI.run(LABEL_VISION_MODEL, {
+    messages: [
+      { role: 'system', content: LABEL_PROMPT },
+      { role: 'user', content: [{ type: 'text', text: 'Етикетка.' }, { type: 'image_url', image_url: { url: dataUrl } }] },
+    ],
+    response_format: { type: 'json_schema', json_schema: LABEL_SCHEMA },
+    max_tokens: 400,
+    temperature: 0,
+  });
+  let r = out?.response;
+  if (typeof r === 'string') r = JSON.parse(r.replace(/^```(?:json)?\s*|\s*```$/g, ''));
+  return { ...cleanLabel(r), source: 'workers-ai' };
+}
+
+/** POST /api/food-label { image: data:image/jpeg;base64,… } → { name, k100, p100, f100, c100, serving, note, source }. */
+async function onFoodLabel(request, env) {
+  if (!await authorized(request, env)) return json({ error: 'unauthorized' }, 401);
+  const body = await request.json().catch(() => null);
+  const image = String(body?.image ?? '');
+  const m = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(image);
+  if (!m || image.length > LABEL_MAX_CHARS) return json({ error: 'bad request' }, 400);
+  if (!env.ANTHROPIC_API_KEY && !env.AI) return json({ error: 'no-ai' }, 503);
+  if (!await foodQuota(env)) return json({ error: 'limit' }, 429);
+  try {
+    return json(env.ANTHROPIC_API_KEY ? await labelByClaude(env, m[1], m[2]) : await labelByWorkersAI(env, image));
+  } catch (err) {
+    console.log('label error', err.stack || err);
     return json({ error: err.message === 'busy' ? 'busy' : 'ai' }, 502);
   }
 }
