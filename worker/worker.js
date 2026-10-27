@@ -1628,8 +1628,9 @@ async function sendWeek(env, chatId, now, { offerNext = false } = {}) {
     if (tips.length) lines.push('', ...tips.slice(0, 3));
   }
   const weight = await weightWeekLines(env, start, end);
+  const ration = await rationWeekLines(env, start, end);
   const money = await moneyWeekLines(env, start, end);
-  lines.push(...weight, ...money);
+  lines.push(...weight, ...ration, ...money);
   const keyboard = [...await moneyReviewRows(env, start, end), [{ text: 'Відкрити тиждень', url: `${APP_URL}#week` }, ...(money.length ? [{ text: 'Марнотрат', url: MONEY_URL }] : [])]];
   // Неділя ввечері: наступний тиждень одним дотиком — тими самими справами
   if (offerNext) {
@@ -2552,6 +2553,17 @@ async function saveDay(env, date, patch, now) {
   await env.DB.prepare(RECORD_UPSERT).bind('weight-log', 'settings', data.id, JSON.stringify(data), now, 0, now).run();
 }
 
+const SLIP_RULE = 'Один день не рахується: ≈0,2 кг результату, не більше. Завтра — звичайний сніданок, не менше.';
+
+/** «Правило зриву» з довідки плану «Ваги» (refs, id slip) — щоб правилось в одному місці; нема — типове. */
+async function slipRuleText(env) {
+  const row = await env.DB.prepare("SELECT data FROM records WHERE app = 'weight-log' AND store = 'settings' AND id = 'nutrition' AND deleted = 0").first('data');
+  const text = parseJson(row, null)?.refs?.find((r) => r.id === 'slip')?.text ?? '';
+  const lines = String(text).split('\n').map((x) => x.trim()).filter((x) => x && !x.startsWith('#'))
+    .map((x) => `• ${esc(x.replace(/^-\s*/, ''))}`);
+  return lines.length ? lines.join('\n') : SLIP_RULE;
+}
+
 async function dayAskState(env) {
   try { return JSON.parse(await getMeta(env, 'day_ask') || '{}'); } catch { return {}; }
 }
@@ -2585,7 +2597,7 @@ async function onDayButton(env, cb, chatId) {
     await saveDay(env, b, { reason: a }, now);
     await tg(env, 'editMessageText', {
       chat_id: chatId, message_id: msgId, parse_mode: 'HTML',
-      text: `❌ <b>Зрив</b> · ${dayMonth(b)} · причина: ${DAY_REASONS[a].toLowerCase()}\n\n<i>Один день не рахується. Завтра — звичайний сніданок, не менше.</i>`,
+      text: `❌ <b>Зрив</b> · ${dayMonth(b)} · причина: ${DAY_REASONS[a].toLowerCase()}\n\n<i>${await slipRuleText(env)}</i>`,
     });
     await tg(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: 'Записано' });
     return;
@@ -2598,7 +2610,7 @@ async function onDayButton(env, cb, chatId) {
   if (kind === 'slip') {
     await tg(env, 'editMessageText', {
       chat_id: chatId, message_id: msgId, parse_mode: 'HTML',
-      text: `❌ <b>Зрив</b> · ${dayMonth(a)}\n\n<i>Один день не рахується: ≈0,2 кг результату, не більше. Завтра — звичайний сніданок, не менше.</i>\n\nЩо стало причиною?`,
+      text: `❌ <b>Зрив</b> · ${dayMonth(a)}\n\n<i>${await slipRuleText(env)}</i>\n\nЩо стало причиною?`,
       reply_markup: { inline_keyboard: [Object.entries(DAY_REASONS).map(([k, label]) => ({ text: label, callback_data: `d:r:${k}:${a}` }))] },
     });
   } else {
@@ -2741,6 +2753,23 @@ async function weightWeekLines(env, start, end) {
   const lines = ['', `⚖️ <b>Вага</b> · ${kgText(last)} кг${results.length > 1 || prev != null ? ` · ${kgDiff(last - base)} за тиждень` : ''}`];
   if (results.length > 1) lines.push(`<blockquote>${kgText(first)} → ${kgText(last)} · мін ${kgText(Math.min(...kgs))} · макс ${kgText(Math.max(...kgs))}</blockquote>`);
   return lines;
+}
+
+/** Раціон «Ваги» за тиждень: скільки днів за планом із позначених, зриви з причинами, поза планом. */
+async function rationWeekLines(env, start, end) {
+  const { results } = await env.DB.prepare("SELECT data FROM records WHERE app = 'weight-log' AND store = 'settings' AND deleted = 0 AND id >= ? AND id <= ?")
+    .bind(`day:${start}`, `day:${end}`).all();
+  const days = results.map((r) => parseJson(r.data, null)).filter(Boolean);
+  const marked = days.filter((d) => DAY_STATUS[d.status]);
+  const extra = days.reduce((a, d) => a + (d.extras ?? []).reduce((b, x) => b + (Number(x.kcal) || 0), 0), 0);
+  if (!marked.length && !extra) return [];
+  const ok = marked.filter((d) => d.status === 'ok').length;
+  const slips = marked.filter((d) => d.status === 'slip');
+  const why = [...new Set(slips.map((d) => DAY_REASONS[d.reason]).filter(Boolean))].map((x) => x.toLowerCase());
+  const parts = [`за планом ${ok} з ${marked.length}`];
+  if (slips.length) parts.push(`зривів ${slips.length}${why.length ? ` (${why.join(', ')})` : ''}`);
+  if (extra) parts.push(`поза планом ${uahNum(extra)} ккал`);
+  return ['', `🍽 <b>Раціон</b> · ${parts.join(' · ')}`];
 }
 
 /** 12345.6 → «12 346 грн»: підсумки в гривнях без копійок. */
