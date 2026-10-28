@@ -3101,6 +3101,7 @@ async function onWidgetPut(request, env) {
     plan: num(b.plan), left: num(b.left), perDay: num(b.perDay),
     planned: num(b.planned), plannedN: Math.max(0, Math.round(num(b.plannedN))),
     next: b.next && ymd.test(b.next.date ?? '') ? { date: b.next.date, name: str(b.next.name, 40), v: num(b.next.v) } : null,
+    week: (Array.isArray(b.week) ? b.week : []).filter((d) => ymd.test(d?.date ?? '')).slice(0, 14).map((d) => ({ date: d.date, v: num(d.v) })),
   };
   await setMeta(env, 'widget', JSON.stringify(head));
   return json({ now: Date.now() });
