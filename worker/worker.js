@@ -75,7 +75,8 @@ export default {
       if (url.pathname === '/api/sync' && request.method === 'POST') return cors(request, await onSync(request, env));
       if (url.pathname === '/api/weights' && request.method === 'POST') return cors(request, await onWeights(request, env));
       if (url.pathname === '/api/money' && request.method === 'POST') return cors(request, await onMoney(request, env));
-      if (url.pathname === '/api/widget' && request.method === 'POST') return cors(request, await onWidgetPut(request, env));
+      // Застосунок до 0.2.27 ще шле шапку сам — тепер її рахує сервер, приймаємо мовчки
+      if (url.pathname === '/api/widget' && request.method === 'POST') return cors(request, json({ now: Date.now() }));
       if (url.pathname === '/api/widget' && request.method === 'GET') return await onWidgetGet(request, env);
       if (url.pathname === '/api/records' && request.method === 'POST') return cors(request, await onRecords(request, env));
       if (url.pathname === '/api/restore' && request.method === 'POST') return cors(request, await onRestore(request, env));
@@ -3079,38 +3080,156 @@ async function onMoney(request, env) {
 }
 
 // ---------- віджет Марнотрату на Android ----------
-// Застосунок рахує шапку сам і шле готові числа; віджет лише показує їх. Рахунків, коментарів і тегів тут немає.
+// Шапку рахує сервер із записів Марнотрату (/api/records): віджет вірний і після півночі, і коли записали з іншого
+// телефона. Формули — як на головній застосунку (marnotrat/js/app.js: totals, totalBalance, perDayLeft, «В планах»),
+// правити разом. Рахунків, коментарів і тегів у шапці немає.
 
-/**
- * Шапка від застосунку. at — найновіша зміна даних, з якими її пораховано: телефон, що ще не підтягнув
- * чужі операції, має at старіший і збережену не перетре. sent — коли прийшла (віджет показує «оновлено»).
- */
-async function onWidgetPut(request, env) {
-  if (!await authorized(request, env)) return json({ error: 'unauthorized' }, 401);
-  const b = await request.json().catch(() => null);
-  const num = (v) => (Number.isFinite(v) ? Math.round(v * 100) / 100 : 0);
-  const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
-  const ymd = /^\d{4}-\d{2}-\d{2}$/;
-  if (!b || !Number.isFinite(b.at)) return json({ error: 'bad request' }, 400);
-  const cur = parseJson(await getMeta(env, 'widget'), null);
-  if (cur && cur.at > b.at) return json({ now: Date.now(), stale: true });
-  const head = {
-    at: Math.round(b.at), sent: Date.now(),
-    period: str(b.period, 40), day: Math.max(0, Math.round(num(b.day))), days: Math.max(0, Math.round(num(b.days))),
-    balance: num(b.balance), expense: num(b.expense), today: num(b.today),
-    plan: num(b.plan), left: num(b.left), perDay: num(b.perDay),
-    planned: num(b.planned), plannedN: Math.max(0, Math.round(num(b.plannedN))),
-    next: b.next && ymd.test(b.next.date ?? '') ? { date: b.next.date, name: str(b.next.name, 40), v: num(b.next.v) } : null,
-    week: (Array.isArray(b.week) ? b.week : []).filter((d) => ymd.test(d?.date ?? '')).slice(0, 14).map((d) => ({ date: d.date, v: num(d.v) })),
-  };
-  await setMeta(env, 'widget', JSON.stringify(head));
-  return json({ now: Date.now() });
+const W_DAY = 864e5;
+const W_RATES = { USD: 41.5, EUR: 48 };
+// Прострочені регулярні платежі — як у «В планах» стрічки: не більше стількох останніх
+const W_PLAN_BACKLOG = 10;
+// Надгробки старші — не діють (як TOMB_TTL у marnotrat/js/sync.js)
+const W_TOMB_TTL = 180 * W_DAY;
+const W_MONTHS = ['Січень', 'Лютий', 'Березень', 'Квітень', 'Травень', 'Червень', 'Липень', 'Серпень', 'Вересень', 'Жовтень', 'Листопад', 'Грудень'];
+const W_MISSING = { name: 'Видалено', kind: 'expense', currency: 'UAH' };
+
+const wPad = (n) => String(n).padStart(2, '0');
+const wParse = (s) => Date.UTC(Number(s.slice(0, 4)), Number(s.slice(5, 7)) - 1, Number(s.slice(8, 10)));
+const wAddDays = (date, n) => new Date(wParse(date) + n * W_DAY).toISOString().slice(0, 10);
+const wAddMonths = (ym, n) => new Date(Date.UTC(Number(ym.slice(0, 4)), Number(ym.slice(5, 7)) - 1 + n, 1)).toISOString().slice(0, 7);
+
+/** k-та дата повтору від base (як repeatDate у marnotrat/js/model.js): місяць рахується від base, 31-ше не сповзає. */
+function wRepeatDate(base, every, k) {
+  if (every === 'day') return wAddDays(base, k);
+  if (every === 'week') return wAddDays(base, 7 * k);
+  const ym = wAddMonths(base.slice(0, 7), every === 'year' ? 12 * k : k);
+  const last = new Date(Date.UTC(Number(ym.slice(0, 4)), Number(ym.slice(5, 7)), 0)).getUTCDate();
+  return `${ym}-${wPad(Math.min(Number(base.slice(8, 10)), last))}`;
 }
 
-/** Віджет питає раз на 15 хв і з кнопки ⟳; null — застосунок ще нічого не надсилав. */
+function wRepeatDates(base, every, until, end) {
+  const out = [];
+  for (let k = 1; k <= 2000; k += 1) {
+    const d = wRepeatDate(base, every, k);
+    if (until && d > until) break;
+    out.push(d);
+    if (d > end) break;
+  }
+  return out;
+}
+
+/** Дані Марнотрату з records — так, як їх бачить телефон після злиття (Sync.merge): надгробок прибирає видалене. */
+async function marnotratState(env, now) {
+  const { results } = await env.DB.prepare("SELECT store, id, data, updated FROM records WHERE app = 'marnotrat' AND deleted = 0").all();
+  const out = { coins: new Map(), ops: new Map(), meta: new Map() };
+  for (const r of results) {
+    const rec = parseJson(r.data, null);
+    if (rec && out[r.store]) out[r.store].set(r.id, { ...rec, id: r.id, updated: r.updated });
+  }
+  for (const t of [...out.meta.values()].filter((m) => m.id.startsWith('del:'))) {
+    if (now - t.updated > W_TOMB_TTL) { out.meta.delete(t.id); continue; }
+    const rec = out[t.store]?.get(t.ref);
+    if (!rec) continue;
+    if (rec.updated > t.updated) out.meta.delete(t.id);
+    else out[t.store].delete(t.ref);
+  }
+  return { coins: [...out.coins.values()], ops: [...out.ops.values()].filter((o) => /^\d{4}-\d{2}-\d{2}$/.test(o.date ?? '')), meta: [...out.meta.values()] };
+}
+
+/** Шапка для віджета на дату today: період, витрати, баланс, бюджет, гроші на день, заплановане, тиждень. */
+function marnotratHead({ coins, ops, meta }, today) {
+  const round2 = (v) => Math.round(v * 100) / 100;
+  const byId = new Map();
+  for (const c of coins) if (!byId.has(c.id)) byId.set(c.id, c);
+  const coin = (id) => byId.get(id) ?? W_MISSING;
+  const rates = meta.find((m) => m.id === 'rates') ?? {};
+  const toUah = (v, cur) => v * (cur === 'UAH' ? 1 : rates[cur] || W_RATES[cur] || 1);
+  const amountIn = (op) => op.amountTo ?? op.amount;
+  const opType = (op) => (coin(op.from).kind === 'income' ? 'income' : coin(op.to).kind === 'expense' ? 'expense' : 'transfer');
+  const expenseUah = (op) => toUah(amountIn(op), coin(op.to).currency);
+
+  const start = meta.find((m) => m.id === 'period')?.day ?? 1;
+  const periodOf = (date) => (Number(date.slice(8, 10)) >= start ? date.slice(0, 7) : wAddMonths(date.slice(0, 7), -1));
+  const cur = periodOf(today);
+  const from = `${cur}-${wPad(start)}`;
+  const to = wAddDays(`${wAddMonths(cur, 1)}-${wPad(start)}`, -1);
+  const dayNo = (d) => Math.round((wParse(d) - wParse(from)) / W_DAY) + 1;
+
+  let expense = 0;
+  const spent = new Map();
+  const delta = new Map();
+  for (const op of ops) {
+    delta.set(op.to, (delta.get(op.to) ?? 0) + amountIn(op));
+    delta.set(op.from, (delta.get(op.from) ?? 0) - op.amount);
+    if (opType(op) !== 'expense') continue;
+    const v = expenseUah(op);
+    if (periodOf(op.date) === cur) expense += v;
+    spent.set(op.date, (spent.get(op.date) ?? 0) + v);
+  }
+  const inBalance = (c) => c.kind === 'account' || (c.kind === 'debt' && Boolean(c.inBalance));
+  const balance = coins.filter(inBalance).reduce((s, c) => s + toUah(round2((c.start || 0) + (delta.get(c.id) ?? 0)), c.currency), 0);
+  const plan = coins.filter((c) => c.kind === 'expense' && !c.archived && c.budget > 0).reduce((s, c) => s + toUah(c.budget, c.currency), 0);
+  const left = plan - expense;
+  const daysLeft = Math.round((wParse(to) - wParse(today)) / W_DAY) + 1;
+
+  // Заплановане до кінця періоду разом із простроченим непроведеним
+  const doneBy = new Map();
+  for (const o of ops) {
+    if (o.fromRule == null) continue;
+    if (!doneBy.has(o.fromRule)) doneBy.set(o.fromRule, new Set());
+    doneBy.get(o.fromRule).add(o.ruleDate);
+  }
+  let planned = 0;
+  let plannedN = 0;
+  let next = null;
+  for (const rule of ops) {
+    if (!rule.repeat?.every || opType(rule) !== 'expense') continue;
+    const done = doneBy.get(rule.id) ?? new Set();
+    const skip = new Set(rule.repeat.skip ?? []);
+    const dates = wRepeatDates(rule.date, rule.repeat.every, rule.repeat.until, to).filter((x) => x <= to && !done.has(x) && !skip.has(x));
+    const due = dates.filter((x) => x <= today).slice(-W_PLAN_BACKLOG);
+    const v = expenseUah(rule);
+    for (const date of [...due, ...dates.filter((x) => x > today)]) {
+      planned += v;
+      plannedN += 1;
+      if (!next || date < next.date) next = { date, name: String(coin(rule.to).name ?? '').slice(0, 40), v: round2(v) };
+    }
+  }
+
+  let at = 0;
+  for (const list of [ops, coins, meta]) for (const x of list) at = Math.max(at, Number(x.updated) || 0);
+  const f = (x) => `${x.slice(8, 10)}.${x.slice(5, 7)}`;
+  return {
+    at,
+    period: start === 1 ? W_MONTHS[Number(cur.slice(5, 7)) - 1] : `${f(from)} – ${f(to)}`,
+    day: dayNo(today), days: dayNo(to),
+    balance: round2(balance), expense: round2(expense), today: round2(spent.get(today) ?? 0),
+    plan: round2(plan), left: round2(left), perDay: plan && left > 0 ? Math.round(left / daysLeft) : 0,
+    planned: round2(planned), plannedN, next,
+    // Стовпчики тижня у віджеті 4×2: сім днів, останній — сьогодні
+    week: [...Array(7).keys()].map((i) => {
+      const date = wAddDays(today, i - 6);
+      return { date, v: round2(spent.get(date) ?? 0) };
+    }),
+  };
+}
+
+/**
+ * Віджет питає раз на 15 хв, після розблокування й з кнопки ⟳. Шапка перераховується, лише коли змінились записи
+ * Марнотрату чи настав новий день; sent — коли сервер її перевірив (віджет показує «оновлено»). null — записів ще немає.
+ */
 async function onWidgetGet(request, env) {
   if (!await authorized(request, env)) return json({ error: 'unauthorized' }, 401);
-  return json({ now: Date.now(), head: parseJson(await getMeta(env, 'widget'), null) });
+  const now = Date.now();
+  const today = local(now, tzOf(env)).date;
+  const srv = Number(await env.DB.prepare("SELECT MAX(srv) AS s FROM records WHERE app = 'marnotrat'").first('s')) || 0;
+  if (!srv) return json({ now, head: null });
+  let head = parseJson(await getMeta(env, 'widget'), null);
+  if (!head || head.date !== today || !(head.srv >= srv)) {
+    head = { ...marnotratHead(await marnotratState(env, now), today), date: today, srv };
+    await setMeta(env, 'widget', JSON.stringify(head));
+  }
+  return json({ now, head: { ...head, sent: now } });
 }
 
 // ---------- нагадування «не забудь» ----------
