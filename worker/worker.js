@@ -1483,7 +1483,8 @@ async function sendEvening(env, chatId, now, { paused = false } = {}) {
     if (streak) lines.push(`<i>${streak}</i>`);
     lines.push(...planLines(date, items, cfg, acts, tz, now, { skipEmpty: true }));
   }
-  const blocks = [await reminderLines(env, date), await weightDayLines(env, date), await moneyDayLines(env, date, now)];
+  const ration = await rationDayLines(env, date);
+  const blocks = [await reminderLines(env, date), await weightDayLines(env, date), await moneyDayLines(env, date, now), ration.lines];
   for (const b of blocks) {
     if (b.length) { any = true; lines.push(...b); }
   }
@@ -1494,8 +1495,10 @@ async function sendEvening(env, chatId, now, { paused = false } = {}) {
   if (blocks[2].length) links.push({ text: 'Марнотрат', url: MONEY_URL });
   await tg(env, 'sendMessage', {
     chat_id: chatId, parse_mode: 'HTML', text: lines.join('\n'),
-    reply_markup: { inline_keyboard: [...(tomorrow?.rows ?? []), links, ...(tomorrow?.rows.length ? [[{ text: 'Не треба', callback_data: 'p:no' }]] : [])] },
+    reply_markup: { inline_keyboard: [...(ration.row ? [ration.row] : []), ...(tomorrow?.rows ?? []), links, ...(tomorrow?.rows.length ? [[{ text: 'Не треба', callback_data: 'p:no' }]] : [])] },
   });
+  // Позначили в підсумку — окреме «Як день?» сьогодні вже не потрібне
+  if (ration.row) await setMeta(env, 'day_ask', JSON.stringify({ date, msg: null }));
 }
 
 /**
@@ -2589,11 +2592,45 @@ async function sendDayAsk(env, chatId, tz, now) {
   await setMeta(env, 'day_ask', JSON.stringify({ date, msg: sent.result?.message_id ?? null }));
 }
 
-/** d:<статус>:<дата> — позначка дня; d:r:<причина>:<дата> — причина зриву. */
+/**
+ * Раціон «Ваги» за день для вечірнього підсумку: позначка, поза планом, що з плану не з'їли, мітки.
+ * Не позначено — row: кнопки позначки прямо під підсумком. Плану немає — нічого.
+ */
+async function rationDayLines(env, date) {
+  const planRow = await env.DB.prepare("SELECT data FROM records WHERE app = 'weight-log' AND store = 'settings' AND id = 'nutrition' AND deleted = 0").first('data');
+  const plan = parseJson(planRow, null);
+  if (!plan) return { lines: [] };
+  const day = await dayRecord(env, date);
+  const extras = day?.extras ?? [];
+  const extraKcal = extras.reduce((a, x) => a + (Number(x.kcal) || 0), 0);
+  // Як skippedItems у застосунку: продукти прийомів, продукт дня й добавка на паузі
+  const byId = new Map([...(plan.meals ?? []).flatMap((m) => m.items ?? []), ...(plan.day?.items ?? []), ...(plan.pauseItems ?? [])].map((x) => [x.id, x]));
+  const skipped = (day?.skipped ?? []).map((id) => byId.get(id)).filter(Boolean);
+  const skippedKcal = skipped.reduce((a, x) => a + (Number(x.kcal) || 0), 0);
+  const status = day?.status ? DAY_STATUS[day.status] : null;
+  const reason = day?.status === 'slip' && DAY_REASONS[day.reason] ? ` · ${DAY_REASONS[day.reason].toLowerCase()}` : '';
+  const lines = ['', `🍽 <b>Раціон</b> · ${status ? `${status}${reason}` : 'день не позначено'}`];
+  const details = [];
+  if (extras.length) details.push(`➕ поза планом ${Math.round(extraKcal)} ккал: ${extras.map((x) => esc(x.name)).join(', ')}`);
+  if (skipped.length) details.push(`➖ не з'їв ${Math.round(skippedKcal)} ккал: ${skipped.map((x) => esc(x.name)).join(', ')}`);
+  if (day?.tags?.length) details.push(`🏷 ${day.tags.map(esc).join(', ')}`);
+  if (details.length) lines.push(`<blockquote>${details.join('\n')}</blockquote>`);
+  const row = status ? null : Object.entries(DAY_STATUS).map(([k, label]) => ({ text: label, callback_data: `d:${k}:${date}:s` }));
+  return { lines, row };
+}
+
+/** d:<статус>:<дата>[:s] — позначка дня (s — з кнопок вечірнього підсумку); d:r:<причина>:<дата> — причина зриву. */
 async function onDayButton(env, cb, chatId) {
   const [, kind, a, b] = String(cb.data).split(':');
   const now = Date.now();
-  const msgId = cb.message?.message_id;
+  let msgId = cb.message?.message_id;
+  // З підсумку: прибрати кнопки позначки з нього, а відповідь — окремим повідомленням, щоб підсумок лишився
+  if (b === 's' && DAY_STATUS[kind]) {
+    const rest = (cb.message?.reply_markup?.inline_keyboard ?? []).filter((row) => !row.some((x) => String(x.callback_data ?? '').startsWith('d:')));
+    await tg(env, 'editMessageReplyMarkup', { chat_id: chatId, message_id: msgId, reply_markup: { inline_keyboard: rest } });
+    const sent = await tg(env, 'sendMessage', { chat_id: chatId, parse_mode: 'HTML', text: DAY_STATUS[kind] });
+    msgId = sent.result?.message_id;
+  }
   if (kind === 'r' && DAY_REASONS[a] && /^\d{4}-\d{2}-\d{2}$/.test(b ?? '')) {
     await saveDay(env, b, { reason: a }, now);
     await tg(env, 'editMessageText', {
