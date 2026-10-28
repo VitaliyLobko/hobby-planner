@@ -75,6 +75,8 @@ export default {
       if (url.pathname === '/api/sync' && request.method === 'POST') return cors(request, await onSync(request, env));
       if (url.pathname === '/api/weights' && request.method === 'POST') return cors(request, await onWeights(request, env));
       if (url.pathname === '/api/money' && request.method === 'POST') return cors(request, await onMoney(request, env));
+      if (url.pathname === '/api/widget' && request.method === 'POST') return cors(request, await onWidgetPut(request, env));
+      if (url.pathname === '/api/widget' && request.method === 'GET') return await onWidgetGet(request, env);
       if (url.pathname === '/api/records' && request.method === 'POST') return cors(request, await onRecords(request, env));
       if (url.pathname === '/api/restore' && request.method === 'POST') return cors(request, await onRestore(request, env));
       if (url.pathname === '/api/food' && request.method === 'POST') return cors(request, await onFood(request, env));
@@ -3074,6 +3076,40 @@ async function onMoney(request, env) {
     env.DB.prepare(META_UPSERT).bind('money', JSON.stringify({ at: now, ...budget, big, noSpend })),
   ]);
   return json({ now });
+}
+
+// ---------- віджет Марнотрату на Android ----------
+// Застосунок рахує шапку сам і шле готові числа; віджет лише показує їх. Рахунків, коментарів і тегів тут немає.
+
+/**
+ * Шапка від застосунку. at — найновіша зміна даних, з якими її пораховано: телефон, що ще не підтягнув
+ * чужі операції, має at старіший і збережену не перетре. sent — коли прийшла (віджет показує «оновлено»).
+ */
+async function onWidgetPut(request, env) {
+  if (!await authorized(request, env)) return json({ error: 'unauthorized' }, 401);
+  const b = await request.json().catch(() => null);
+  const num = (v) => (Number.isFinite(v) ? Math.round(v * 100) / 100 : 0);
+  const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
+  const ymd = /^\d{4}-\d{2}-\d{2}$/;
+  if (!b || !Number.isFinite(b.at)) return json({ error: 'bad request' }, 400);
+  const cur = parseJson(await getMeta(env, 'widget'), null);
+  if (cur && cur.at > b.at) return json({ now: Date.now(), stale: true });
+  const head = {
+    at: Math.round(b.at), sent: Date.now(),
+    period: str(b.period, 40), day: Math.max(0, Math.round(num(b.day))), days: Math.max(0, Math.round(num(b.days))),
+    balance: num(b.balance), expense: num(b.expense), today: num(b.today),
+    plan: num(b.plan), left: num(b.left), perDay: num(b.perDay),
+    planned: num(b.planned), plannedN: Math.max(0, Math.round(num(b.plannedN))),
+    next: b.next && ymd.test(b.next.date ?? '') ? { date: b.next.date, name: str(b.next.name, 40), v: num(b.next.v) } : null,
+  };
+  await setMeta(env, 'widget', JSON.stringify(head));
+  return json({ now: Date.now() });
+}
+
+/** Віджет питає раз на 15 хв і з кнопки ⟳; null — застосунок ще нічого не надсилав. */
+async function onWidgetGet(request, env) {
+  if (!await authorized(request, env)) return json({ error: 'unauthorized' }, 401);
+  return json({ now: Date.now(), head: parseJson(await getMeta(env, 'widget'), null) });
 }
 
 // ---------- нагадування «не забудь» ----------
