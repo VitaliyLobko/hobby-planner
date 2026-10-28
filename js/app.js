@@ -699,11 +699,12 @@ function careDueRow({ a, e }, today) {
     vibrate(15);
     toast(`Замінено: ${e.item}`, { label: 'Скасувати', run: () => saveCare(a.id, (l) => l.filter((x) => x.id !== fresh.id)) });
   };
-  return h('div', { class: 'remind-row late' },
-    h('button', { type: 'button', class: 'remind-check', 'aria-pressed': 'false', 'aria-label': `Замінив сьогодні: ${e.item}`, onClick: done }),
+  return h('div', { class: 'remind-row care-due' },
+    h('span', { class: 'tile care-tile', style: actStyle(a) }, icon(a.icon)),
     h('button', { type: 'button', class: 'remind-text', onClick: () => careSheet(act(a.id) ?? a) },
-      h('span', {}, `${e.item}: час міняти${e.text ? ` · ${e.text}` : ''}`),
-      h('span', { class: 'muted small' }, `${a.name} · остання ${ageText(e.date, today)}`)));
+      h('span', {}, `${e.item} — час міняти`),
+      h('span', { class: 'small care-age' }, [e.text, ageText(e.date, today)].filter(Boolean).join(' · '))),
+    h('button', { type: 'button', class: 'care-done', 'aria-label': `Замінив сьогодні: ${e.item}`, onClick: done }, icon('check'), 'Замінив'));
 }
 
 async function saveCare(id, fn) {

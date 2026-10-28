@@ -554,6 +554,15 @@ button.link-btn { padding: 0; border: 0; background: none; color: var(--accent);
 .remind-row.done .remind-text > span:first-child { text-decoration: line-through; color: var(--muted); }
 .remind-row.late .remind-text .muted { color: var(--bad-fg); }
 .remind-tile { --c: var(--c-slate); }
+.care-tile { width: 36px; height: 36px; border-radius: 10px; }
+.care-tile .ico svg { width: 20px; height: 20px; }
+.care-age { color: var(--text-2); }
+.care-done {
+  flex: none; display: inline-flex; align-items: center; gap: 4px; min-height: 36px; padding: 0 12px 0 8px;
+  border: 0; border-radius: 999px; background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent);
+  font: inherit; font-size: 13px; font-weight: 700;
+}
+.care-done .ico svg { width: 16px; height: 16px; }
 /* серії: вогник кольору заняття (на «Сьогодні» — помаранчевий) */
 .day-left.streak { color: var(--c-orange); }
 .streak-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; font-weight: 700; color: var(--c); }
