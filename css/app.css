@@ -399,6 +399,7 @@ button.link-btn { padding: 0; border: 0; background: none; color: var(--accent);
 .act-head .act-name { min-width: 0; overflow-wrap: anywhere; line-height: 1.2; }
 .act-box .act-head { padding-right: 88px; }
 .act-box.has-list .act-head { padding-right: 132px; }
+.act-box.has-list:has(.act-side > :nth-child(4)) .act-head { padding-right: 176px; }
 .act-tidy .act-sub { font-size: 14px; }
 .act-tidy .goal-line { margin-top: 0; }
 .act-tidy .goal-line .segs { flex: 1; }

@@ -626,6 +626,154 @@ function openWatchFrom(a, item) {
   closeSheet();
 }
 
+// ---------- догляд: журнал замін ----------
+// a.care — [{ id, date, item, text }]: дата, річ (гітара) і що поставив («10-46 Eb»)
+
+const careKey = (name) => name.trim().split(/\s+/)[0]?.toLowerCase() ?? '';
+const dmy = (s) => s.split('-').reverse().join('.');
+
+// Струни радять міняти раз на 3 місяці; 0 — не нагадувати
+const CARE_MONTHS = 3;
+const MONTH_DAYS = 30.44;
+const daysSince = (from, today = M.ymd()) => Math.round((M.parseYmd(today) - M.parseYmd(from)) / 864e5);
+
+/** Скільки минуло: «сьогодні», «5 днів», «3 тиж», «4 міс», «2 р 3 міс». */
+function ageText(from, today = M.ymd()) {
+  const days = daysSince(from, today);
+  if (days <= 0) return 'сьогодні';
+  if (days < 14) return `${days} ${plural(days, 'день', 'дні', 'днів')} тому`;
+  if (days < 61) return `${Math.floor(days / 7)} тиж тому`;
+  const m = Math.floor(days / MONTH_DAYS);
+  if (m < 12) return `${m} міс тому`;
+  const y = Math.floor(m / 12);
+  return `${y} ${plural(y, 'рік', 'роки', 'років')}${m % 12 ? ` ${m % 12} міс` : ''} тому`;
+}
+
+/** Остання заміна по кожній речі, свіжі зверху. */
+function careLatest(a) {
+  const by = new Map();
+  for (const e of a.care ?? []) {
+    const k = careKey(e.item);
+    if (!by.has(k) || e.date > by.get(k).date) by.set(k, e);
+  }
+  return [...by.values()].sort((x, y) => y.date.localeCompare(x.date));
+}
+
+function careLines(a) {
+  return careLatest(a).map((e) => h('span', { class: 'repeat-line' }, icon('tool'),
+    [e.item, e.text, ageText(e.date)].filter(Boolean).join(' · ')));
+}
+
+/** Рядки «Fgn 26/12/2021 10-46 Eb» зі старих нотаток; без дати — пропускаються (заголовки). */
+function parseCare(text, have) {
+  const names = new Map(have.map((e) => [careKey(e.item), e.item]));
+  const seen = new Set(have.map((e) => `${careKey(e.item)}|${e.date}`));
+  const out = [];
+  for (const line of text.split(/\r?\n/)) {
+    const m = line.trim().match(/^(.+?)\s+(\d{1,2})[./-](\d{1,2})[./-](\d{2}|\d{4})\b\s*(.*)$/);
+    if (!m) continue;
+    const year = m[4].length === 2 ? `20${m[4]}` : m[4];
+    const date = `${year}-${m[3].padStart(2, '0')}-${m[2].padStart(2, '0')}`;
+    if (Number.isNaN(M.parseYmd(date).getTime())) continue;
+    const k = careKey(m[1]);
+    if (!names.has(k)) names.set(k, m[1].trim());
+    if (seen.has(`${k}|${date}`)) continue;
+    seen.add(`${k}|${date}`);
+    out.push({ id: uid(), date, item: names.get(k), text: m[5].trim().slice(0, 80) });
+  }
+  return out;
+}
+
+/** Що пора міняти сьогодні: остання заміна речі старша за строк заняття. */
+function careDue(today) {
+  return state.activities.filter((a) => a.careOn && !a.archived && (a.careMonths ?? CARE_MONTHS) > 0)
+    .flatMap((a) => careLatest(a).filter((e) => daysSince(e.date, today) >= (a.careMonths ?? CARE_MONTHS) * MONTH_DAYS)
+      .map((e) => ({ a, e })));
+}
+
+/** Рядок у «Не забудь»: кружок — «Замінив сьогодні» тим самим, тап по тексту — журнал. */
+function careDueRow({ a, e }, today) {
+  const done = async () => {
+    const fresh = { id: uid(), date: today, item: e.item, text: e.text };
+    await saveCare(a.id, (l) => [...l, fresh]);
+    vibrate(15);
+    toast(`Замінено: ${e.item}`, { label: 'Скасувати', run: () => saveCare(a.id, (l) => l.filter((x) => x.id !== fresh.id)) });
+  };
+  return h('div', { class: 'remind-row late' },
+    h('button', { type: 'button', class: 'remind-check', 'aria-pressed': 'false', 'aria-label': `Замінив сьогодні: ${e.item}`, onClick: done }),
+    h('button', { type: 'button', class: 'remind-text', onClick: () => careSheet(act(a.id) ?? a) },
+      h('span', {}, `${e.item}: час міняти${e.text ? ` · ${e.text}` : ''}`),
+      h('span', { class: 'muted small' }, `${a.name} · остання ${ageText(e.date, today)}`)));
+}
+
+async function saveCare(id, fn) {
+  const cur = act(id);
+  if (cur) await save({ activities: { put: [{ ...cur, care: fn([...(cur.care ?? [])]) }] } });
+}
+
+/** Журнал замін: зверху — записати нову (річ і що поставив підставляються з минулого разу), нижче — історія. */
+function careSheet(a) {
+  const id = a.id;
+  const list = () => act(id)?.care ?? [];
+  const today = M.ymd();
+  const lastOf = (name) => careLatest({ care: list() }).find((e) => careKey(e.item) === careKey(name));
+  const item = h('input', { type: 'text', id: 'f-citem', maxlength: 40, placeholder: 'Напр.: Fgn', autocomplete: 'off' });
+  const text = h('input', {
+    type: 'text', id: 'f-ctext', maxlength: 80, placeholder: 'Напр.: 10-46 Eb', autocomplete: 'off',
+    // Старі нотатки стовпчиком — одразу в журнал
+    onPaste: (e) => {
+      const t = e.clipboardData?.getData('text') ?? '';
+      if (/\n/.test(t.trim())) { e.preventDefault(); importText(t); }
+    },
+  });
+  const date = h('input', { type: 'date', id: 'f-cdate', value: today, max: today });
+  // Інша річ — «що поставив» з її минулого разу
+  item.addEventListener('change', () => { const last = lastOf(item.value); if (last) text.value = last.text; });
+  const body = h('div', { class: 'sheet-body form' });
+  const importText = async (t) => {
+    const fresh = parseCare(t, list());
+    if (!fresh.length) { toast('Не знайшов рядків з датою'); return; }
+    await saveCare(id, (l) => [...l, ...fresh]);
+    paint();
+    toast(`Додано ${fresh.length} ${plural(fresh.length, 'запис', 'записи', 'записів')}`);
+  };
+  const add = async () => {
+    const e = { id: uid(), date: date.value || today, item: item.value.trim(), text: text.value.trim() };
+    if (!e.item) { item.focus(); toast('Вкажи, що міняв'); return; }
+    await saveCare(id, (l) => [...l, e]);
+    vibrate(15);
+    date.value = today;
+    paint();
+    toast(`Записано: ${e.item}`, { label: 'Скасувати', run: async () => { await saveCare(id, (l) => l.filter((x) => x.id !== e.id)); paint(); } });
+  };
+  const remove = async (e) => {
+    await saveCare(id, (l) => l.filter((x) => x.id !== e.id));
+    paint();
+    toast(`Видалено: ${e.item} ${dmy(e.date)}`, { label: 'Скасувати', run: async () => { await saveCare(id, (l) => [...l, e]); paint(); } });
+  };
+  const row = (e) => h('div', { class: 'remind-row watch-row' },
+    h('span', { class: 'remind-text' }, h('span', {}, [e.item, e.text].filter(Boolean).join(' · ')),
+      h('span', { class: 'muted small' }, `${dmy(e.date)} · ${ageText(e.date)}`)),
+    h('button', { type: 'button', class: 'icon-btn watch-del', 'aria-label': `Видалити: ${e.item} ${dmy(e.date)}`, onClick: () => remove(e) }, icon('trash')));
+  const paint = () => {
+    const latest = careLatest({ care: list() })[0];
+    if (!item.value && latest) { item.value = latest.item; text.value = latest.text; }
+    const all = [...list()].sort((x, y) => y.date.localeCompare(x.date));
+    body.replaceChildren(...[
+      formBox('Нова заміна',
+        h('label', { for: 'f-citem' }, 'Що'), item,
+        h('label', { for: 'f-ctext' }, 'Що поставив'), text,
+        h('label', { for: 'f-cdate' }, 'Коли'), date,
+        h('div', { class: 'btn-grid' }, button('check', 'Записати', 'primary', add))),
+      h('h3', { class: 'form-box-title watch-head' }, all.length ? `Історія · ${all.length}` : 'Історія'),
+      all.length ? all.map(row)
+        : h('p', { class: 'muted small' }, 'Поки порожньо. Старі нотатки («Fgn 26/12/2021 10-46 Eb») можна вставити в поле «Що поставив» стовпчиком — додадуться всі.'),
+    ].flat().filter(Boolean));
+  };
+  paint();
+  sheet(`${a.name} · догляд`, body);
+}
+
 function moveSheet(item) {
   const box = h('div', { class: 'sheet-body' },
     h('div', { class: 'btn-grid' },
@@ -852,6 +1000,7 @@ function remindersToday(today, now) {
   const rows = [
     ...overdue.map((r) => reminderRow(r, r.date, today, now)),
     ...M.remindersOn(state.reminders, today).map((r) => reminderRow(r, today, today, now)),
+    ...careDue(today).map((x) => careDueRow(x, today)),
   ];
   if (!rows.length) return null;
   return h('section', { class: 'card remind-card' }, h('h2', { class: 'remind-title' }, icon('bell'), 'Не забудь'), rows);
@@ -2224,6 +2373,7 @@ function editActivity(orig) {
   const stepTarget = (n) => { d.weeklyTarget = Math.min(21, Math.max(1, d.weeklyTarget + n)); out.textContent = String(d.weeklyTarget); };
   const minutes = h('input', { type: 'number', inputmode: 'numeric', min: 0, max: 600, value: d.minutes || '', id: 'f-min' });
   const minVersion = h('input', { type: 'text', maxlength: 60, value: d.minVersion ?? '', placeholder: 'Напр.: 5 хв гами', id: 'f-minv' });
+  const careMonths = h('input', { type: 'number', inputmode: 'numeric', min: 0, max: 60, value: d.careMonths ?? CARE_MONTHS, id: 'f-cmonths' });
   // Без розкладу вікна розкладу порожні: інакше підсвічене вікно схоже на розклад, якого немає
   const rep = {
     days: (orig?.repeat?.days ?? []).map(String),
@@ -2298,15 +2448,21 @@ function editActivity(orig) {
       chips([['off', 'Немає'], ['on', 'Навмання'], ['order', 'По порядку']], d.watchList ? (d.watchOrder ? 'order' : 'on') : 'off',
         (v) => { d.watchList = v !== 'off'; d.watchOrder = v === 'order'; }),
       h('p', { class: 'muted small' }, 'Навмання — фільми, книги, ігри: «Порадь» вибере з не переглянутого. По порядку — уроки курсу: наступний урок підказується в справі, «Зробив» його закриває, видно «7 з 40». Відкривається значком на картці заняття; вимкнеш — назви не зникнуть.')),
+    formBox('Догляд',
+      chips([['off', 'Немає'], ['on', 'Є']], d.careOn ? 'on' : 'off', (v) => { d.careOn = v === 'on'; }),
+      h('label', { for: 'f-cmonths' }, 'Міняти кожні, міс'), careMonths,
+      h('p', { class: 'muted small' }, 'Журнал замін: струни на гітарі, ланцюг на велосипеді. На картці — остання заміна по кожній речі, а коли мине строк — нагадає в «Не забудь». Відкривається значком ключа на картці; вимкнеш — записи не зникнуть.')),
     h('div', { class: 'btn-grid' },
       button('check', 'Зберегти', 'primary', async () => {
         d.name = name.value.trim();
         if (!d.name) { name.focus(); toast('Вкажи назву'); return; }
         d.minutes = Math.max(0, Math.round(Number(minutes.value) || 0));
         d.minVersion = minVersion.value.trim();
+        d.careMonths = Math.max(0, Math.round(Number(careMonths.value) || 0));
         d.repeat = repeatFrom(orig?.repeat, rep);
         // Список міг змінитись, поки відкритий редактор (синхронізація) — його не затираємо
         if (orig) d.watch = act(orig.id)?.watch ?? d.watch;
+        if (orig) d.care = act(orig.id)?.care ?? d.care;
         if (rep.days.length && !rep.slots.length) toast('Розклад без вікон не діє — обери хоч одне вікно');
         closeSheet();
         if (fresh.g && d.group === fresh.g.id) await saveGroups([...actGroups(), fresh.g]);
@@ -2385,6 +2541,7 @@ function actCard(a) {
     h('span', { class: 'act-sub' }, meta),
     a.archived ? null : weekGoalLine(a),
     M.repeatOn(a) ? h('span', { class: 'repeat-line' }, icon('refresh'), repeatText(a)) : null,
+    ...(a.careOn ? careLines(a) : []),
     foot.length ? h('span', { class: 'act-foot' }, foot) : null);
 }
 
@@ -2556,8 +2713,12 @@ function actRow(a, heat, drag = true) {
     'aria-label': `${lessonMode(a) ? 'Уроки' : 'Список'} «${a.name}»: ${(a.watch ?? []).filter((w) => !w.done).length} ${lessonMode(a) ? 'не пройдено' : 'не переглянуто'}`,
     onClick: () => watchSheet(act(a.id) ?? a),
   }, icon('list')) : null;
-  if (list) box.classList.add('has-list');
-  box.append(h('div', { class: 'act-side' }, list, toggle, grip));
+  const care = a.careOn ? h('button', {
+    type: 'button', class: 'heat-toggle', 'aria-label': `Догляд «${a.name}»`,
+    onClick: () => careSheet(act(a.id) ?? a),
+  }, icon('tool')) : null;
+  if (list || care) box.classList.add('has-list');
+  box.append(h('div', { class: 'act-side' }, list, care, toggle, grip));
   if (panel) wrap.append(panel);
   return wrap;
 }
