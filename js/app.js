@@ -1206,12 +1206,44 @@ function quickCard(idea, min) {
     button('play', 'Почати', 'primary', () => quickStart(idea, min)));
 }
 
+/**
+ * Повторення з Буквоїда (фрази й помилки тестів), якщо чекає: справа на кілька хвилин.
+ * Запис Буквоїда вчорашній — теж годиться: те, що чекало вчора, чекає й сьогодні.
+ */
+function studyReview() {
+  const b = shared(STUDY_SHARE);
+  if (!b?.date || b.date < M.addDays(M.ymd(), -1)) return null;
+  const due = b.due || 0;
+  const mdue = b.mdue || 0;
+  if (!due && !mdue) return null;
+  // Фраза — секунд 10, помилка з тесту — з поясненням, близько пів хвилини
+  const minutes = Math.max(1, Math.ceil((due * 10 + mdue * 30) / 60));
+  const where = mdue && !due ? 'mistakes' : due && !mdue ? 'srs' : 'kursy';
+  return { due, mdue, minutes, href: `../bukvoid/#${where}` };
+}
+
+function reviewCard(r) {
+  const a = activeActs().find((x) => x.source === 'bukvoid') ?? { ...MISSING, color: 'indigo', icon: 'book' };
+  const what = [r.mdue ? `помилок ${r.mdue}` : null, r.due ? `фраз ${r.due}` : null].filter(Boolean).join(' · ');
+  return h('div', { class: 'card quick-card', style: actStyle(a) },
+    tile(a),
+    h('span', { class: 'act-text' },
+      h('span', { class: 'act-name' }, 'Повторення'),
+      h('span', { class: 'act-sub' }, `Буквоїд · ~${r.minutes} хв`),
+      h('span', { class: 'muted small' }, what)),
+    h('a', { class: 'btn primary', href: r.href }, icon('book'), 'Відкрити'));
+}
+
 function quickSheet() {
   let min = Number(recall('quick-min')) || 20;
   const list = h('div', { class: 'stack' });
+  const review = studyReview();
   const draw = () => {
     const ideas = quickIdeas(min);
-    list.replaceChildren(...(ideas.length ? ideas.map((x) => quickCard(x, min))
+    const cards = ideas.map((x) => quickCard(x, min));
+    // Влазить у час — першим: коротке й корисне; ні — останнім, частину все одно можна
+    if (review) cards.splice(review.minutes <= min ? 0 : cards.length, 0, reviewCard(review));
+    list.replaceChildren(...(cards.length ? cards
       : [h('p', { class: 'muted' }, 'Сьогодні все вже зараховано — можна й відпочити.')]));
   };
   draw();

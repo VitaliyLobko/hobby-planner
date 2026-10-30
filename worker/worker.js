@@ -3193,10 +3193,38 @@ async function studyWeekLines(env, start, end) {
   if (srs) what.push(`🔁 Повторено ${phrases(srs)}${m.srs?.learned ? ` · вивчено ${m.srs.learned} з ${m.srs.total}` : ''}`);
   if (m.weak?.length) what.push(`Слабкі клавіші: ${m.weak.map((k) => `<code>${esc(k)}</code>`).join(' ')}`);
   if (what.length) lines.push(`<blockquote>${what.join('\n')}</blockquote>`);
+  const courses = studyWeekCourses(m, week);
+  if (courses) lines.push('<i>По курсах</i>', courses);
   const per = Array.from({ length: 7 }, (_, k) => addDays(start, k)).map((d) => [d, msOf(days.get(d) ?? {})]);
   const max = Math.max(...per.map(([, v]) => v));
   lines.push('<i>По днях</i>', `<blockquote><code>${per.map(([d, v]) => `${DAYS_SHORT[weekdayOf(d)]} ${progressBar(Math.round((v / max) * 8), 8)} ${v ? minText(v) : '—'}`).join('\n')}</code></blockquote>`);
   return lines;
+}
+
+// Курсів у тижні — більше не показуємо, решта однією сумою
+const STUDY_WEEK_COURSES = 6;
+
+/**
+ * Хвилини тижня по курсах (cms від Буквоїда 0.1.12; старіші дні — без розбивки) і пройдені теми; назви — з meta.courses.
+ * Лише один курс за тиждень — розбивка нічого не додає, null.
+ */
+function studyWeekCourses(m, week) {
+  const ms = {};
+  const pass = {};
+  for (const x of week) {
+    for (const [id, v] of Object.entries(x.cms ?? {})) ms[id] = (ms[id] || 0) + v;
+    for (const [id, v] of Object.entries(x.cpass ?? {})) pass[id] = (pass[id] || 0) + v;
+  }
+  const list = Object.entries(ms).filter(([, v]) => v >= MIN / 2).sort((a, b) => b[1] - a[1]);
+  if (list.length < 2) return null;
+  const titles = new Map((m.courses ?? []).map((c) => [c.id, c.title]));
+  // Друк наосліп проходиться уроками, решта курсів — темами
+  const done = (id, n) => (id.startsWith('druk-') ? `${n} ${plural(n, 'урок', 'уроки', 'уроків')}` : `${n} ${plural(n, 'тема', 'теми', 'тем')}`);
+  const row = ([id, v]) => `${esc(titles.get(id) || id)} — ${minText(v)}${pass[id] ? ` · ✅ ${done(id, pass[id])}` : ''}`;
+  const shown = list.slice(0, STUDY_WEEK_COURSES).map(row);
+  const rest = list.slice(STUDY_WEEK_COURSES);
+  if (rest.length) shown.push(`ще ${rest.length} — ${minText(rest.reduce((s, [, v]) => s + v, 0))}`);
+  return `<blockquote>${shown.join('\n')}</blockquote>`;
 }
 
 /** Рядок для «Доброго ранку!»: фрази й помилки на повторення сьогодні. */
