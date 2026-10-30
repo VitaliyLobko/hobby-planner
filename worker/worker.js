@@ -3172,7 +3172,7 @@ async function studyWeekLines(env, start, end) {
   const passed = week.flatMap((x) => x.passed ?? []);
   if (passed.length) what.push(`✅ ${passed.length} ${plural(passed.length, 'урок', 'уроки', 'уроків')}: ${passed.map(esc).join(', ')}`);
   const tests = week.reduce((s, x) => s + (x.tests?.length || 0), 0);
-  if (tests) what.push(`📝 ${tests} ${plural(tests, 'тест', 'тести', 'тестів')} правопису й англійської`);
+  if (tests) what.push(`📝 ${tests} ${plural(tests, 'тест', 'тести', 'тестів')}`);
   const srs = week.reduce((s, x) => s + (x.srs || 0), 0);
   if (srs) what.push(`🇬🇧 Повторено ${phrases(srs)}${m.srs?.learned ? ` · вивчено ${m.srs.learned} з ${m.srs.total}` : ''}`);
   if (m.weak?.length) what.push(`Слабкі клавіші: ${m.weak.map((k) => `<code>${esc(k)}</code>`).join(' ')}`);
