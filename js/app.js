@@ -415,6 +415,7 @@ function itemSheet(item) {
     box.append(h('div', { class: 'btn-grid' },
       button(running ? 'pause' : 'play', running ? `Пауза · ${M.clock(sec)}` : (sec ? `Продовжити · ${M.clock(sec)}` : 'Почати таймер'), '',
         () => { closeSheet(); if (running) pauseTimer(item); else startTimer(item); }),
+      a.source === 'bukvoid' ? h('a', { class: 'btn', href: studyHref(a) }, icon('book'), studyNext(a) && !studyNext(a).done ? `Тема ${studyNext(a).n} у Буквоїді` : 'Відкрити Буквоїд') : null,
       button('check', sec ? `Зробив · ${M.duration(sec)}` : 'Зробив', 'primary', () => { closeSheet(); mark(item, 'done'); }),
       button('half', a.minVersion ? `Мінімум: ${a.minVersion}` : 'Мінімум', 'min', () => { closeSheet(); mark(item, 'min'); }),
       // Вікон для переносу може бути п'ять — окрема шторка, щоб ця не розросталась; нікуди — лишається «Пропустити»
@@ -461,6 +462,20 @@ const titleKey = (t) => t.toLocaleLowerCase('uk').replace(/\s+/g, ' ').trim();
 // Список «По порядку» — уроки курсу: наступний — перший не пройдений у порядку додавання
 const lessonMode = (a) => Boolean(a?.watchList && a.watchOrder);
 const nextLesson = (a) => (lessonMode(a) ? (a.watch ?? []).find((w) => !w.done) ?? null : null);
+
+/** Курси Буквоїда з наступною темою — те, що він поклав на цьому пристрої (старий Буквоїд — порожньо). */
+const studyCourses = () => (Array.isArray(shared(STUDY_SHARE)?.courses) ? shared(STUDY_SHARE).courses : []);
+/** Заняття прив'язане до курсу Буквоїда — його наступна тема { href, n, title, done } або null. */
+function studyNext(a) {
+  if (a.source !== 'bukvoid' || !a.course) return null;
+  return studyCourses().find((c) => c.id === a.course)?.next ?? null;
+}
+/** Адреса Буквоїда для заняття: наступна тема курсу, сам курс або головна. */
+function studyHref(a) {
+  const next = studyNext(a);
+  if (next && !next.done) return `../bukvoid/#${next.href}`;
+  return a.course ? `../bukvoid/#kurs/${a.course}` : '../bukvoid/';
+}
 const lessonNo = (a, w) => (a.watch ?? []).findIndex((x) => x.id === w.id) + 1;
 
 /** Урок, який закриває «Зробив»: з «що саме», а без нього — наступний; у «що саме» щось інше — жодного. */
@@ -825,7 +840,10 @@ function itemCard(item, slot, date, today, now) {
   const plan = open ? (a.minutes ? `~${a.minutes} хв` : '') : (sec ? `витрачено ${M.duration(sec)}` : '');
   // Курс: «що саме» не задане — підказуємо наступний урок; «Зробив» його й закриє
   const lesson = open && !item.topic ? nextLesson(a) : null;
-  const sub = [item.topic || (lesson ? `далі ${lessonNo(a, lesson)}. ${lesson.title}` : ''), plan].filter(Boolean).join(' · ');
+  // Курс Буквоїда — наступна тема звідти (у Буквоїді й проходиться)
+  const study = open && !item.topic && !lesson ? studyNext(a) : null;
+  const next = lesson ? `далі ${lessonNo(a, lesson)}. ${lesson.title}` : study && !study.done ? `далі ${study.n}. ${study.title}` : '';
+  const sub = [item.topic || next, plan].filter(Boolean).join(' · ');
   const just = justDone === item.id;
   if (just) justDone = null;
   const card = h('article', { class: `card item-card st-${st}${just ? ' just-done' : ''}`, style: actStyle(a) },
@@ -2391,6 +2409,16 @@ function editActivity(orig) {
   const minutes = h('input', { type: 'number', inputmode: 'numeric', min: 0, max: 600, value: d.minutes || '', id: 'f-min' });
   const minVersion = h('input', { type: 'text', maxlength: 60, value: d.minVersion ?? '', placeholder: 'Напр.: 5 хв гами', id: 'f-minv' });
   const careMonths = h('input', { type: 'number', inputmode: 'numeric', min: 0, max: 60, value: d.careMonths ?? CARE_MONTHS, id: 'f-cmonths' });
+  // Курс Буквоїда: список — з того ж сайту (Буквоїд кладе його в localStorage, коли відкритий на цьому пристрої)
+  const courses = studyCourses();
+  const known = courses.some((c) => c.id === d.course);
+  const courseSelect = h('select', { id: 'f-course', onChange: (e) => { d.course = e.target.value || null; } },
+    h('option', { value: '' }, 'Будь-який — весь час у Буквоїді'),
+    ...courses.map((c) => h('option', { value: c.id, selected: c.id === d.course }, c.title)),
+    d.course && !known ? h('option', { value: d.course, selected: true }, d.course) : null);
+  const studyCourse = h('div', { class: 'study-course', hidden: d.source !== 'bukvoid' },
+    h('label', { for: 'f-course' }, 'Курс'), courseSelect,
+    courses.length ? null : h('p', { class: 'muted small' }, 'Список курсів з’явиться, коли відкриєш Буквоїд на цьому пристрої.'));
   // Без розкладу вікна розкладу порожні: інакше підсвічене вікно схоже на розклад, якого немає
   const rep = {
     days: (orig?.repeat?.days ?? []).map(String),
@@ -2466,8 +2494,12 @@ function editActivity(orig) {
         (v) => { d.watchList = v !== 'off'; d.watchOrder = v === 'order'; }),
       h('p', { class: 'muted small' }, 'Навмання — фільми, книги, ігри: «Порадь» вибере з не переглянутого. По порядку — уроки курсу: наступний урок підказується в справі, «Зробив» його закриває, видно «7 з 40». Відкривається значком на картці заняття; вимкнеш — назви не зникнуть.')),
     formBox('Буквоїд',
-      chips([['off', 'Ні'], ['on', 'Зараховувати']], d.source === 'bukvoid' ? 'on' : 'off', (v) => { d.source = v === 'on' ? 'bukvoid' : null; }),
-      h('p', { class: 'muted small' }, 'Для друку наосліп, правопису чи англійської. Займався в Буквоїді — справа на сьогодні закривається сама: від «скільки хвилин зазвичай» — «Зробив», від 5 хв чи пройденого уроку — «Мінімум». Потрібна синхронізація з сервером в обох застосунках.')),
+      chips([['off', 'Ні'], ['on', 'Зараховувати']], d.source === 'bukvoid' ? 'on' : 'off', (v) => {
+        d.source = v === 'on' ? 'bukvoid' : null;
+        studyCourse.hidden = v !== 'on';
+      }),
+      studyCourse,
+      h('p', { class: 'muted small' }, 'Займався в Буквоїді — справа на сьогодні закривається сама: від «скільки хвилин зазвичай» — «Зробив», від 5 хв чи пройденої теми — «Мінімум». З курсом рахуються лише його хвилини, а в справі видно наступну тему. Потрібна синхронізація з сервером в обох застосунках.')),
     formBox('Догляд',
       chips([['off', 'Немає'], ['on', 'Є']], d.careOn ? 'on' : 'off', (v) => { d.careOn = v === 'on'; }),
       h('label', { for: 'f-cmonths' }, 'Міняти кожні, міс'), careMonths,
@@ -3082,9 +3114,11 @@ function neighbours(today) {
   }
   const b = shared(STUDY_SHARE);
   // Буквоїд: учора й раніше хвилини вже не «сьогодні» — плитка лише про повторення, якщо воно чекає
-  if (b?.date === today && (b.min || b.due)) {
-    const sub = [b.cpm ? `${b.cpm} зн/хв` : null, b.due ? `повторити ${b.due}` : null].filter(Boolean).join(' · ');
-    tiles.push(tile(b.due && !b.min ? '../bukvoid/#srs' : '../bukvoid/', 'Буквоїд сьогодні', b.min ? `${b.min} хв` : 'ще не було', sub));
+  const review = (b?.due || 0) + (b?.mdue || 0);
+  if (b?.date === today && (b.min || review)) {
+    const sub = [b.cpm ? `${b.cpm} зн/хв` : null, review ? `повторити ${review}` : null].filter(Boolean).join(' · ');
+    const where = b.mdue && !b.due ? 'mistakes' : b.due && !b.mdue ? 'srs' : 'kursy';
+    tiles.push(tile(review && !b.min ? `../bukvoid/#${where}` : '../bukvoid/', 'Буквоїд сьогодні', b.min ? `${b.min} хв` : 'ще не було', sub));
   }
   return tiles.length ? h('div', { class: 'nb-tiles' }, tiles) : null;
 }

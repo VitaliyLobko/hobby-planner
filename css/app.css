@@ -633,7 +633,7 @@ button.link-btn { padding: 0; border: 0; background: none; color: var(--accent);
 .date-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .date-pair label { display: flex; flex-direction: column; gap: 4px; margin: 0; }
 
-input[type="text"], input[type="search"], input[type="number"], input[type="time"], input[type="url"], input[type="password"], input[type="date"] {
+input[type="text"], input[type="search"], input[type="number"], input[type="time"], input[type="url"], input[type="password"], input[type="date"], select {
   width: 100%; min-height: 44px; padding: 0 12px; border-radius: 10px;
   border: 1px solid var(--line); background: var(--surface-2); color: var(--text); font: inherit;
 }
@@ -1008,3 +1008,5 @@ input[type="text"], input[type="search"], input[type="number"], input[type="time
 .lock-veil .btn { min-width: 220px; min-height: 48px; }
 .lock-veil .lock-status { min-height: 1.4em; margin: 0; }
 .lock-icon { width: 96px; height: 96px; border-radius: 22px; }
+.study-course { display: grid; gap: 6px; }
+.study-course[hidden] { display: none; }
