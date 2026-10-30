@@ -12,6 +12,9 @@ const state = { activities: [], plan: [], meta: [], reminders: [], tombstones: [
 let slotsCfg = structuredClone(M.DEFAULT_SLOTS);
 let tab = 'today';
 let planDate = M.ymd();
+// Щойно зарахована справа й ширина смужки тижня до неї: наступний рендер програє анімацію один раз
+let justDone = null;
+let barFrom = '';
 // Оновлення застосунку: реєстрація service worker, нова версія, що чекає, і її номер
 const upd = { reg: null, worker: null, next: null, checked: '' };
 
@@ -295,7 +298,14 @@ async function mark(item, status) {
     if (!item.topic) next.topic = lesson.title.slice(0, 80);
     changes.activities = { put: [{ ...a, watch: a.watch.map((w) => (w.id === lesson.id ? { ...w, done: M.ymd() } : w)) }] };
   }
+  if (M.counts(status)) {
+    justDone = item.id;
+    barFrom = document.querySelector('.tc-bar span')?.style.width || '';
+  }
   await save(changes);
+  // Рендер у save синхронний — не з «Сьогодні» анімація не потрібна, і пізніше програватись не повинна
+  justDone = null;
+  barFrom = '';
   if (status === 'planned') return;
   const level = levelNow(item.activityId);
   if (level > levelBefore) celebrate(a, level);
@@ -816,7 +826,9 @@ function itemCard(item, slot, date, today, now) {
   // Курс: «що саме» не задане — підказуємо наступний урок; «Зробив» його й закриє
   const lesson = open && !item.topic ? nextLesson(a) : null;
   const sub = [item.topic || (lesson ? `далі ${lessonNo(a, lesson)}. ${lesson.title}` : ''), plan].filter(Boolean).join(' · ');
-  const card = h('article', { class: `card item-card st-${st}`, style: actStyle(a) },
+  const just = justDone === item.id;
+  if (just) justDone = null;
+  const card = h('article', { class: `card item-card st-${st}${just ? ' just-done' : ''}`, style: actStyle(a) },
     h('div', { class: 'swipe-body' },
       h('div', { class: 'act-row' }, tile(a),
         h('div', { class: 'act-text' },
@@ -1294,6 +1306,10 @@ function viewToday() {
     .flatMap((s) => itemsAt(today, s.id).filter((p) => isOpen(M.shownStatus(p, s, today, now)))));
   const streak = M.dayStreak(state.plan, today, pauses());
   const [weekday, date] = M.dayTitle(today).split(', ');
+  const barWidth = `${target ? Math.min(100, (done / target) * 100) : 0}%`;
+  const from = barFrom;
+  const grown = Boolean(from) && from !== barWidth;
+  barFrom = '';
   const tags = [
     left ? h('span', { class: 'tc-tag' }, icon('clock'), `Ще ~${minText(left)}`) : null,
     streak >= MIN_STREAK ? h('span', { class: 'tc-tag streak' }, icon('flame'), `${streak} ${plural(streak, 'день', 'дні', 'днів')} поспіль`) : null,
@@ -1303,8 +1319,8 @@ function viewToday() {
       h('div', { class: 'tc-top' },
         h('div', { class: 'tc-date' }, h('span', {}, weekday), h('b', {}, date ?? '')),
         h('a', { class: 'tc-week', href: '#week', 'aria-label': `Тиждень: ${done} з ${target}` },
-          h('span', {}, 'Тиждень'), h('b', {}, `${done} / ${target}`))),
-      h('div', { class: 'tc-bar' }, h('span', { style: { width: `${target ? Math.min(100, (done / target) * 100) : 0}%` } })),
+          h('span', {}, 'Тиждень'), h('b', { class: grown ? 'bump' : '' }, `${done} / ${target}`))),
+      h('div', { class: 'tc-bar' }, h('span', { class: grown ? 'grow' : '', style: { width: barWidth, '--from': from || barWidth } })),
       tags.length ? h('div', { class: 'tc-tags' }, tags) : null,
       neighbours(today)),
     keyBanner(),

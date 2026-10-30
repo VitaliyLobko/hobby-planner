@@ -127,6 +127,19 @@ a { color: var(--accent); }
 .tc-week b { font-size: 22px; font-weight: 800; line-height: 1.2; font-variant-numeric: tabular-nums; }
 .tc-bar { height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
 .tc-bar span { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
+/* Щойно зарахували справу: смужка тижня доростає з попередньої ширини, лічильник підскакує */
+.tc-bar span.grow { animation: bar-grow .6s cubic-bezier(.3, 1, .4, 1); }
+@keyframes bar-grow { from { width: var(--from); } }
+.tc-week b.bump { display: inline-block; transform-origin: right center; animation: bump .45s cubic-bezier(.3, 1.6, .5, 1); }
+@keyframes bump { 40% { transform: scale(1.22); color: var(--accent); } }
+/* …і значок заняття на картці підстрибує, плашка «Зроблено» проявляється */
+.item-card.just-done .tile { animation: tile-hop .5s cubic-bezier(.3, 1.6, .5, 1); }
+.item-card.just-done .badge { animation: badge-in .35s ease-out .15s both; }
+@keyframes tile-hop { 35% { transform: translateY(-4px) scale(1.12) rotate(-6deg); } 70% { transform: rotate(3deg); } }
+@keyframes badge-in { from { opacity: 0; transform: translateX(-6px); } }
+@media (prefers-reduced-motion: reduce) {
+  .tabs a.active *, .tc-bar span.grow, .tc-week b.bump, .item-card.just-done .tile, .item-card.just-done .badge { animation: none !important; }
+}
 .tc-tags { display: flex; flex-wrap: wrap; gap: 6px; }
 .tc-tag { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 12px; background: var(--surface-2); font-size: 13px; font-weight: 600; }
 .tc-tag svg { width: 15px; height: 15px; flex: none; }
@@ -173,6 +186,18 @@ a { color: var(--accent); }
 .tabs a svg { box-sizing: content-box; padding: 4px 18px; border-radius: 16px; transition: background .15s ease; }
 .tabs a.active { color: var(--text); font-weight: 800; }
 .tabs a.active svg { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+/* Іконка вкладки оживає один раз, коли вкладку відкрили: галочка в календарі, рядки плану, шари занять складаються */
+.tabs .tick, .tabs .ln { stroke-dasharray: 1; }
+.tabs a.active .tick { animation: draw .4s ease-out .1s both; }
+.tabs a.active .ln { animation: draw .25s ease-out both; }
+.tabs a.active .ln:nth-of-type(2) { animation-delay: .1s; }
+.tabs a.active .ln:nth-of-type(3) { animation-delay: .2s; }
+.tabs .top { transform-origin: 12px 13px; }
+.tabs a.active .top { animation: layer-drop .5s cubic-bezier(.3, 1.5, .5, 1); }
+.tabs a.active .base { animation: layer-take .5s ease-out; }
+@keyframes draw { from { stroke-dashoffset: 1; } }
+@keyframes layer-drop { from { transform: translateY(-5px) scale(.9); opacity: .4; } }
+@keyframes layer-take { 40% { transform: translateY(1px); } }
 
 .fab {
   position: fixed; z-index: 21;
