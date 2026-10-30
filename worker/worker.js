@@ -15,7 +15,8 @@
 const APP_URL = 'https://vitaliylobko.github.io/hobby-planner/';
 const WEIGHT_URL = 'https://vitaliylobko.github.io/weight-log/';
 const MONEY_URL = 'https://vitaliylobko.github.io/marnotrat/';
-const ORIGINS = ['https://vitaliylobko.github.io', 'http://127.0.0.1:8093', 'http://127.0.0.1:8094', 'http://127.0.0.1:8095', 'http://127.0.0.1:8096', 'http://127.0.0.1:8098'];
+const STUDY_URL = 'https://vitaliylobko.github.io/bukvoid/';
+const ORIGINS = ['https://vitaliylobko.github.io', 'http://127.0.0.1:8093', 'http://127.0.0.1:8094', 'http://127.0.0.1:8095', 'http://127.0.0.1:8096', 'http://127.0.0.1:8098', 'http://127.0.0.1:8099'];
 const DEFAULT_TZ = 'Europe/Kyiv';
 const MIN = 60000;
 // Нагадування вікна: на початку й ще раз за 30 хв до кінця, якщо справи не відмічені
@@ -58,7 +59,9 @@ const SCHEMA = [
   'CREATE TABLE IF NOT EXISTS money_days (date TEXT PRIMARY KEY, data TEXT NOT NULL)',
   // «Варто було?» про великі покупки: ok 1 — варто, 0 — ні
   'CREATE TABLE IF NOT EXISTS money_verdicts (id TEXT PRIMARY KEY, date TEXT NOT NULL, cat TEXT, v REAL, ok INTEGER, at INTEGER)',
-  // Записи «Ваги» й Марнотрату (/api/records): новіший updated перемагає, видалене лишається рядком deleted = 1
+  // Буквоїд: підсумки дня — { ms, qms, chars, errors, cpm, acc, passed, tests, srs } (див. onStudy)
+  'CREATE TABLE IF NOT EXISTS study_days (date TEXT PRIMARY KEY, data TEXT NOT NULL)',
+  // Записи «Ваги», Марнотрату й Буквоїда (/api/records): новіший updated перемагає, видалене лишається рядком deleted = 1
   `CREATE TABLE IF NOT EXISTS records (
     app TEXT NOT NULL, store TEXT NOT NULL, id TEXT NOT NULL, data TEXT, updated INTEGER DEFAULT 0,
     deleted INTEGER DEFAULT 0, srv INTEGER DEFAULT 0, PRIMARY KEY (app, store, id))`,
@@ -75,6 +78,7 @@ export default {
       if (url.pathname === '/api/sync' && request.method === 'POST') return cors(request, await onSync(request, env));
       if (url.pathname === '/api/weights' && request.method === 'POST') return cors(request, await onWeights(request, env));
       if (url.pathname === '/api/money' && request.method === 'POST') return cors(request, await onMoney(request, env));
+      if (url.pathname === '/api/study' && request.method === 'POST') return cors(request, await onStudy(request, env));
       // Застосунок до 0.2.27 ще шле шапку сам — тепер її рахує сервер, приймаємо мовчки
       if (url.pathname === '/api/widget' && request.method === 'POST') return cors(request, json({ now: Date.now() }));
       if (url.pathname === '/api/widget' && request.method === 'GET') return await onWidgetGet(request, env);
@@ -1350,6 +1354,7 @@ async function tick(env) {
   await sendDigests(env, chatId, cfg, tz, now, paused);
   if (!paused) await sendWeighReminder(env, chatId, tz, now);
   if (!paused) await sendDayAsk(env, chatId, tz, now);
+  if (!paused) await sendStudyNudge(env, chatId, cfg, tz, now);
 }
 
 /**
@@ -1487,7 +1492,8 @@ async function sendEvening(env, chatId, now, { paused = false } = {}) {
     lines.push(...planLines(date, items, cfg, acts, tz, now, { skipEmpty: true }));
   }
   const ration = await rationDayLines(env, date);
-  const blocks = [await reminderLines(env, date), await weightDayLines(env, date), await moneyDayLines(env, date, now), ration.lines];
+  const study = await studyDayLines(env, date, now);
+  const blocks = [await reminderLines(env, date), await weightDayLines(env, date), await moneyDayLines(env, date, now), ration.lines, study];
   for (const b of blocks) {
     if (b.length) { any = true; lines.push(...b); }
   }
@@ -1496,6 +1502,7 @@ async function sendEvening(env, chatId, now, { paused = false } = {}) {
   if (tomorrow) lines.push('', '─────────────', ...tomorrow.lines);
   const links = [{ text: 'Відкрити план', url: `${APP_URL}#${tomorrow ? 'plan' : 'today'}` }];
   if (blocks[2].length) links.push({ text: 'Марнотрат', url: MONEY_URL });
+  if (study.length) links.push({ text: 'Буквоїд', url: STUDY_URL });
   await tg(env, 'sendMessage', {
     chat_id: chatId, parse_mode: 'HTML', text: lines.join('\n'),
     reply_markup: { inline_keyboard: [...(ration.row ? [ration.row] : []), ...(tomorrow?.rows ?? []), links, ...(tomorrow?.rows.length ? [[{ text: 'Не треба', callback_data: 'p:no' }]] : [])] },
@@ -1516,6 +1523,8 @@ async function morningParts(env, date, cfg, acts, slotId) {
   if (later.length) foot.push(`Далі: ${later.map(([s, n]) => `${SLOT_EMOJI[s.id] ?? '🕒'} ${esc(s.label)} — ${n}`).join(' · ')}`);
   const reminders = (await remindersFor(env, date)).filter((r) => !r.done?.[date]);
   if (reminders.length) foot.push(`📌 Не забудь — ${reminders.length}`);
+  const study = await studyMorningLine(env, date);
+  if (study) foot.push(study);
   const minutes = items.reduce((s, x) => s + ((acts.get(x.activityId) ?? MISSING).minutes || 0), 0);
   foot.push(`<b>Сьогодні ${items.length} ${plural(items.length, 'справа', 'справи', 'справ')}</b>${minutes ? ` · ~${minutes} хв` : ''}`);
   const streak = streakLine(await dayStreak(env, date, await pausesOf(env)), true);
@@ -1637,8 +1646,10 @@ async function sendWeek(env, chatId, now, { offerNext = false } = {}) {
   const weight = await weightWeekLines(env, start, end);
   const ration = await rationWeekLines(env, start, end);
   const money = await moneyWeekLines(env, start, end);
-  lines.push(...weight, ...ration, ...money);
-  const keyboard = [...await moneyReviewRows(env, start, end), [{ text: 'Відкрити тиждень', url: `${APP_URL}#week` }, ...(money.length ? [{ text: 'Марнотрат', url: MONEY_URL }] : [])]];
+  const study = await studyWeekLines(env, start, end);
+  lines.push(...weight, ...ration, ...money, ...study);
+  const keyboard = [...await moneyReviewRows(env, start, end), [{ text: 'Відкрити тиждень', url: `${APP_URL}#week` },
+    ...(money.length ? [{ text: 'Марнотрат', url: MONEY_URL }] : []), ...(study.length ? [{ text: 'Буквоїд', url: STUDY_URL }] : [])]];
   // Неділя ввечері: наступний тиждень одним дотиком — тими самими справами
   if (offerNext) {
     const next = addDays(start, 7);
@@ -2455,7 +2466,7 @@ async function onWeights(request, env) {
 // ---------- записи «Ваги» й Марнотрату ----------
 
 // Які сховища кожного застосунку бот приймає; решту відкидає
-const RECORD_STORES = { 'weight-log': ['weights', 'waists', 'settings'], marnotrat: ['coins', 'ops', 'meta'] };
+const RECORD_STORES = { 'weight-log': ['weights', 'waists', 'settings'], marnotrat: ['coins', 'ops', 'meta'], bukvoid: ['part'] };
 // За раз — не більше (перший обмін застосунок шле частинами): запис до 20 КБ, частина до 900 КБ
 const RECORDS_MAX = 400;
 const RECORD_MAX_LEN = 20000;
@@ -3076,6 +3087,225 @@ async function onMoney(request, env) {
     ...days.map((d) => env.DB.prepare('INSERT INTO money_days (date, data) VALUES (?, ?)').bind(d.date, d.data)),
     env.DB.prepare(META_UPSERT).bind('money', JSON.stringify({ at: now, ...budget, big, noSpend })),
   ]);
+  return json({ now });
+}
+
+// ---------- Буквоїд: друк наосліп, правопис, англійська ----------
+// Буквоїд шле підсумки днів (POST /api/study): хвилини друку й тестів, швидкість, точність, назви пройдених уроків
+// і тестів, скільки фраз англійської чекає повторення. Набраних текстів і статистики клавіш бот не отримує.
+
+// Підсумки старші за годину — підписуємо, станом на коли
+const STUDY_STALE_MS = 60 * MIN;
+// Без «скільки хвилин зазвичай» у занятті — стільки треба, щоб зарахувати повністю
+const STUDY_FULL_MIN = 15;
+// Менше — ще не «мінімум» (якщо не пройдено жодного уроку)
+const STUDY_MIN_MIN = 5;
+
+/** Що надіслав Буквоїд: { at, srs: { due: {дата: фраз}, total, learned }, weak, lessons, best } — null, якщо ще нічого. */
+async function studyMeta(env) {
+  return parseJson(await getMeta(env, 'study'), null);
+}
+
+async function studyDays(env, from, to) {
+  const { results } = await env.DB.prepare('SELECT date, data FROM study_days WHERE date >= ? AND date <= ? ORDER BY date')
+    .bind(from, to).all();
+  return new Map(results.map((r) => [r.date, parseJson(r.data, {})]));
+}
+
+/** Скільки фраз чекає повторення на дату: Буквоїд шле наперед на тиждень (повторили сьогодні — 0). */
+const srsDue = (m, date) => Number(m?.srs?.due?.[date] ?? 0);
+const minText = (ms) => `${Math.max(1, Math.round(ms / MIN))} хв`;
+const pctText = (v) => `${String(Math.round(v * 10) / 10).replace('.', ',')}%`;
+const phrases = (n) => `${n} ${plural(n, 'фраза', 'фрази', 'фраз')}`;
+
+/** «⌨ Буквоїд» за день: хвилини, швидкість і точність друку; цитатою — уроки, тести, повторення. */
+async function studyDayLines(env, date, now) {
+  const m = await studyMeta(env);
+  if (!m) return [];
+  const d = (await studyDays(env, date, date)).get(date) ?? {};
+  const ms = (d.ms || 0) + (d.qms || 0);
+  const lines = [''];
+  if (!ms) lines.push('⌨️ <b>Буквоїд</b> · сьогодні без вправ');
+  else {
+    const typing = d.ms ? ` · ${d.cpm} зн/хв · ${pctText(d.acc)}` : '';
+    lines.push(`⌨️ <b>Буквоїд</b> · ${minText(ms)}${typing}`);
+    const what = [];
+    if (d.passed?.length) what.push(`✅ ${d.passed.map(esc).join(', ')}`);
+    for (const [title, s, n] of d.tests ?? []) what.push(`📝 ${esc(title)} — ${s}/${n}`);
+    if (d.srs) what.push(`🇬🇧 Повторено ${phrases(d.srs)}`);
+    if (what.length) lines.push(`<blockquote>${what.join('\n')}</blockquote>`);
+  }
+  const due = srsDue(m, date);
+  if (due) lines.push(`🇬🇧 Чекають повторення: ${phrases(due)}`);
+  if (now - (m.at || 0) > STUDY_STALE_MS) {
+    const at = local(m.at || 0, tzOf(env));
+    lines.push(`<i>Дані Буквоїда станом на ${at.date === date ? at.hm : `${dayMonth(at.date)}, ${at.hm}`}</i>`);
+  }
+  return lines;
+}
+
+/** Буквоїд за тиждень: хвилини (порівняно з минулим), середня швидкість і точність, смужки по днях, слабкі клавіші. */
+async function studyWeekLines(env, start, end) {
+  const m = await studyMeta(env);
+  if (!m) return [];
+  const prevStart = addDays(start, -7);
+  const days = await studyDays(env, prevStart, end);
+  const pick = (from, to) => [...days].filter(([d]) => d >= from && d <= to).map(([, x]) => x);
+  const week = pick(start, end);
+  const msOf = (x) => (x.ms || 0) + (x.qms || 0);
+  const total = week.reduce((s, x) => s + msOf(x), 0);
+  if (!total) return ['', '⌨️ <b>Буквоїд</b> · цього тижня без вправ'];
+  const prev = pick(prevStart, addDays(start, -1)).reduce((s, x) => s + msOf(x), 0);
+  const active = week.filter((x) => msOf(x) > 0).length;
+  const lines = ['', `⌨️ <b>Буквоїд</b> · ${minText(total)} · ${active} ${plural(active, 'день', 'дні', 'днів')} з 7`];
+  if (prev > 0 && Math.round(total / MIN) !== Math.round(prev / MIN)) {
+    lines.push(`<i>${total > prev ? '↑' : '↓'} на ${minText(Math.abs(total - prev))} ${total > prev ? 'більше' : 'менше'}, ніж минулого тижня</i>`);
+  }
+  // Швидкість і точність — зважені знаками: короткий рядок не перекошує тиждень
+  const chars = week.reduce((s, x) => s + (x.chars || 0), 0);
+  const typed = week.reduce((s, x) => s + (x.ms || 0), 0);
+  const what = [];
+  if (chars && typed) {
+    const errors = week.reduce((s, x) => s + (x.errors || 0), 0);
+    what.push(`Друк: ${Math.round(chars / (typed / MIN))} зн/хв · точність ${pctText(100 * (1 - errors / Math.max(chars, 1)))}`);
+  }
+  const passed = week.flatMap((x) => x.passed ?? []);
+  if (passed.length) what.push(`✅ ${passed.length} ${plural(passed.length, 'урок', 'уроки', 'уроків')}: ${passed.map(esc).join(', ')}`);
+  const tests = week.reduce((s, x) => s + (x.tests?.length || 0), 0);
+  if (tests) what.push(`📝 ${tests} ${plural(tests, 'тест', 'тести', 'тестів')} правопису й англійської`);
+  const srs = week.reduce((s, x) => s + (x.srs || 0), 0);
+  if (srs) what.push(`🇬🇧 Повторено ${phrases(srs)}${m.srs?.learned ? ` · вивчено ${m.srs.learned} з ${m.srs.total}` : ''}`);
+  if (m.weak?.length) what.push(`Слабкі клавіші: ${m.weak.map((k) => `<code>${esc(k)}</code>`).join(' ')}`);
+  if (what.length) lines.push(`<blockquote>${what.join('\n')}</blockquote>`);
+  const per = Array.from({ length: 7 }, (_, k) => addDays(start, k)).map((d) => [d, msOf(days.get(d) ?? {})]);
+  const max = Math.max(...per.map(([, v]) => v));
+  lines.push('<i>По днях</i>', `<blockquote><code>${per.map(([d, v]) => `${DAYS_SHORT[weekdayOf(d)]} ${progressBar(Math.round((v / max) * 8), 8)} ${v ? minText(v) : '—'}`).join('\n')}</code></blockquote>`);
+  return lines;
+}
+
+/** Рядок для «Доброго ранку!»: фрази на повторення сьогодні. */
+async function studyMorningLine(env, date) {
+  const due = srsDue(await studyMeta(env), date);
+  return due ? `🇬🇧 Повторити ${phrases(due)}` : null;
+}
+
+/**
+ * Вечірнє вікно почалось, а фрази на сьогодні не повторено — одне повідомлення з кнопкою в Буквоїд.
+ * Повторили — Буквоїд надішле 0, і повідомлення саме стане «✅ повторено». На паузі мовчить, як і нагадування про справи.
+ */
+async function sendStudyNudge(env, chatId, cfg, tz, now) {
+  const { date, hm } = local(now, tz);
+  const evening = slotsFor(date, cfg).find((s) => s.id === 'e');
+  if (!evening || hm < evening.from || hm >= evening.to) return;
+  const st = parseJson(await getMeta(env, 'study_nudge'), {});
+  if (st.date === date) return;
+  const due = srsDue(await studyMeta(env), date);
+  await setMeta(env, 'study_nudge', JSON.stringify({ date, msg: null }));
+  if (!due) return;
+  const res = await tg(env, 'sendMessage', {
+    chat_id: chatId, parse_mode: 'HTML',
+    text: `🇬🇧 <b>${phrases(due)}</b> чекають повторення\n<i>Кілька хвилин — і вони переходять у довгу пам'ять.</i>`,
+    reply_markup: { inline_keyboard: [[{ text: 'Повторити', url: `${STUDY_URL}#srs` }]] },
+  });
+  if (res?.result?.message_id) await setMeta(env, 'study_nudge', JSON.stringify({ date, msg: res.result.message_id }));
+}
+
+/** Повторили в Буквоїді — нагадування за сьогодні закриваємо. */
+async function closeStudyNudge(env, date) {
+  const st = parseJson(await getMeta(env, 'study_nudge'), {});
+  if (st.date !== date || !st.msg) return;
+  const chatId = await owner(env);
+  if (chatId) {
+    await tg(env, 'editMessageText', {
+      chat_id: chatId, message_id: st.msg, parse_mode: 'HTML', text: '🇬🇧 ✅ Фрази на сьогодні повторено',
+    });
+  }
+  await setMeta(env, 'study_nudge', JSON.stringify({ date, msg: null }));
+}
+
+/**
+ * Заняття з позначкою «Зараховувати з Буквоїда» (source: 'bukvoid') — справа на сьогодні закривається сама:
+ * хвилин друку й тестів не менше за «скільки хвилин зазвичай» — «Зробив», від 5 хв чи пройдений урок — «Мінімум».
+ * «Мінімум» потім доростає до «Зробив». Час справи — не менший за час у Буквоїді. Одна справа заняття на день — перша.
+ */
+async function markStudyItems(env, date, d, now) {
+  const sec = Math.round(((d.ms || 0) + (d.qms || 0)) / 1000);
+  if (!sec && !d.passed?.length) return;
+  const acts = await actsMap(env);
+  const linked = [...acts.values()].filter((a) => a.source === 'bukvoid' && !a.archived);
+  if (!linked.length) return;
+  const tz = tzOf(env);
+  const cfg = await slotsCfg(env);
+  const order = slotsFor(date, cfg).map((s) => s.id);
+  const chatId = await owner(env);
+  const edited = new Set();
+  const { results } = await env.DB.prepare("SELECT * FROM items WHERE date = ? AND deleted = 0 AND status IN ('planned', 'min', 'done')")
+    .bind(date).all();
+  for (const a of linked) {
+    const rows = results.map((row) => ({ row, it: JSON.parse(row.data) })).filter((x) => x.it.activityId === a.id)
+      .sort((x, y) => order.indexOf(x.it.slot) - order.indexOf(y.it.slot));
+    // Уже зроблене сьогодні — нічого не чіпаємо (і другу справу заняття не закриваємо)
+    if (rows.some((x) => x.it.status === 'done')) continue;
+    const target = rows.find((x) => x.it.status === 'min') ?? rows.find((x) => x.it.status === 'planned');
+    if (!target) continue;
+    const full = sec >= (a.minutes || STUDY_FULL_MIN) * 60;
+    const status = full ? 'done' : (sec >= STUDY_MIN_MIN * 60 || d.passed?.length) ? 'min' : null;
+    if (!status || status === target.it.status) continue;
+    const { row, it } = target;
+    it.spent = Math.max(elapsed(it, now), sec);
+    it.runningSince = null;
+    it.status = status;
+    it.doneAt = local(now, tz).hm;
+    it.via = 'bukvoid';
+    await saveFromBot(env, row, it, { nextAt: null });
+    if (chatId && row.msg_id && !edited.has(row.msg_id)) {
+      edited.add(row.msg_id);
+      await editWindow(env, chatId, row.msg_id, it.date, it.slot, cfg, acts, tz, now);
+    }
+  }
+}
+
+/**
+ * Буквоїд шле підсумки днів від from (на заміну тому, що тут від from): друк ms/chars/errors/cpm/acc, тести й
+ * повторення qms, назви пройдених уроків і тестів, srs — повторено фраз; окремо — фрази на повторення наперед,
+ * слабкі клавіші й скільки уроків пройдено. Усе — підсумки, без набраних текстів.
+ */
+async function onStudy(request, env) {
+  if (!await authorized(request, env)) return json({ error: 'unauthorized' }, 401);
+  const body = await request.json().catch(() => null);
+  const ymd = /^\d{4}-\d{2}-\d{2}$/;
+  if (!body || !Array.isArray(body.days) || !ymd.test(body.from ?? '')) return json({ error: 'bad request' }, 400);
+  const now = Date.now();
+  const int = (v, max) => (Number.isFinite(v) ? Math.max(0, Math.min(Math.round(v), max)) : 0);
+  const str = (v) => String(v ?? '').slice(0, 60);
+  const days = body.days.filter((d) => ymd.test(d?.date ?? '') && d.date >= body.from).slice(0, 400).map((d) => ({
+    date: d.date,
+    data: {
+      ms: int(d.ms, 86400000), qms: int(d.qms, 86400000), chars: int(d.chars, 1e7), errors: int(d.errors, 1e7),
+      cpm: int(d.cpm, 2000), acc: Number.isFinite(d.acc) ? Math.max(0, Math.min(100, Math.round(d.acc * 10) / 10)) : 0,
+      passed: (Array.isArray(d.passed) ? d.passed : []).slice(0, 20).map(str),
+      tests: (Array.isArray(d.tests) ? d.tests : []).filter((t) => Array.isArray(t) && typeof t[0] === 'string')
+        .slice(0, 20).map(([title, s, n]) => [str(title), int(s, 999), int(n, 999)]),
+      srs: int(d.srs, 9999),
+    },
+  }));
+  const s = body.srs ?? {};
+  const due = Object.fromEntries(Object.entries(s.due ?? {}).filter(([k]) => ymd.test(k)).slice(0, 14).map(([k, v]) => [k, int(v, 9999)]));
+  const meta = {
+    at: now,
+    srs: { due, total: int(s.total, 99999), learned: int(s.learned, 99999) },
+    weak: (Array.isArray(body.weak) ? body.weak : []).slice(0, 6).map((k) => String(k).slice(0, 2)),
+    lessons: { done: int(body.lessons?.done, 999), total: int(body.lessons?.total, 999) },
+  };
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM study_days WHERE date >= ?').bind(body.from),
+    ...days.map((d) => env.DB.prepare('INSERT INTO study_days (date, data) VALUES (?, ?)').bind(d.date, JSON.stringify(d.data))),
+    env.DB.prepare(META_UPSERT).bind('study', JSON.stringify(meta)),
+  ]);
+  const today = local(now, tzOf(env)).date;
+  const d = days.find((x) => x.date === today)?.data;
+  if (d) await markStudyItems(env, today, d, now);
+  if (!srsDue(meta, today)) await closeStudyNudge(env, today);
   return json({ now });
 }
 

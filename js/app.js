@@ -2449,6 +2449,9 @@ function editActivity(orig) {
       chips([['off', 'Немає'], ['on', 'Навмання'], ['order', 'По порядку']], d.watchList ? (d.watchOrder ? 'order' : 'on') : 'off',
         (v) => { d.watchList = v !== 'off'; d.watchOrder = v === 'order'; }),
       h('p', { class: 'muted small' }, 'Навмання — фільми, книги, ігри: «Порадь» вибере з не переглянутого. По порядку — уроки курсу: наступний урок підказується в справі, «Зробив» його закриває, видно «7 з 40». Відкривається значком на картці заняття; вимкнеш — назви не зникнуть.')),
+    formBox('Буквоїд',
+      chips([['off', 'Ні'], ['on', 'Зараховувати']], d.source === 'bukvoid' ? 'on' : 'off', (v) => { d.source = v === 'on' ? 'bukvoid' : null; }),
+      h('p', { class: 'muted small' }, 'Для друку наосліп, правопису чи англійської. Займався в Буквоїді — справа на сьогодні закривається сама: від «скільки хвилин зазвичай» — «Зробив», від 5 хв чи пройденого уроку — «Мінімум». Потрібна синхронізація з сервером в обох застосунках.')),
     formBox('Догляд',
       chips([['off', 'Немає'], ['on', 'Є']], d.careOn ? 'on' : 'off', (v) => { d.careOn = v === 'on'; }),
       h('label', { for: 'f-cmonths' }, 'Міняти кожні, міс'), careMonths,
@@ -3024,10 +3027,11 @@ function onSyncChip() {
   connectSync(h('p')).then(render);
 }
 
-// ---------- вага й гроші з Ваги й Марнотрату: той самий сайт — спільний localStorage ----------
+// ---------- вага, гроші й навчання з Ваги, Марнотрату й Буквоїда: той самий сайт — спільний localStorage ----------
 
 const WEIGHT_SHARE = 'vitaliylobko:weight-today';
 const MONEY_SHARE = 'vitaliylobko:money-today';
+const STUDY_SHARE = 'vitaliylobko:study-today';
 
 function shared(key) {
   try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch { return null; }
@@ -3037,7 +3041,7 @@ const kgText = (v) => v.toLocaleString('uk-UA', { maximumFractionDigits: 1 });
 const uahText = (v) => `${Math.round(v).toLocaleString('uk-UA')} ₴`;
 
 /**
- * Вага й гроші на «Сьогодні». Свіжі настільки, наскільки давно відкривали Вагу чи Марнотрат на цьому пристрої:
+ * Вага, гроші й Буквоїд на «Сьогодні». Свіжі настільки, наскільки давно відкривали застосунок на цьому пристрої:
  * не за сьогодні — з датою, а не «не зважився». Тап — відкрити застосунок.
  */
 function neighbours(today) {
@@ -3059,6 +3063,12 @@ function neighbours(today) {
       Number.isFinite(m.left) ? (over ? `понад бюджет ${uahText(-m.left)}` : `лишилось ${uahText(m.left)}`) : null,
     ].filter(Boolean).join(' · ');
     tiles.push(tile('../marnotrat/', m.date === today ? 'Витрати сьогодні' : 'Витрати', uahText(m.spent), sub, over));
+  }
+  const b = shared(STUDY_SHARE);
+  // Буквоїд: учора й раніше хвилини вже не «сьогодні» — плитка лише про повторення, якщо воно чекає
+  if (b?.date === today && (b.min || b.due)) {
+    const sub = [b.cpm ? `${b.cpm} зн/хв` : null, b.due ? `повторити ${b.due}` : null].filter(Boolean).join(' · ');
+    tiles.push(tile(b.due && !b.min ? '../bukvoid/#srs' : '../bukvoid/', 'Буквоїд сьогодні', b.min ? `${b.min} хв` : 'ще не було', sub));
   }
   return tiles.length ? h('div', { class: 'nb-tiles' }, tiles) : null;
 }
@@ -3668,7 +3678,7 @@ async function init() {
   addEventListener('offline', renderSyncChip);
   addEventListener('storage', (e) => {
     // Вагу чи гроші щойно записали у Вазі чи Марнотраті в сусідній вкладці
-    if (e.key === WEIGHT_SHARE || e.key === MONEY_SHARE) { if (tab === 'today') render(); return; }
+    if (e.key === WEIGHT_SHARE || e.key === MONEY_SHARE || e.key === STUDY_SHARE) { if (tab === 'today') render(); return; }
     if (e.key !== 'vitaliylobko:bot') return;
     renderSyncChip();
     if (adoptShared()) syncNow();
