@@ -220,8 +220,30 @@ a { color: var(--accent); }
 .settings-group { min-width: 0; margin: 22px 0 14px; padding: 2px 16px 4px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
 .settings-group > legend { padding: 0 8px; margin-left: -6px; border-radius: 6px; background: var(--surface); color: var(--accent); font-size: 13px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
 .settings-group > .card { padding: 14px 0; border: 0; border-radius: 0; background: none; }
-/* лінія між розділами — від кольору тексту: у темній темі var(--line) майже зливався з тлом */
-.settings-group > .card + .card { border-top: 1px solid color-mix(in srgb, var(--text) 20%, transparent); }
+/* рядок налаштувань: іконка · назва · значення ⌄ — що де стоїть, видно без розгортання;
+   лінія між рядками — від кольору тексту: у темній темі var(--line) майже зливався з тлом */
+.set-row + .set-row, .settings-group > .card + .set-row { border-top: 1px solid color-mix(in srgb, var(--text) 16%, transparent); }
+.set-head { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 56px; padding: 8px 0; border: 0; background: none;
+  color: var(--text); font: inherit; text-align: left; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.set-ico { flex: none; display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
+.set-ico .ico svg { width: 19px; height: 19px; }
+.set-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; font-weight: 700; }
+.set-val { flex: none; max-width: 42%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 14px; font-variant-numeric: tabular-nums; }
+.set-val:empty { display: none; }
+.set-val.ok::before, .set-val.bad::before { content: ''; display: inline-block; width: 7px; height: 7px; margin: 0 6px 1px 0; border-radius: 50%; background: var(--accent); }
+.set-val.bad { color: var(--bad-fg); }
+.set-val.bad::before { background: var(--bad-fg); }
+.set-chev { color: var(--muted); transform: rotate(-90deg); transition: transform .2s ease; }
+.set-row.open .set-chev { transform: none; }
+/* розгортання — висотою сітки 0fr → 1fr: плавно й без підрахунку висоти в JS */
+.set-body { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .22s ease; }
+.set-row.open .set-body { grid-template-rows: 1fr; }
+.set-inner { min-height: 0; overflow: hidden; }
+.set-pane, .set-sub { display: flex; flex-direction: column; gap: 10px; }
+.set-pane { padding: 0 0 16px; }
+.set-pane p, .set-sub p { margin: 0; }
+@media (prefers-reduced-motion: reduce) { .set-body, .set-chev { transition: none; } }
 
 .view-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; }
 .week-pill { display: flex; flex-direction: column; align-items: flex-end; text-decoration: none; color: var(--text); }
@@ -925,8 +947,21 @@ input[type="text"], input[type="search"], input[type="number"], input[type="time
 /* «Про застосунок»: фото автора ліворуч, текст поруч; розгортки «Де мої дані», «З чого почати». */
 .about-head { display: flex; align-items: center; gap: 12px; }
 .about-head h2 { margin: 0 0 2px; }
-.about-avatar { flex: none; width: 64px; height: 64px; border-radius: 50%; object-fit: cover;
-  background: var(--surface-2); box-shadow: 0 0 0 1px var(--line); }
+.about-id { flex: 1; min-width: 0; }
+.about-head > .badge { align-self: flex-start; }
+.about-card { display: flex; flex-direction: column; gap: 10px; }
+.about-card > p { margin: 0; }
+.about-card > p:empty { display: none; }
+/* аватар кліпає, як у Стрілецькому журналі: повіки — шар SVG над фото */
+.about-avatar { position: relative; flex: none; width: 64px; height: 64px; overflow: hidden; border-radius: 50%;
+  background: #fff; box-shadow: 0 0 0 1px var(--line); cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.about-avatar img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.av-live, .av-live svg { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
+.av-lid { transform: translateY(var(--o)); animation: av-blink 7s ease-in-out 1.5s infinite; }
+.about-avatar.hi .av-lid { animation: av-blink-now .3s ease-in-out; }
+@keyframes av-blink { 0%, 41%, 44.5%, 84%, 86.6%, 87%, 89.4%, 100% { transform: translateY(var(--o)); } 42.2%, 42.8%, 85.2%, 85.6%, 88.2%, 88.4% { transform: none; } }
+@keyframes av-blink-now { 0%, 100% { transform: translateY(var(--o)); } 28%, 40% { transform: none; } }
+@media (prefers-reduced-motion: reduce) { .about-avatar .av-lid { animation: none !important; } }
 .about-more { margin-top: 6px; border-top: 1px solid var(--line); }
 .about-more > summary { display: flex; align-items: center; min-height: 44px; padding: 0; color: var(--accent); font-size: 13px; font-weight: 700; cursor: pointer; list-style: none; }
 .about-more > summary::-webkit-details-marker { display: none; }

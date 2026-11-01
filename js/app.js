@@ -930,7 +930,7 @@ function keyBanner() {
     h('div', {},
       h('b', {}, 'Ключ доступу не підходить'),
       h('p', { class: 'small' }, 'Відмітки не йдуть на інші пристрої. Візьми новий ключ командою /key у Telegram-боті й встав у будь-якому застосунку — тут, у Вазі чи Марнотраті: решта на цьому пристрої візьмуть його самі, інші — з Google Диска.')),
-    button('check', 'Вставити ключ', '', () => { folds.set('set-bot', true); location.hash = '#settings'; }));
+    button('check', 'Вставити ключ', '', () => { remember('set-open', 'sync'); location.hash = '#settings'; }));
 }
 
 function pauseBanner(today) {
@@ -951,9 +951,7 @@ function pauseSection() {
   const from = h('input', { type: 'date', id: 'f-pause-from', value: today, min: today });
   const to = h('input', { type: 'date', id: 'f-pause-to', value: M.addDays(today, 6), min: today });
   const shown = list.filter((p) => p.to >= M.addDays(today, -30));
-  const head = h('span', { class: 'slot-head' }, h('h2', {}, 'Пауза — відпустка, хвороба'),
-    cur ? badge('min', `до ${M.dayMonth(cur.to)}`) : null);
-  const body = h('div', { class: 'form fold-body' },
+  const body = h('div', { class: 'form' },
     h('p', { class: 'muted small' }, 'Дні паузи не рахуються в тижневих цілях і в «не пропускай двічі», бот у ці дні мовчить.'),
     shown.length ? h('div', { class: 'pause-list' }, shown.map((p) => h('div', { class: 'pause-row' },
       h('span', {}, h('b', {}, reasonName(p)), ` ${M.dayMonth(p.from)} — ${M.dayMonth(p.to)}`, p === cur ? ' · зараз' : ''),
@@ -974,11 +972,11 @@ function pauseSection() {
         if (!p.from || !p.to || p.from > p.to) { toast('Вкажи дати: «з» не пізніше за «по»'); return; }
         if (p.to < today) { toast('Пауза в минулому нічого не змінить'); return; }
         if (list.some((x) => x.from <= p.to && p.from <= x.to)) { toast('Перетинається з іншою паузою'); return; }
-        folds.set('set-pause', true);
+        remember('set-open', 'pause');
         savePauses([...list, p]);
         toast(`${reasonName(p)}: ${M.dayMonth(p.from)} — ${M.dayMonth(p.to)}`);
       })));
-  return folded('set-pause', head, body, { def: Boolean(cur), cls: 'card' });
+  return setRow('pause', 'moon', 'Пауза — відпустка, хвороба', cur ? `до ${M.dayMonth(cur.to)}` : 'Немає', body, { tone: cur ? 'ok' : '' });
 }
 
 // ---------- нагадування «не забудь» ----------
@@ -3102,7 +3100,7 @@ function renderSyncChip() {
 
 function onSyncChip() {
   const s = chipState();
-  if (s?.st === 'key') { folds.set('set-bot', true); location.hash = '#settings'; return; }
+  if (s?.st === 'key') { remember('set-open', 'sync'); location.hash = '#settings'; return; }
   if (s?.st === 'offline') { toast(s.title); return; }
   connectSync(h('p')).then(render);
 }
@@ -3309,13 +3307,19 @@ function quietBlock() {
     h('p', { class: 'muted small' }, 'Одне повідомлення за день: справи, вага, гроші з Марнотрату й план на завтра. Потрапляє в тихі години — прийде за хвилину до них.'));
 }
 
-function botSection() {
+function syncValue() {
+  if (keyProblem()) return 'Ключ не підходить';
+  if (!botConfig().key) return 'Вимкнено';
+  if (syncRes && !syncRes.ok) return 'Помилка';
+  const at = lastSync();
+  return at ? shortWhen(at) : 'Ще не було';
+}
+
+function syncRow() {
   const cfg = botConfig();
   const url = h('input', { type: 'url', id: 'f-bot-url', value: cfg.url || BOT_WORKER, inputmode: 'url', autocomplete: 'off', spellcheck: 'false' });
   const key = h('input', { type: 'password', id: 'f-bot-key', value: cfg.key, autocomplete: 'off', placeholder: 'команда /key у Telegram-боті' });
   const status = h('p', { class: keyProblem() ? 'small error-text' : 'muted small', id: 'sync-status', 'aria-live': 'polite' }, cfg.key || keyProblem() ? syncStatusText() : 'Не ввімкнено');
-  // Синхронізацію ввімкнено — блок згорнутий, у заголовку видно, що він працює
-  const head = h('span', { class: 'slot-head' }, h('h2', {}, 'Синхронізація'), cfg.key ? badge('done', 'Увімкнено') : null);
   const save = async () => {
     const u = url.value.trim().replace(/\/+$/, '');
     if (!u.startsWith('https://') || !key.value.trim()) { toast('Потрібні адреса (https://…) і ключ'); return; }
@@ -3332,7 +3336,8 @@ function botSection() {
     'План, заняття й нагадування лежать у спільній базі на сервері — однакові на всіх пристроях; без інтернету все піде пізніше. Цю ж базу читає Telegram-бот: нагадує з кнопками, відмітки звідти повертаються сюди. Ключ доступу дає команда /key у ',
     h('a', { class: 'tap-link', href: BOT_URL, target: '_blank', rel: 'noopener' }, '@hobby_planner_bot'),
     '; досить вставити в одному застосунку — тут, у Вазі чи Марнотраті.');
-  return folded('set-bot', head, h('div', { class: 'form fold-body' },
+  const bad = keyProblem() || Boolean(syncRes && !syncRes.ok);
+  const row = setRow('sync', 'server', 'Синхронізація', syncValue(), h('div', { class: 'form' },
     status,
     // Уже підключено — пояснення не потрібне щоразу, лишається під «Як це працює»
     cfg.key ? h('details', { class: 'about-more' }, h('summary', {}, 'Як це працює'), explain) : explain,
@@ -3352,34 +3357,76 @@ function botSection() {
       } catch (err) {
         toast(err.message);
       }
-    })) : null,
-    cfg.key ? h('h3', {}, 'Telegram-бот') : null,
-    cfg.key ? quietBlock() : null), { def: !cfg.key, cls: 'card' });
+    })) : null), { tone: bad ? 'bad' : cfg.key ? 'ok' : '' });
+  row.querySelector('.set-val').id = 'sync-val';
+  return row;
+}
+
+/** Telegram-бот: тихі години й вечірній підсумок. Без синхронізації бот нічого не знає — рядка нема. */
+function botRow() {
+  if (!botConfig().key) return null;
+  const q = { on: false, from: '23:00', to: '07:00', evening: '21:00', ...state.meta.find((m) => m.id === 'quiet') };
+  return setRow('bot', 'bot', 'Telegram-бот', q.on ? `тихо ${q.from}–${q.to}` : `підсумок о ${q.evening || '21:00'}`, quietBlock());
 }
 
 function viewSettings() {
-  const file = h('input', { type: 'file', accept: 'application/json,.json', hidden: true, onChange: (e) => { const f = e.target.files[0]; if (f) importBackup(f); e.target.value = ''; } });
+  const off = slotsCfg.weekendDays ?? M.DEFAULT_WEEKEND;
   return h('div', {},
-    settingsGroup('Про застосунок', [aboutPanel(), aboutSection()]),
-    settingsGroup('Розклад', [pauseSection(), folded('set-slots', h('h2', {}, 'Вікна дня й вихідні'),
-      h('div', { class: 'fold-body' }, weekendPicker(), slotEditor('weekday', 'Будні'), slotEditor('weekend', 'Вихідні'),
+    settingsGroup('Про застосунок', [aboutSection()]),
+    settingsGroup('Розклад', [pauseSection(), setRow('slots', 'clock', 'Вікна дня й вихідні', `Вихідні ${daysText(off)}`,
+      h('div', {}, weekendPicker(), slotEditor('weekday', 'Будні'), slotEditor('weekend', 'Вихідні'),
         h('p', { class: 'muted small' }, 'Стандартні: будні — ранок 7–12, обід 12–18, вечір 18–21; вихідні — ранок 9–12, день 12–18, вечір 18–21.'),
-        button('refresh', 'Стандартні вікна', 'ghost', resetSlots)),
-      { def: false, persist: true, cls: 'card' })]),
-    settingsGroup('Дані', [botSection(), driveBlock(), lockCard(), h('section', { class: 'card' },
-      h('h2', {}, 'Копія у файл'),
-      h('p', { class: 'muted small' }, 'Файл JSON з усіма даними — про всяк випадок; його можна відновити на іншому пристрої.'),
-      h('div', { class: 'btn-grid' },
-        button('move', 'Зберегти копію', '', exportBackup),
-        button('undo', 'Відновити з файлу', '', () => file.click())),
-      file)]),
-    settingsGroup('Вигляд', [h('section', { class: 'card' }, h('h2', {}, 'Тема'),
-      chips(THEMES, themePref(), (v) => { remember('theme', v); applyTheme(); }))]));
+        button('refresh', 'Стандартні вікна', 'ghost', resetSlots)))]),
+    settingsGroup('Дані', [syncRow(), botRow(), driveRow(), lockRow(), backupRow()]),
+    settingsGroup('Вигляд', [themeRow()]));
 }
 
-/** «Вхід за відбитком»: увімкнути, через скільки блокувати у фоні, вимкнути з підтвердженням. */
-function lockCard() {
-  const body = h('div', {});
+function backupRow() {
+  const file = h('input', { type: 'file', accept: 'application/json,.json', hidden: true, onChange: (e) => { const f = e.target.files[0]; if (f) importBackup(f); e.target.value = ''; } });
+  return setRow('backup', 'archive', 'Копія у файл', '', [
+    h('p', { class: 'muted small' }, 'Файл JSON з усіма даними — про всяк випадок; його можна відновити на іншому пристрої.'),
+    h('div', { class: 'btn-grid' },
+      button('move', 'Зберегти копію', '', exportBackup),
+      button('undo', 'Відновити з файлу', '', () => file.click())),
+    file]);
+}
+
+function themeRow() {
+  return setRow('theme', 'palette', 'Тема', THEMES.find(([v]) => v === themePref())?.[1] ?? '',
+    chips(THEMES, themePref(), (v) => { remember('theme', v); applyTheme(); render(); }));
+}
+
+const SET_OPEN_KEY = 'set-open';
+
+/**
+ * Рядок налаштувань: іконка, назва й поточне значення — видно, що де стоїть, нічого не відкриваючи.
+ * Тап розгортає керування під рядком; відкритий завжди один, і його пам'ятаємо між перемальовуваннями.
+ */
+function setRow(key, ico, title, value, body, { tone = '' } = {}) {
+  const open = recall(SET_OPEN_KEY) === key;
+  const row = h('div', { class: `set-row${open ? ' open' : ''}` });
+  const head = h('button', {
+    type: 'button', class: 'set-head', 'aria-expanded': String(open), onClick: () => {
+      const opening = !row.classList.contains('open');
+      for (const r of document.querySelectorAll('.set-row.open')) setOpen(r, false);
+      setOpen(row, opening);
+      remember(SET_OPEN_KEY, opening ? key : '');
+    },
+  }, h('span', { class: 'set-ico' }, icon(ico)), h('span', { class: 'set-title' }, title),
+  h('span', { class: `set-val${tone ? ` ${tone}` : ''}` }, value), icon('chevron', 'ico set-chev'));
+  row.append(head, h('div', { class: 'set-body', inert: !open }, h('div', { class: 'set-inner' }, h('div', { class: 'set-pane' }, body))));
+  return row;
+}
+
+function setOpen(row, open) {
+  row.classList.toggle('open', open);
+  row.querySelector('.set-head').setAttribute('aria-expanded', String(open));
+  row.querySelector('.set-body').inert = !open;
+}
+
+/** «Вхід за відбитком»: увімкнути, через скільки блокувати у фоні, вимкнути. */
+function lockRow() {
+  const body = h('div', { class: 'set-sub' });
   const act = (fn, done) => async () => {
     try {
       await fn();
@@ -3392,33 +3439,78 @@ function lockCard() {
   if (lockOn()) {
     body.append(
       h('p', { class: 'muted small' }, 'Блокувати після згортання:'),
-      chips(LOCK_DELAYS.map((m) => [String(m), m ? `${m} хв` : 'Одразу']), String(lockDelay()), (v) => setLockDelay(Number(v))),
+      chips(LOCK_DELAYS.map((m) => [String(m), m ? `${m} хв` : 'Одразу']), String(lockDelay()), (v) => { setLockDelay(Number(v)); render(); }),
       h('div', { class: 'btn-grid' }, h('button', { type: 'button', class: 'btn', onClick: act(disableLock, 'Вхід за відбитком вимкнено') }, 'Вимкнути')));
   } else {
     lockAvailable().then((ok) => body.append(ok
       ? h('div', { class: 'btn-grid' }, h('button', { type: 'button', class: 'btn primary', onClick: act(enableLock, 'Вхід за відбитком увімкнено') }, 'Увімкнути'))
       : h('p', { class: 'muted small' }, 'На цьому пристрої немає відбитка, обличчя чи PIN-коду, які браузер може перевірити.')));
   }
-  return h('section', { class: 'card' }, h('h2', {}, 'Вхід за відбитком'),
+  const value = !lockOn() ? 'Вимкнено' : lockDelay() ? `Через ${lockDelay()} хв` : 'Одразу';
+  return setRow('lock', 'shield', 'Вхід за відбитком', value, [
     h('p', { class: 'muted small' }, 'Хобі-план відкривається відбитком, обличчям або PIN-кодом телефона — лише на цьому пристрої. Це захист від чужих очей, дані не шифруються.'),
-    body);
+    body]);
 }
 
-/** Група налаштувань, як у Стрілецькому журналі: рамка з назвою на лінії, розділи всередині — через лінію. */
-function settingsGroup(title, sections) {
-  return h('fieldset', { class: 'settings-group' }, h('legend', {}, title), sections.filter(Boolean));
+/** Група налаштувань, як у Стрілецькому журналі: рамка з назвою на лінії, всередині — рядки через лінію. */
+function settingsGroup(title, items) {
+  return h('fieldset', { class: 'settings-group' }, h('legend', {}, title), items.filter(Boolean));
 }
 
-/** «Про застосунок»: що воно таке, де лежать дані, з чого почати — як у shooting-log. */
-function aboutPanel() {
+// Аватар кліпає, як у Стрілецькому журналі — фото те саме, тож і контури очей ті самі (координати фото 233×233).
+// Повіки — шар SVG поверх фото, обрізаний контуром білка; верхня з опуклою кромкою опускається, нижня підіймається
+// назустріч. Праве око перше: ліве його перекриває.
+const AVATAR_EYES = [
+  { d: 'M114 63L114 65L117 71L117 78L121 78L122 77L126 77L127 76L132 76L135 79L137 79L139 77L140 72L141 71L141 68L140 67L140 64L135 59L131 57L122 57L118 59Z', box: [114, 57, 142, 80] },
+  { d: 'M99 60L98 61L94 61L87 67L85 71L85 79L87 83L90 86L94 88L102 89L110 86L115 79L115 69L109 62Z', box: [85, 60, 116, 90] },
+];
+const AVATAR_SVG = '<svg viewBox="0 0 233 233" aria-hidden="true"><defs>'
+  + AVATAR_EYES.map(({ d }, i) => `<clipPath id="av-eye${i}"><path d="${d}"/></clipPath>`).join('')
+  + '</defs>'
+  + AVATAR_EYES.map(({ box: [x0, y0, x1, y1] }, i) => {
+    const hh = y1 - y0, e = y0 + hh * 0.6, k = hh * 0.26, cx = (x0 + x1) / 2, l = x0 - 3, r = x1 + 3;
+    const edge = `M${l} ${e}Q${cx} ${e + k} ${r} ${e}`;
+    return `<g clip-path="url(#av-eye${i})" fill="#fcd901">`
+      + `<path class="av-lid low" style="--o:${(y1 - e + 3).toFixed(1)}px" d="${edge}V${y1 + 3}H${l}Z"/>`
+      + `<g class="av-lid" style="--o:-${(e + k - y0 + 3).toFixed(1)}px"><path d="M${l} ${y0 - 3}H${r}V${e}Q${cx} ${e + k} ${l} ${e}Z"/>`
+      + `<path d="${edge}" fill="none" stroke="#1d1d1d" stroke-width="2.6" stroke-linecap="round"/></g></g>`;
+  }).join('')
+  + '</svg>';
+
+/** Тап по аватару — кліпнути одразу, не чекаючи свого часу. */
+function avatarHi(e) {
+  const el = e.currentTarget;
+  el.classList.remove('hi');
+  void el.offsetWidth;
+  el.classList.add('hi');
+  clearTimeout(el.hiTimer);
+  el.hiTimer = setTimeout(() => el.classList.remove('hi'), 600);
+}
+
+/** «Про застосунок» однією карткою: автор кліпає, версія й оновлення, що це, де дані, з чого почати, що пише бот. */
+function aboutSection() {
   const link = (href, text) => h('a', { href, target: '_blank', rel: 'noopener' }, text);
   const more = (title, node) => h('details', { class: 'about-more' }, h('summary', {}, title), node);
-  return h('section', { class: 'card' },
+  const status = h('p', { class: 'muted small', 'aria-live': 'polite' },
+    upd.worker ? 'Нова версія завантажена — оновлення займе секунду, дані залишаться'
+      : (upd.checked ? `У тебе остання версія · перевірено о ${upd.checked}` : ''));
+  const next = upd.next ? `${upd.next.version} · збірка ${upd.next.build}` : '';
+  return h('section', { class: 'card about-card' },
     h('div', { class: 'about-head' },
-      h('img', { class: 'about-avatar', src: './icons/author.jpg', alt: '', width: 64, height: 64, loading: 'lazy' }),
-      h('div', {},
-        h('h2', {}, 'Про застосунок'),
-        h('p', { class: 'muted small' }, 'Хобі-план — щоденний план хобі по вікнах дня (ранок, обід, вечір) і звичка не пропускати. Працює без інтернету.'))),
+      h('span', { class: 'about-avatar', onClick: avatarHi },
+        h('img', { src: './icons/author.jpg', alt: '', width: 64, height: 64, loading: 'lazy' }),
+        Object.assign(h('span', { class: 'av-live' }), { innerHTML: AVATAR_SVG })),
+      h('div', { class: 'about-id' },
+        h('h2', { class: 'about-name' }, 'Хобі-план'),
+        h('div', { class: 'muted small' }, `Версія ${self.APP_VERSION ?? '?'} · збірка ${self.APP_BUILD ?? '?'}`)),
+      upd.worker ? badge('now', next ? `Є ${upd.next.version}` : 'Є оновлення') : null),
+    h('p', { class: 'muted small' }, 'Щоденний план хобі по вікнах дня (ранок, обід, вечір) і звичка не пропускати. Працює без інтернету.'),
+    status,
+    h('div', { class: 'btn-grid' },
+      upd.worker
+        ? button('refresh', next ? `Оновити до ${next}` : 'Оновити', 'primary', () => upd.worker.postMessage('skipWaiting'))
+        : button('refresh', 'Перевірити оновлення', '', () => checkUpdate(status)),
+      button('star', 'Що нового', '', () => changesSheet(CHANGES.slice(0, 6), 'Що нового'))),
     more('Де мої дані', h('div', { class: 'muted small' },
       h('p', {}, 'План, заняття й нагадування лежать у браузері на цьому пристрої. Сервера в застосунку немає, автор не отримує ні даних, ні статистики.'),
       h('p', {}, 'Синхронізація — за бажанням: план лягає в базу на твоєму власному Cloudflare Worker, щоб Telegram-бот нагадував, а телефон і комп’ютер бачили те саме.'),
@@ -3465,7 +3557,7 @@ function driveStatusText() {
 }
 
 /** Google Диск: підключити, зберегти зараз, відновити, відключити. Окремо від бота — на випадок, якщо з ним щось станеться. */
-function driveBlock() {
+function driveRow() {
   Drive.preload();
   const status = h('p', { class: 'muted small' }, driveStatusText());
   const run = (fn, done) => async () => {
@@ -3479,18 +3571,21 @@ function driveBlock() {
     status.textContent = driveStatusText();
     render();
   };
-  const title = h('h2', {}, 'Google Диск · щоденна копія');
   const about = h('p', { class: 'muted small' },
     'Копія — файл hobby-planner-backup.json на твоєму Google Диску, окремо від бази; там же адреса сервера й ключ доступу для інших пристроїв. Попередні версії файлу Google тримає до 30 днів.');
+  const title = 'Google Диск · копія';
   if (!Drive.driveOn()) {
-    return h('section', { class: 'card' }, title, about,
-      button('plus', 'Підключити Google Диск', 'primary', run(() => Drive.connect(backupData), 'Google Диск підключено, копію збережено')));
+    return setRow('drive', 'cloud', title, 'Вимкнено', [about,
+      h('div', { class: 'btn-grid' },
+        button('plus', 'Підключити Google Диск', 'primary', run(() => Drive.connect(backupData), 'Google Диск підключено, копію збережено')))]);
   }
-  return h('section', { class: 'card' }, title, status, about,
+  const at = Drive.lastBackup();
+  return setRow('drive', 'cloud', title, at ? shortWhen(at) : 'Ще не було', [status, about,
     h('div', { class: 'btn-grid' },
       button('check', 'Зберегти зараз', 'primary', run(() => Drive.backupByTap(backupData), 'Копію збережено на Google Диск')),
       button('undo', 'Відновити з Диска', '', run(async () => { restoreSheet(await Drive.fetchBackup()); return ''; })),
-      button('skip', 'Відключити', '', run(() => { Drive.disconnect(); }, 'Google Диск відключено — копія на ньому лишається'))));
+      button('skip', 'Відключити', '', run(() => { Drive.disconnect(); }, 'Google Диск відключено — копія на ньому лишається')))],
+  { tone: 'ok' });
 }
 
 // ---------- маршрути ----------
@@ -3628,25 +3723,6 @@ function showWhatsNew() {
   if (list.length) changesSheet(list.slice(0, 4), `Що нового в ${current}`);
 }
 
-function aboutSection() {
-  const status = h('p', { class: 'muted small', 'aria-live': 'polite' },
-    upd.worker ? 'Нова версія завантажена — оновлення займе секунду, дані залишаться'
-      : (upd.checked ? `У тебе остання версія · перевірено о ${upd.checked}` : ''));
-  const next = upd.next ? `${upd.next.version} · збірка ${upd.next.build}` : '';
-  return h('section', { class: 'card' },
-    h('div', { class: 'slot-head' },
-      h('div', {},
-        h('h2', { class: 'about-name' }, 'Хобі-план'),
-        h('div', { class: 'muted small' }, `Версія ${self.APP_VERSION ?? '?'} · збірка ${self.APP_BUILD ?? '?'}`)),
-      upd.worker ? badge('now', next ? `Є ${upd.next.version}` : 'Є оновлення') : null),
-    status,
-    h('div', { class: 'btn-grid' },
-      upd.worker
-        ? button('refresh', next ? `Оновити до ${next}` : 'Оновити', 'primary', () => upd.worker.postMessage('skipWaiting'))
-        : button('refresh', 'Перевірити оновлення', '', () => checkUpdate(status)),
-      button('star', 'Що нового', '', () => changesSheet(CHANGES.slice(0, 6), 'Що нового'))));
-}
-
 function registerWorker() {
   if (!('serviceWorker' in navigator)) return;
   const offer = (worker) => { offerUpdate(worker); };
@@ -3743,6 +3819,8 @@ async function init() {
       renderSyncChip();
       const el = $('sync-status');
       if (el) el.textContent = syncStatusText(res);
+      const val = $('sync-val');
+      if (val) val.textContent = syncValue();
       // Ключ відкинуто чи знову прийнято — плашка на головній
       if (res.keyBad || (res.ok && document.querySelector('.key-card'))) render();
     },
