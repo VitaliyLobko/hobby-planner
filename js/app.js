@@ -1,7 +1,7 @@
 // Хобі-план: екрани «Сьогодні», «План», «Тиждень», «Заняття», «Налаштування».
 import { loadAll, write, uid, replaceAll } from './db.js';
 import * as M from './model.js';
-import { $, h, icon, iconMarkup, toast, sheet, closeSheet, chips, swipeable, swipeStep, fold, timeField, vibrate } from './ui.js';
+import { $, h, icon, iconMarkup, toast, sheet, closeSheet, chips, swipeable, swipeStep, fold, timeField, vibrate, wheelStrip } from './ui.js';
 import { initSync, syncNow, scheduleSync, botConfig, setBotConfig, declineBot, sharedConfig, lastSync, holdSync, holdChoice, choosingBot, fetchRestore, markRestored, adoptShared, keyProblem, changeKey } from './sync.js';
 import * as Drive from './drive.js';
 import { CHANGES, changesSince } from './changes.js';
@@ -2494,11 +2494,19 @@ function repeatFrom(old, { days, slots }) {
 
 /** «Пн, Ср, Пт · ранок» чи «Щодня · ранок, обід / день, вечір» — для картки заняття. */
 function repeatText(a) {
-  if (!M.repeatOn(a)) return '';
-  const days = WEEK_DAYS.filter(([v]) => a.repeat.days.includes(Number(v))).map(([, label]) => label);
-  const slots = M.repeatSlots(a).map((id) => SLOT_CHOICES.find(([v]) => v === id)?.[1].toLowerCase() ?? id);
+  return M.repeatOn(a) ? repeatLabel(a.repeat.days, M.repeatSlots(a)) : '';
+}
+
+/** Дні й вікна розкладу словами — для картки й для рядка «Постійний розклад» у редакторі. */
+function repeatLabel(dayList, slotIds) {
+  const days = WEEK_DAYS.filter(([v]) => dayList.map(Number).includes(Number(v))).map(([, label]) => label);
+  const slots = slotIds.map((id) => SLOT_CHOICES.find(([v]) => v === id)?.[1].toLowerCase() ?? id);
   return `${days.length === 7 ? 'Щодня' : days.join(', ')} · ${slots.join(', ')}${slots.length > 1 ? ` (${slots.length} рази на день)` : ''}`;
 }
+
+// Рядок редактора заняття, що розгорнутий; свій ключ — щоб не збивати відкритий рядок «Налаштувань»
+const ACT_OPEN_KEY = 'act-open';
+const LIST_MODES = [['off', 'Немає'], ['on', 'Навмання'], ['order', 'По порядку']];
 
 function editActivity(orig) {
   const all = state.activities;
@@ -2511,7 +2519,7 @@ function editActivity(orig) {
     };
   const name = h('input', { type: 'text', value: d.name, maxlength: 40, placeholder: 'Напр.: Шахи', id: 'f-name' });
   const out = h('output', { class: 'step-val', 'aria-live': 'polite' }, String(d.weeklyTarget));
-  const stepTarget = (n) => { d.weeklyTarget = Math.min(21, Math.max(1, d.weeklyTarget + n)); out.textContent = String(d.weeklyTarget); };
+  const stepTarget = (n) => { d.weeklyTarget = Math.min(21, Math.max(1, d.weeklyTarget + n)); out.textContent = String(d.weeklyTarget); paintRows(); };
   const minutes = h('input', { type: 'number', inputmode: 'numeric', min: 0, max: 600, value: d.minutes || '', id: 'f-min' });
   const minVersion = h('input', { type: 'text', maxlength: 60, value: d.minVersion ?? '', placeholder: 'Напр.: 5 хв гами', id: 'f-minv' });
   const careMonths = h('input', { type: 'number', inputmode: 'numeric', min: 0, max: 60, value: d.careMonths ?? CARE_MONTHS, id: 'f-cmonths' });
@@ -2535,14 +2543,37 @@ function editActivity(orig) {
   const paintRepWins = () => {
     repWins.hidden = !rep.days.length;
     repWins.replaceChildren(h('span', { class: 'flabel' }, 'У вікна'),
-      chips(SLOT_CHOICES, rep.slots, (v) => { rep.slots = v; }, { multi: true }));
+      chips(SLOT_CHOICES, rep.slots, (v) => { rep.slots = v; paintRows(); }, { multi: true }));
   };
   const pickRepDays = (v) => {
     if (v.length && !rep.days.length && !rep.slots.length) rep.slots = d.slots.length ? [...d.slots] : ['m'];
     rep.days = v;
     paintRepWins();
+    paintRows();
   };
   paintRepWins();
+
+  // Значення рядків видно без розгортання; міняються на місці, форма не перемальовується
+  const targetValue = h('span', {});
+  const slotsValue = h('span', {});
+  const repeatValue = h('span', {});
+  const listValue = h('span', {});
+  const bukValue = h('span', {});
+  const careValue = h('span', {});
+  const byChoice = (ids) => SLOT_CHOICES.filter(([v]) => ids.includes(v));
+  function paintRows() {
+    const min = Math.round(Number(minutes.value) || 0);
+    const cm = Math.round(Number(careMonths.value) || 0);
+    targetValue.textContent = [`${d.weeklyTarget}×/тиж`, min ? `~${min} хв` : ''].filter(Boolean).join(' · ');
+    slotsValue.textContent = byChoice(d.slots).map(([, label]) => label).join(', ') || 'Не задано';
+    repeatValue.textContent = rep.days.length && rep.slots.length ? repeatLabel(rep.days, byChoice(rep.slots).map(([v]) => v)) : 'Немає';
+    listValue.textContent = LIST_MODES.find(([v]) => v === (d.watchList ? (d.watchOrder ? 'order' : 'on') : 'off'))[1];
+    bukValue.textContent = d.source === 'bukvoid' ? 'Зараховувати' : 'Ні';
+    careValue.textContent = d.careOn ? (cm ? `Кожні ${cm} міс` : 'Є') : 'Немає';
+  }
+  minutes.addEventListener('input', paintRows);
+  careMonths.addEventListener('input', paintRows);
+  paintRows();
 
   // Превʼю вгорі: колір та іконку видно, навіть коли їхні блоки згорнуті
   const previewTile = h('span', { class: 'tile' });
@@ -2571,46 +2602,52 @@ function editActivity(orig) {
   colors = colorPicker(d, paintLook, groupColor);
   paintLook();
 
+  // Рядки як у «Налаштуваннях»: значення праворуч, розгорнутий один, пояснення — всередині. Відкривається згорнутим
+  remember(ACT_OPEN_KEY, '');
+  const row = (key, ico, title, value, body) => setRow(key, ico, title, value, body, { store: ACT_OPEN_KEY });
   const form = h('div', { class: 'sheet-body form act-form' },
     h('div', { class: 'act-preview' }, previewTile, previewName),
-    formBox('Вигляд',
-      h('label', { for: 'f-name' }, 'Назва'), name,
-      pickFold('Колір', colorValue, colors),
-      pickFold('Іконка', iconValue, iconPicker(d, paintLook)),
-      pickFold('Група', groupValue, groupPicker(d, paintLook, fresh))),
-    formBox('Ціль',
-      h('span', { class: 'flabel' }, 'Разів на тиждень'),
-      h('div', { class: 'stepper' },
-        h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Менше', onClick: () => stepTarget(-1) }, '−'),
-        out,
-        h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Більше', onClick: () => stepTarget(1) }, '+')),
-      h('label', { for: 'f-min' }, 'Скільки хвилин зазвичай'), minutes,
-      h('label', { for: 'f-minv' }, 'Мінімальна версія — на поганий день'), minVersion),
-    formBox('Коли',
-      h('span', { class: 'flabel' }, 'Звичні вікна'),
-      chips(SLOT_CHOICES, d.slots, (v) => { d.slots = v; }, { multi: true }),
-      h('p', { class: 'muted small' }, 'Де зазвичай робиш — у «Плані» це заняття тут першим. Саме в план не ставить.'),
-      formBox('Постійний розклад',
+    h('label', { for: 'f-name' }, 'Назва'), name,
+    settingsGroup('Вигляд', [
+      row('color', 'palette', 'Колір', colorValue, colors),
+      row('icon', 'star', 'Іконка', iconValue, iconPicker(d, paintLook)),
+      row('group', 'folder', 'Група', groupValue, groupPicker(d, paintLook, fresh))]),
+    settingsGroup('Коли й скільки', [
+      row('target', 'target', 'Ціль', targetValue, [
+        h('span', { class: 'flabel' }, 'Разів на тиждень'),
+        h('div', { class: 'stepper' },
+          h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Менше', onClick: () => stepTarget(-1) }, '−'),
+          out,
+          h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Більше', onClick: () => stepTarget(1) }, '+')),
+        h('label', { for: 'f-min' }, 'Скільки хвилин зазвичай'), minutes,
+        h('label', { for: 'f-minv' }, 'Мінімальна версія — на поганий день'), minVersion]),
+      row('slots', 'clock', 'Звичні вікна', slotsValue, [
+        chips(SLOT_CHOICES, d.slots, (v) => { d.slots = v; paintRows(); }, { multi: true }),
+        h('p', { class: 'muted small' }, 'Де зазвичай робиш — у «Плані» це заняття тут першим. Саме в план не ставить.')]),
+      row('repeat', 'refresh', 'Постійний розклад', repeatValue, [
         h('span', { class: 'flabel' }, 'Дні'),
         weekChips(rep.days, pickRepDays),
         repWins,
-        h('p', { class: 'muted small' }, "У ці дні справа сама з'являється в плані на тиждень уперед — у кожному обраному вікні (усі три — тричі на день). Прибрав чи переніс якусь — назад не повернеться. Без днів — розкладу немає."))),
-    formBox('Список',
-      chips([['off', 'Немає'], ['on', 'Навмання'], ['order', 'По порядку']], d.watchList ? (d.watchOrder ? 'order' : 'on') : 'off',
-        (v) => { d.watchList = v !== 'off'; d.watchOrder = v === 'order'; }),
-      h('p', { class: 'muted small' }, 'Навмання — фільми, книги, ігри: «Порадь» вибере з не переглянутого. По порядку — уроки курсу: наступний урок підказується в справі, «Зробив» його закриває, видно «7 з 40». Відкривається значком на картці заняття; вимкнеш — назви не зникнуть.')),
-    formBox('Буквоїд',
-      chips([['off', 'Ні'], ['on', 'Зараховувати']], d.source === 'bukvoid' ? 'on' : 'off', (v) => {
-        d.source = v === 'on' ? 'bukvoid' : null;
-        studyCourse.hidden = v !== 'on';
-      }),
-      studyCourse,
-      h('p', { class: 'muted small' }, 'Займався в Буквоїді — справа на сьогодні закривається сама: від «скільки хвилин зазвичай» — «Зробив», від 5 хв чи пройденої теми — «Мінімум». З курсом рахуються лише його хвилини, а в справі видно наступну тему. Потрібна синхронізація з сервером в обох застосунках.')),
-    formBox('Догляд',
-      chips([['off', 'Немає'], ['on', 'Є']], d.careOn ? 'on' : 'off', (v) => { d.careOn = v === 'on'; }),
-      h('label', { for: 'f-cmonths' }, 'Міняти кожні, міс'), careMonths,
-      h('p', { class: 'muted small' }, 'Журнал замін: струни на гітарі, ланцюг на велосипеді. На картці — остання заміна по кожній речі, а коли мине строк — нагадає в «Не забудь». Відкривається значком ключа на картці; вимкнеш — записи не зникнуть.')),
-    h('div', { class: 'btn-grid' },
+        h('p', { class: 'muted small' }, "У ці дні справа сама з'являється в плані на тиждень уперед — у кожному обраному вікні (усі три — тричі на день). Прибрав чи переніс якусь — назад не повернеться. Без днів — розкладу немає.")])]),
+    settingsGroup('Додатково', [
+      row('list', 'list', 'Список', listValue, [
+        chips(LIST_MODES, d.watchList ? (d.watchOrder ? 'order' : 'on') : 'off',
+          (v) => { d.watchList = v !== 'off'; d.watchOrder = v === 'order'; paintRows(); }),
+        h('p', { class: 'muted small' }, 'Навмання — фільми, книги, ігри: «Порадь» вибере з не переглянутого. По порядку — уроки курсу: наступний урок підказується в справі, «Зробив» його закриває, видно «7 з 40». Відкривається значком на картці заняття; вимкнеш — назви не зникнуть.')]),
+      row('bukvoid', 'book', 'Буквоїд', bukValue, [
+        chips([['off', 'Ні'], ['on', 'Зараховувати']], d.source === 'bukvoid' ? 'on' : 'off', (v) => {
+          d.source = v === 'on' ? 'bukvoid' : null;
+          studyCourse.hidden = v !== 'on';
+          paintRows();
+        }),
+        studyCourse,
+        h('p', { class: 'muted small' }, 'Займався в Буквоїді — справа на сьогодні закривається сама: від «скільки хвилин зазвичай» — «Зробив», від 5 хв чи пройденої теми — «Мінімум». З курсом рахуються лише його хвилини, а в справі видно наступну тему. Потрібна синхронізація з сервером в обох застосунках.')]),
+      row('care', 'tool', 'Догляд', careValue, [
+        chips([['off', 'Немає'], ['on', 'Є']], d.careOn ? 'on' : 'off', (v) => { d.careOn = v === 'on'; paintRows(); }),
+        h('label', { for: 'f-cmonths' }, 'Міняти кожні, міс'), careMonths,
+        h('p', { class: 'muted small' }, 'Журнал замін: струни на гітарі, ланцюг на велосипеді. На картці — остання заміна по кожній речі, а коли мине строк — нагадає в «Не забудь». Відкривається значком ключа на картці; вимкнеш — записи не зникнуть.')])]),
+    // «Зберегти» прилипає до низу шторки — видно, хоч би який рядок розгорнутий
+    h('div', { class: 'btn-grid act-save' },
       button('check', 'Зберегти', 'primary', async () => {
         d.name = name.value.trim();
         if (!d.name) { name.focus(); toast('Вкажи назву'); return; }
@@ -2626,17 +2663,72 @@ function editActivity(orig) {
         if (fresh.g && d.group === fresh.g.id) await saveGroups([...actGroups(), fresh.g]);
         await save({ activities: { put: [d] } });
         await runRepeats({ render: true });
-      })),
-    // Архів — окремо й нижче за «Зберегти»: поруч у них влучали випадково
-    orig ? h('div', { class: 'archive-zone' },
-      button('undo', orig.archived ? 'Повернути з архіву' : 'В архів', 'ghost', async () => {
-        closeSheet();
-        await save({ activities: { put: [{ ...orig, archived: !orig.archived }] } });
-        await runRepeats({ render: true });
-        toast(orig.archived ? `${orig.name} — знову в заняттях` : `${orig.name} — в архіві`,
-          { label: 'Скасувати', run: async () => { await save({ activities: { put: [{ ...orig }] } }); await runRepeats({ render: true }); } });
-      })) : null);
-  sheet(orig ? 'Заняття' : 'Нове заняття', form);
+      })));
+  sheet(orig ? 'Змінити заняття' : 'Нове заняття', form);
+}
+
+/** В архів чи назад — з «Скасувати»; на шторці заняття окремо й нижче за інші кнопки, щоб не влучити випадково. */
+function archiveZone(a) {
+  return h('div', { class: 'archive-zone' },
+    button('undo', a.archived ? 'Повернути з архіву' : 'В архів', 'ghost', async () => {
+      closeSheet();
+      await save({ activities: { put: [{ ...a, archived: !a.archived }] } });
+      await runRepeats({ render: true });
+      toast(a.archived ? `${a.name} — знову в заняттях` : `${a.name} — в архіві`,
+        { label: 'Скасувати', run: async () => { await save({ activities: { put: [{ ...a }] } }); await runRepeats({ render: true }); } });
+    }));
+}
+
+/** Нова шторка з відкритої — уже після history.back() старої, інакше він закрив би нову. */
+function swapSheet(open) {
+  window.addEventListener('popstate', () => setTimeout(open), { once: true });
+  closeSheet();
+}
+
+/**
+ * «У план на сьогодні»: у найближче звичне вікно, що ще не скінчилось, інакше — у найближче будь-яке.
+ * Уже в плані — пише, де саме; вікна на сьогодні скінчились — кнопки немає.
+ */
+function todayPlanButton(a) {
+  const today = M.ymd();
+  const now = M.nowHm();
+  const slots = M.slotsFor(today, slotsCfg);
+  const mine = state.plan.find((p) => p.date === today && p.activityId === a.id && p.status !== 'moved');
+  if (mine) {
+    const at = slots.find((s) => s.id === mine.slot)?.label.toLowerCase();
+    return h('p', { class: 'muted small act-today' }, icon('check'), `Сьогодні вже в плані${at ? ` · ${at}` : ''}`);
+  }
+  const open = slots.filter((s) => now < s.to);
+  const slot = open.find((s) => a.slots?.includes(s.id)) ?? open[0];
+  if (!slot) return null;
+  const at = slot.label.toLowerCase();
+  return button('plus', `У план на сьогодні · ${at}`, 'primary', async () => {
+    closeSheet();
+    await togglePick(today, slot.id, a);
+    toast(`${a.name} — у плані на ${at}`);
+  });
+}
+
+/**
+ * Шторка заняття — тап по картці: ціль тижня, серія, рівень, де виходить і теплова карта. Правка — лише «Змінити»,
+ * щоб подивитись прогрес і нічого не зачепити.
+ */
+function activitySheet(a) {
+  const foot = a.archived ? [] : [weekStreakBadge(a), missedChip(a)].filter(Boolean);
+  sheet('Заняття', h('div', { class: 'sheet-body act-sheet', style: actStyle(a) },
+    h('div', { class: 'act-preview' }, tile(a),
+      h('span', { class: 'act-text' }, h('span', { class: 'act-name' }, a.name), h('span', { class: 'act-sub' }, actMeta(a)))),
+    a.archived ? null : weekGoalLine(a),
+    foot.length ? h('span', { class: 'act-foot' }, foot) : null,
+    M.repeatOn(a) ? h('span', { class: 'repeat-line' }, icon('refresh'), repeatText(a)) : null,
+    ...(a.careOn ? careLines(a) : []),
+    heatPanel(a, heatIndex()),
+    h('div', { class: 'btn-grid' },
+      a.archived ? null : todayPlanButton(a),
+      a.watchList ? button('list', lessonMode(a) ? 'Уроки' : 'Список', '', () => swapSheet(() => watchSheet(act(a.id) ?? a))) : null,
+      a.careOn ? button('tool', 'Догляд', '', () => swapSheet(() => careSheet(act(a.id) ?? a))) : null,
+      button('pen', 'Змінити', '', () => swapSheet(() => editActivity(act(a.id) ?? a)))),
+    archiveZone(a)));
 }
 
 // Серію показуємо з двох: «1 поспіль» нічого не каже
@@ -2686,17 +2778,33 @@ function fitLine(a) {
 }
 
 /**
- * Картка заняття: угорі іконка й назва (праворуч від них — розгортка прогресу й ⋮⋮), далі параметри одним рядком,
- * ціль тижня на всю ширину, унизу — серія й рівень коротко. Смужка рівня й «де виходить» — у розгортці.
+ * Параметри заняття одним рядком: хвилини, звичні вікна, уроки курсу. Ціль тижня видно поділками під ним,
+ * тож «×/тиж» — лише в архіві, де поділок немає.
  */
-function actCard(a) {
+function actMeta(a) {
   const where = (a.slots ?? []).map((id) => slotsCfg.weekday.find((s) => s.id === id)?.label).filter(Boolean).join(', ');
   const course = lessonMode(a) && a.watch?.length ? `уроки ${a.watch.filter((w) => w.done).length}/${a.watch.length}` : '';
-  const meta = [`${a.weeklyTarget}×/тиж`, a.minutes ? `~${a.minutes} хв` : '', where, course].filter(Boolean).join(' · ');
-  const foot = [a.archived ? null : weekStreakBadge(a), levelChip(a)].filter(Boolean);
-  return h('button', { type: 'button', class: `card act-card act-tidy${a.archived ? ' archived' : ''}`, style: actStyle(a), onClick: () => editActivity(a) },
+  return [a.archived ? `${a.weeklyTarget}×/тиж` : '', a.minutes ? `~${a.minutes} хв` : '', where, course].filter(Boolean).join(' · ');
+}
+
+/** Минулого разу пропущено — як у «Не пропускай двічі» на «Тижні»: наступного разу хоча б мінімум. */
+function missedChip(a) {
+  const today = M.ymd();
+  if (!missedLast(a.id, M.addDays(today, 1), today, M.nowHm())) return null;
+  return h('span', { class: 'miss-chip', title: `Наступного разу — хоча б мінімум${a.minVersion ? ` (${a.minVersion})` : ''}` },
+    icon('warn'), 'Минулого разу пропущено');
+}
+
+/**
+ * Картка заняття: угорі іконка й назва (праворуч — список, догляд, ⋮⋮), далі параметри одним рядком,
+ * ціль тижня на всю ширину, унизу — серія, пропуск і рівень коротко. Тап — шторка заняття з прогресом.
+ */
+function actCard(a) {
+  const meta = actMeta(a);
+  const foot = [a.archived ? null : weekStreakBadge(a), a.archived ? null : missedChip(a), levelChip(a)].filter(Boolean);
+  return h('button', { type: 'button', class: `card act-card act-tidy${a.archived ? ' archived' : ''}`, style: actStyle(a), onClick: () => activitySheet(a) },
     h('span', { class: 'act-head' }, tile(a), h('span', { class: 'act-name' }, a.name)),
-    h('span', { class: 'act-sub' }, meta),
+    meta ? h('span', { class: 'act-sub' }, meta) : null,
     a.archived ? null : weekGoalLine(a),
     M.repeatOn(a) ? h('span', { class: 'repeat-line' }, icon('refresh'), repeatText(a)) : null,
     ...(a.careOn ? careLines(a) : []),
@@ -2736,11 +2844,11 @@ function heatMap(a, heat) {
     const score = days[date] ?? 0;
     if (score) active += 1;
     const lvl = date > today ? 'future' : score >= 4 ? 'l3' : score >= 2 ? 'l2' : score ? 'l1' : M.pauseOn(date, pauses()) ? 'pause' : 'l0';
-    // Число дня в квадратику; 1-ше — жирне, щоб видно було, де починається місяць
-    const day = Number(date.slice(8));
-    const cls = [lvl, date === today ? 'today' : '', day === 1 ? 'first' : ''].filter(Boolean).join(' ');
+    // Число — лише 1-ше, де починається місяць: 84 числа глушили яскравість квадратиків; день — тапом у підсумку
+    const first = date.slice(8) === '01';
+    const cls = [lvl, date === today ? 'today' : '', first ? 'first' : ''].filter(Boolean).join(' ');
     grid.append(h('span', { class: cls, title: date > today ? null : `${M.dayMonth(date)}: ${score ? `${Math.floor(score / 2)} повн., ${score % 2} мін.` : 'нічого'}` },
-      date > today ? null : String(day)));
+      first && date <= today ? '1' : null));
   }
   grid.setAttribute('aria-label', `За ${HEAT_WEEKS} тижнів — ${active} ${plural(active, 'день', 'дні', 'днів')} із заняттям`);
   return grid;
@@ -2813,11 +2921,8 @@ async function moveAmong(wrap, to) {
   if (put.length) await save({ activities: { put } });
 }
 
-// Заняття з розгорнутою тепловою картою — пам'ятаємо між запусками
-const heatOpen = new Set((recall('heat-open') ?? '').split(',').filter(Boolean));
-
 /**
- * Під карткою: підсумок, теплова карта з місяцями згори й днями тижня ліворуч, легенда «менше — більше».
+ * На шторці заняття: підсумок, теплова карта з місяцями згори й днями тижня ліворуч, легенда «менше — більше».
  * Дотик до квадратика пише його день у підсумок — на телефоні підказки title не видно.
  */
 function heatPanel(a, heat) {
@@ -2840,21 +2945,10 @@ function heatPanel(a, heat) {
       h('span', { class: 'heat' }, h('span', { class: 'pause' })), 'пауза'));
 }
 
-function actRow(a, heat, drag = true) {
+function actRow(a, drag = true) {
   const box = h('div', { class: 'act-box' }, actCard(a));
   const wrap = h('div', { class: 'act-wrap', 'data-id': a.id }, box);
   wrap.dataset.find = searchKey(`${a.name} ${groupOf(a)?.name ?? ''}`);
-  let panel = heatOpen.has(a.id) ? heatPanel(a, heat) : null;
-  const toggle = h('button', {
-    type: 'button', class: `heat-toggle${panel ? ' on' : ''}`, 'aria-expanded': String(Boolean(panel)),
-    'aria-label': `Рівень і теплова карта «${a.name}» за ${HEAT_WEEKS} тижнів`,
-    onClick: () => {
-      if (panel) { panel.remove(); panel = null; heatOpen.delete(a.id); } else { panel = heatPanel(a, heatIndex()); wrap.append(panel); heatOpen.add(a.id); }
-      toggle.classList.toggle('on', Boolean(panel));
-      toggle.setAttribute('aria-expanded', String(Boolean(panel)));
-      remember('heat-open', [...heatOpen].join(','));
-    },
-  }, icon('chart'));
   // Порядок тягнемо лише у «Своєму» сортуванні: в інших місце на екрані — не order
   const grip = drag ? h('button', {
     type: 'button', class: 'drag-handle', 'aria-label': `Перетягнути «${a.name}» (стрілки вгору/вниз)`,
@@ -2867,17 +2961,16 @@ function actRow(a, heat, drag = true) {
     },
   }, icon('grip')) : null;
   const list = a.watchList ? h('button', {
-    type: 'button', class: 'heat-toggle watch-open',
+    type: 'button', class: 'side-btn watch-open',
     'aria-label': `${lessonMode(a) ? 'Уроки' : 'Список'} «${a.name}»: ${(a.watch ?? []).filter((w) => !w.done).length} ${lessonMode(a) ? 'не пройдено' : 'не переглянуто'}`,
     onClick: () => watchSheet(act(a.id) ?? a),
   }, icon('list')) : null;
   const care = a.careOn ? h('button', {
-    type: 'button', class: 'heat-toggle', 'aria-label': `Догляд «${a.name}»`,
+    type: 'button', class: 'side-btn', 'aria-label': `Догляд «${a.name}»`,
     onClick: () => careSheet(act(a.id) ?? a),
   }, icon('tool')) : null;
-  if (list || care) box.classList.add('has-list');
-  box.append(h('div', { class: 'act-side' }, list, care, toggle, grip));
-  if (panel) wrap.append(panel);
+  // Прогрес і теплова карта — на шторці заняття (тап по картці); тут лише швидкі дії
+  if (list || care || grip) box.append(h('div', { class: 'act-side' }, list, care, grip));
   return wrap;
 }
 
@@ -2958,7 +3051,6 @@ let reordering = false;
 
 function viewActs() {
   const archived = state.activities.filter((a) => a.archived).sort((a, b) => a.order - b.order);
-  const heat = heatIndex();
   const active = activeActs();
   const mode = active.length >= ACTS_TOOLS_FROM ? actSort() : 'own';
   const sorted = sortActs(active, mode);
@@ -2970,25 +3062,24 @@ function viewActs() {
     for (const { g, acts } of byGroup(sorted, { empty: true })) {
       list.append(folded(`acts-group:${g?.id ?? 'none'}`, groupHead(g, acts.length),
         acts.length
-          ? h('div', { class: 'stack act-group-list' }, acts.map((a) => actRow(a, heat, drag)))
+          ? h('div', { class: 'stack act-group-list' }, acts.map((a) => actRow(a, drag)))
           : h('p', { class: 'muted small' }, 'Порожня: групу задаєш у занятті, олівець — змінити чи видалити.'),
         { persist: true, cls: 'act-group' }));
     }
   } else {
-    list.append(...sorted.map((a) => actRow(a, heat, drag)));
+    list.append(...sorted.map((a) => actRow(a, drag)));
   }
   const flip = () => { reordering = !reordering; render(); };
   const tools = active.length >= ACTS_TOOLS_FROM;
-  // Поруч із пошуком — компактна ⋮⋮; у режимі перестановки — помітна «Готово» над списком
-  const reorderIcon = canDrag && tools && !drag
+  // Компактна ⋮⋮ — поруч із пошуком, а без пошуку — поруч із «Нагадуваннями»; у режимі перестановки — помітна «Готово»
+  const reorderIcon = canDrag && !drag
     ? h('button', { type: 'button', class: 'icon-btn reorder-btn', 'aria-label': 'Змінити порядок', title: 'Змінити порядок', onClick: flip }, icon('grip'))
     : null;
   return h('div', { class: 'stack' },
-    remindJump(),
+    h('div', { class: 'acts-head' }, remindJump(), tools ? null : reorderIcon),
     drag ? h('p', { class: 'muted small lead' }, 'Тягни за ⋮⋮ (чи стрілки на клавіатурі), щоб змінити порядок.') : null,
     tools ? actsTools(list, mode, reorderIcon) : null,
-    canDrag && (drag || !tools) ? h('div', { class: 'reorder-bar' }, button(drag ? 'check' : 'grip', drag ? 'Готово' : 'Змінити порядок',
-      drag ? 'primary' : '', flip)) : null,
+    drag ? h('div', { class: 'reorder-bar' }, button('check', 'Готово', 'primary', flip)) : null,
     list,
     archived.length
       ? folded('acts-archive', h('h2', { class: 'section-title' }, `Архів · ${archived.length}`),
@@ -3009,15 +3100,32 @@ function themePref() {
   return THEMES.some(([k]) => k === v) ? v : 'auto';
 }
 
+// Фон під картками, як у Shooter's Log (без камуфляжів) — свій набір для темної й світлої теми; перший (без малюнка) — за замовчуванням,
+// у спецрежимах фону немає. Ключі й перший фон дублює js/boot.js
+const BACKDROPS = {
+  dark: [['plain', 'Без малюнка'], ['map', 'Карта'], ['olive', 'Олива'], ['carbon', 'Карбон'], ['coyote', 'Койот'], ['lines', 'Лінії'], ['lines-acc', 'Лінії з акцентом']],
+  light: [['l-plain', 'Без малюнка'], ['l-map', 'Карта'], ['l-mm', 'Міліметрівка'], ['l-sand', 'Пісок'], ['l-sand-acc', 'Пісок з акцентом'], ['l-khaki', 'Хакі'], ['l-khaki-acc', 'Хакі з акцентом']],
+};
+const BG_KEY = { dark: 'bg', light: 'bg-light' };
+
+function backdropPref(theme) {
+  const list = BACKDROPS[theme];
+  if (!list) return null;
+  const v = recall(BG_KEY[theme]);
+  return list.some(([k]) => k === v) ? v : list[0][0];
+}
+
 function applyTheme() {
   const pref = themePref();
   const theme = pref === 'auto' ? (lightScheme.matches ? 'light' : 'dark') : pref;
   document.documentElement.dataset.theme = theme;
+  const bg = backdropPref(theme);
+  if (bg) document.documentElement.dataset.bg = bg; else delete document.documentElement.dataset.bg;
   const k = nightLevel() / 100;
   document.querySelector('#night-red feColorMatrix')?.setAttribute('values',
     `${(0.5 * k).toFixed(3)} ${(0.6 * k).toFixed(3)} ${(0.1 * k).toFixed(3)} 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0`);
-  const bar = { light: '#f3f4f1', night: '#000000' }[theme] ?? (SPECIAL_THEMES.includes(theme) ? '#0b0d0b' : '#121417');
-  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', bar);
+  // Колір смуги браузера — тло теми й вибраного фону (--bg у CSS)
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#121417');
 }
 
 /** Яскравість червоного в нічній темі, 20–100 %. */
@@ -3471,7 +3579,7 @@ function viewSettings() {
         h('p', { class: 'muted small' }, 'Стандартні: будні — ранок 7–12, обід 12–18, вечір 18–21; вихідні — ранок 9–12, день 12–18, вечір 18–21.'),
         button('refresh', 'Стандартні вікна', 'ghost', resetSlots)))]),
     settingsGroup('Дані', [syncRow(), botRow(), driveRow(), lockRow(), backupRow()]),
-    settingsGroup('Вигляд', [themeRow()]));
+    settingsGroup('Вигляд', [themeRow(), backdropRow()]));
 }
 
 function backupRow() {
@@ -3499,21 +3607,62 @@ function themeRow() {
     h('p', { class: 'muted small' }, 'Нічна — усе червоним, щоб не збивати нічний зір. Фосфор, Бурштин і Білий фосфор — як старі монітори-кінескопи.')]);
 }
 
+/** Фон під картками — плитки з самим фоном, щоб видно було до вибору; набір — для поточної теми, у спецрежимах рядка немає. */
+function backdropRow() {
+  const theme = document.documentElement.dataset.theme;
+  const list = BACKDROPS[theme];
+  if (!list) return null;
+  let now = backdropPref(theme);
+  const label = (k) => list.find(([x]) => x === k)[1];
+  const strip = h('div', { class: 'bg-picks', role: 'radiogroup', 'aria-label': 'Фон' }, list.map(([k, name]) => h('button', {
+    type: 'button', class: 'bg-pick', role: 'radio', 'aria-checked': String(k === now), 'data-bg': k,
+    onClick: (e) => wheel.centerOn(e.currentTarget),
+  }, h('span', { class: 'bg-sw', 'data-bg': k }), h('span', {}, name))));
+  // Фон посередині — вибраний і одразу під картками, гортаєш — бачиш наживо
+  const wheel = wheelStrip(strip, (b) => {
+    if (b.dataset.bg === now) return;
+    now = b.dataset.bg;
+    remember(BG_KEY[theme], now);
+    strip.querySelectorAll('.bg-pick').forEach((x) => x.setAttribute('aria-checked', String(x === b)));
+    applyTheme();
+    // Без перемальовування — інакше стрічка злетіла б посеред гортання; назву в рядку міняємо на місці
+    row.querySelector('.set-val').textContent = label(now);
+  }, '.bg-pick');
+  // «‹ ›» по краях — видно, що стрічку гортають
+  const step = (dir) => {
+    const on = strip.querySelector('[aria-checked="true"]');
+    const to = dir < 0 ? on?.previousElementSibling : on?.nextElementSibling;
+    if (to) wheel.centerOn(to);
+  };
+  const nav = (dir, text, name) => h('button', { type: 'button', class: 'bg-nav', 'aria-label': text, onClick: () => step(dir) }, name);
+  // Поля й вибраний посередині рахуються від ширини стрічки: поки її не видно, досчитуємо, щойно з'явиться
+  let width = 0;
+  new ResizeObserver(() => {
+    if (!strip.clientWidth || strip.clientWidth === width) return;
+    width = strip.clientWidth;
+    wheel.settle(strip.querySelector('[aria-checked="true"]'));
+  }).observe(strip);
+  const row = setRow('backdrop', 'image', 'Фон', label(now),
+    h('div', { class: 'bg-wheel' }, nav(-1, 'Попередній', '‹'), strip, nav(1, 'Наступний', '›')));
+  return row;
+}
+
 const SET_OPEN_KEY = 'set-open';
 
 /**
  * Рядок налаштувань: іконка, назва й поточне значення — видно, що де стоїть, нічого не відкриваючи.
- * Тап розгортає керування під рядком; відкритий завжди один, і його пам'ятаємо між перемальовуваннями.
+ * Тап розгортає керування під рядком; відкритий завжди один, і його пам'ятаємо між перемальовуваннями (у store).
  */
-function setRow(key, ico, title, value, body, { tone = '' } = {}) {
-  const open = recall(SET_OPEN_KEY) === key;
+function setRow(key, ico, title, value, body, { tone = '', store = SET_OPEN_KEY } = {}) {
+  const open = recall(store) === key;
   const row = h('div', { class: `set-row${open ? ' open' : ''}` });
   const head = h('button', {
     type: 'button', class: 'set-head', 'aria-expanded': String(open), onClick: () => {
       const opening = !row.classList.contains('open');
-      for (const r of document.querySelectorAll('.set-row.open')) setOpen(r, false);
+      // У шторці (редактор заняття) згортаємо лише її рядки
+      for (const r of (row.closest('.sheet') ?? document).querySelectorAll('.set-row.open')) setOpen(r, false);
       setOpen(row, opening);
-      remember(SET_OPEN_KEY, opening ? key : '');
+      remember(store, opening ? key : '');
     },
   }, h('span', { class: 'set-ico' }, icon(ico)), h('span', { class: 'set-title' }, title),
   h('span', { class: `set-val${tone ? ` ${tone}` : ''}` }, value), icon('chevron', 'ico set-chev'));
