@@ -271,13 +271,12 @@ a { color: var(--accent); }
 .slot-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .slot-name { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 700; color: var(--muted); }
 .slot-head .slot-name { margin-right: auto; }
-/* «+» вікна: коло 36 px, зона дотику 44 px — псевдоелементом, щоб рядок заголовка не ставав вищим */
+/* «+» вікна: коло 44 px — під палець */
 .slot-add {
-  position: relative; flex: none; width: 36px; height: 36px; padding: 0; border: 0; border-radius: 50%;
+  position: relative; flex: none; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 50%;
   display: inline-flex; align-items: center; justify-content: center;
   background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent);
 }
-.slot-add::after { content: ''; position: absolute; inset: -4px; }
 .slot-add .ico svg { width: 22px; height: 22px; stroke-width: 2.5; }
 .slot-add:active { background: color-mix(in srgb, var(--accent) 28%, transparent); }
 /* Поточне вікно без справ — «+» суцільний: головна дія зараз */
@@ -286,11 +285,27 @@ a { color: var(--accent); }
 .slot-group .slot-name { gap: 8px; }
 .slot-group .slot-name .ico svg { width: 22px; height: 22px; }
 .slot-time { white-space: nowrap; }
-/* Вузький телефон: час вікна — другим рядком цілком, а не «12:00–» / «18:00» */
-@media (max-width: 380px) {
-  .slot-group .slot-sep { display: none; }
-  .slot-group .slot-time { display: block; font-size: 12px; font-weight: 600; }
+/* Назва вікна «Сьогодні»: зверху назва, під нею час, крапки й стан */
+.slot-title { display: flex; align-items: center; gap: 10px; min-width: 0; margin-right: auto; color: var(--muted); }
+.slot-title > .ico svg { width: 24px; height: 24px; }
+.slot-lines { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.slot-label { font-size: 16px; font-weight: 800; color: var(--text); }
+.slot-group:not(.is-now) .slot-label { color: var(--text-2); }
+.slot-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: 13px; font-weight: 600; }
+.slot-meta .badge { margin: 0; }
+/* Порожнє вікно: підказки, що зазвичай стоїть тут, — тапом у план */
+.slot-empty { display: flex; flex-direction: column; gap: 8px; }
+.slot-ideas, .plan-pick-bar { display: flex; flex-wrap: wrap; gap: 8px; }
+.slot-idea {
+  display: inline-flex; align-items: center; gap: 6px; min-height: 44px; padding: 6px 14px 6px 10px; border-radius: 22px;
+  border: 1.5px dashed color-mix(in srgb, var(--c) 60%, var(--line)); background: color-mix(in srgb, var(--c) 10%, transparent);
+  color: var(--text); font: inherit; font-size: 14px; font-weight: 700;
 }
+.slot-idea .ico svg { width: 18px; height: 18px; }
+.slot-idea > .ico:nth-child(2) { color: var(--c); }
+.slot-idea-min { color: var(--muted); font-weight: 600; }
+.plan-pick-bar { justify-content: flex-end; align-items: center; }
+.plan-pick-bar > .btn { margin-left: auto; }
 .dots { display: inline-flex; gap: 3px; flex: none; }
 .slot-group .card.swipe { border: 0; }
 .slot-group .card.swipe .swipe-body { background: var(--surface-2); }
@@ -386,8 +401,9 @@ button.link-btn { padding: 0; border: 0; background: none; color: var(--accent);
 .day-nav { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .day-nav-title { display: flex; flex-direction: column; align-items: center; gap: 2px; text-align: center; min-width: 0; }
 .day-rel { font-size: 13px; font-weight: 700; color: var(--muted); }
+.day-rel-row { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 22px; }
 .day-rel.link { border: 0; background: none; padding: 4px 8px; color: var(--accent); }
-.day-date { font-size: 18px; font-weight: 800; }
+.day-date { font-size: 18px; font-weight: 800; white-space: nowrap; }
 
 .plan-body { display: flex; flex-direction: column; gap: 12px; }
 .plan-items { display: flex; flex-direction: column; gap: 10px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
@@ -415,7 +431,7 @@ button.link-btn { padding: 0; border: 0; background: none; color: var(--accent);
 }
 .pick-check svg { width: 14px; height: 14px; stroke-width: 3; }
 .pick.on .pick-check { display: inline-flex; }
-.pick-why { font-size: 12px; font-weight: 600; opacity: .8; }
+.pick-why { font-size: 13px; font-weight: 600; opacity: .8; }
 .pick-why .segs { margin-right: 6px; }
 
 .segs { display: inline-flex; align-items: center; gap: 3px; vertical-align: middle; }
@@ -470,6 +486,17 @@ button.link-btn { padding: 0; border: 0; background: none; color: var(--accent);
 
 /* «Заняття»: пошук і порядок, групи */
 .acts-tools { display: grid; gap: 8px; }
+.acts-search { display: flex; gap: 8px; align-items: center; }
+.acts-search input { flex: 1; min-width: 0; }
+.reorder-btn { flex: none; }
+.remind-jump {
+  display: flex; align-items: center; gap: 10px; width: 100%; min-height: 48px; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--surface); color: var(--text); font: inherit; text-align: left; cursor: pointer;
+}
+.remind-jump > .ico:first-child { color: var(--accent); }
+.remind-jump-text { flex: 1; font-weight: 700; }
+.month-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
+.month-empty p { margin: 0; }
 .chips.seg.sort-seg { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .chips.seg.sort-seg .chip { font-size: 13px; }
 .act-group > summary { min-height: 44px; padding: 2px 2px 2px 4px; }
@@ -558,8 +585,7 @@ button.link-btn { padding: 0; border: 0; background: none; color: var(--accent);
 .slot-load svg, .day-left svg { width: 16px; height: 16px; flex: none; }
 .slot-load.over { color: var(--bad-fg); }
 .day-left { margin-top: 2px; color: var(--text); }
-.plan-sum { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 2px 8px; }
-.plan-done { display: flex; justify-content: flex-end; }
+.plan-sum { margin: -4px 0 0; text-align: center; font-size: 14px; font-weight: 700; color: var(--text-2); }
 
 .copy-btn { align-self: stretch; border: 1.5px dashed var(--line-strong); background: transparent; }
 .drive-block { display: grid; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
@@ -569,7 +595,11 @@ button.link-btn { padding: 0; border: 0; background: none; color: var(--accent);
 
 /* «Є кілька хвилин»: кнопка на «Сьогодні» і картки ідей у шторці */
 /* Вторинна дія з рамкою: сіра плашка без рамки читалась як неактивна */
-.btn.quick-btn { align-self: stretch; background: var(--surface); border: 1.5px solid var(--line-strong); }
+/* «Є кілька хвилин?» — тегом-кнопкою в картці дня */
+.tc-tag.tc-quick { position: relative; min-height: 32px; border: 1.5px solid color-mix(in srgb, var(--accent) 45%, var(--line)); background: none; color: var(--accent); font: inherit; font-size: 13px; font-weight: 700; cursor: pointer; }
+/* зона дотику 44 px — псевдоелементом, щоб рядок тегів не ставав вищим */
+.tc-tag.tc-quick::after { content: ''; position: absolute; inset: -6px -2px; }
+.tc-tag.tc-quick:active { background: color-mix(in srgb, var(--accent) 14%, transparent); }
 .quick-card { display: flex; align-items: center; gap: 12px; }
 .quick-card .act-text { flex: 1; }
 .quick-card .btn { flex: none; min-height: 40px; padding: 0 12px; }
@@ -728,7 +758,7 @@ input[type="text"], input[type="search"], input[type="number"], input[type="time
 .s-planned { background: transparent; }
 .s-active { background: color-mix(in srgb, var(--c) 14%, var(--surface)); border-style: solid; }
 .s-skipped, .s-missed { background: transparent; border-color: var(--muted); color: var(--text-2); opacity: .7; }
-.wsum { display: grid; place-content: center; font-size: 12px; color: var(--text-2); }
+.wsum { display: grid; place-content: center; font-size: 13px; color: var(--text-2); }
 .wsum.full { color: var(--ok-fg); }
 .wsum.short { color: var(--bad-fg); }
 .wlegend { --c: var(--text-2); display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; margin-top: 12px; font-size: 12px; color: var(--text-2); }
@@ -751,6 +781,11 @@ input[type="text"], input[type="search"], input[type="number"], input[type="time
 
 .sdots { display: inline-flex; gap: 3px; }
 .sdots i { width: 6px; height: 6px; border-radius: 50%; border: 0; opacity: 1; background: var(--line); }
+/* У місяці крапки крупніші: вони тут єдине, що показує день */
+.cal-day .sdots { gap: 4px; }
+.cal-day .sdots i { width: 8px; height: 8px; }
+.cal-day .sdots i.s-free { opacity: .45; }
+.plan-item .icon-btn { width: 44px; height: 44px; }
 .sdots i.s-done { background: var(--ok-fg); }
 .sdots i.s-planned { background: var(--plan-fg); }
 .sdots i.s-missed { background: var(--bad-fg); }
