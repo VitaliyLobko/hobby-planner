@@ -2999,7 +2999,9 @@ function viewActs() {
 
 // ---------- «Налаштування» ----------
 
-const THEMES = [['auto', 'Авто'], ['dark', 'Темна'], ['light', 'Світла']];
+// Спецрежими — як у Shooter's Log: Нічна (усе червоним) і монітори-кінескопи; щоденні — Авто, Темна, Світла
+const THEMES = [['auto', 'Авто'], ['dark', 'Темна'], ['light', 'Світла'], ['night', 'Нічна'], ['phosphor', 'Фосфор'], ['amber', 'Бурштин'], ['white', 'Білий фосфор']];
+const SPECIAL_THEMES = ['night', 'phosphor', 'amber', 'white'];
 const lightScheme = matchMedia('(prefers-color-scheme: light)');
 
 function themePref() {
@@ -3011,7 +3013,17 @@ function applyTheme() {
   const pref = themePref();
   const theme = pref === 'auto' ? (lightScheme.matches ? 'light' : 'dark') : pref;
   document.documentElement.dataset.theme = theme;
-  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'light' ? '#f3f4f1' : '#121417');
+  const k = nightLevel() / 100;
+  document.querySelector('#night-red feColorMatrix')?.setAttribute('values',
+    `${(0.5 * k).toFixed(3)} ${(0.6 * k).toFixed(3)} ${(0.1 * k).toFixed(3)} 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0`);
+  const bar = { light: '#f3f4f1', night: '#000000' }[theme] ?? (SPECIAL_THEMES.includes(theme) ? '#0b0d0b' : '#121417');
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', bar);
+}
+
+/** Яскравість червоного в нічній темі, 20–100 %. */
+function nightLevel() {
+  const v = Number(recall('night-level'));
+  return v >= 20 && v <= 100 ? v : 80;
 }
 
 lightScheme.addEventListener('change', applyTheme);
@@ -3473,8 +3485,18 @@ function backupRow() {
 }
 
 function themeRow() {
-  return setRow('theme', 'palette', 'Тема', THEMES.find(([v]) => v === themePref())?.[1] ?? '',
-    chips(THEMES, themePref(), (v) => { remember('theme', v); applyTheme(); render(); }));
+  // Дві групи: щоденні теми й «Спецрежими»; вибрана підсвічується у своїй групі
+  const pick = (special) => chips(THEMES.filter(([k]) => SPECIAL_THEMES.includes(k) === special), themePref(),
+    (v) => { remember('theme', v); applyTheme(); render(); });
+  return setRow('theme', 'palette', 'Тема', THEMES.find(([v]) => v === themePref())?.[1] ?? '', [
+    pick(false),
+    h('div', { class: 'theme-group' }, 'Спецрежими'),
+    pick(true),
+    // Ніч буває різна: тягнеш — сторінка одразу темнішає чи світлішає
+    themePref() === 'night' ? h('label', { class: 'night-level' }, h('span', {}, 'Яскравість червоного'),
+      h('input', { type: 'range', min: '20', max: '100', step: '5', value: String(nightLevel()),
+        onInput: (e) => { remember('night-level', e.target.value); applyTheme(); } })) : null,
+    h('p', { class: 'muted small' }, 'Нічна — усе червоним, щоб не збивати нічний зір. Фосфор, Бурштин і Білий фосфор — як старі монітори-кінескопи.')]);
 }
 
 const SET_OPEN_KEY = 'set-open';

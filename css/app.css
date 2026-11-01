@@ -1,3 +1,25 @@
+/* Нічна: темна тема, уся сторінка яскравістю в червоний канал, щоб не збивати нічний зір (як у Shooter's Log) */
+:root[data-theme="night"] { --bg: #000; filter: url(#night-red); }
+/* Монітори-кінескопи (Фосфор — зелений, Бурштин — янтарний, Білий фосфор): уся сторінка в один колір, свічення,
+   рядки розгортки; заголовки, великі числа, кнопки й вкладки — моноширинним, назви занять — звичайним */
+:root:is([data-theme="phosphor"], [data-theme="amber"], [data-theme="white"]) { --bg: #0b0d0b; }
+:root[data-theme="phosphor"] { filter: url(#phosphor); }
+:root[data-theme="amber"] { filter: url(#amber); }
+:root[data-theme="white"] { filter: url(#white); }
+:root:is([data-theme="phosphor"], [data-theme="amber"], [data-theme="white"]) body {
+  text-shadow: 0 0 6px color-mix(in srgb, currentColor 55%, transparent); }
+:root:is([data-theme="phosphor"], [data-theme="amber"], [data-theme="white"]) :is(.topbar h1, h2, h3, legend, .tc-date b, .tc-week b,
+  .stat-totals b, .day-date, .slot-label, .btn, .chips button, .tabs span) {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, "Roboto Mono", monospace; }
+:root:is([data-theme="phosphor"], [data-theme="amber"], [data-theme="white"]) .topbar h1 { text-transform: uppercase; letter-spacing: .06em; }
+:root:is([data-theme="phosphor"], [data-theme="amber"], [data-theme="white"]) body::after { content: ""; position: fixed; inset: 0;
+  z-index: 2147483647; pointer-events: none;
+  background: repeating-linear-gradient(0deg, rgb(0 0 0 / .22) 0 1px, transparent 1px 3px),
+    radial-gradient(ellipse 85% 75% at 50% 50%, transparent 55%, rgb(0 0 0 / .55)); }
+.theme-group { margin: 4px 0 -2px; font-size: 13px; font-weight: 700; color: var(--muted); }
+.night-level { display: flex; flex-direction: column; gap: 6px; font-size: 14px; font-weight: 600; }
+.night-level input { width: 100%; accent-color: var(--accent); }
+
 /* Тему ставить data-theme на <html>: js/boot.js ще до малювання, далі app.js (Налаштування → Тема).
    Темна — базова, світла перекриває змінні. */
 :root {
