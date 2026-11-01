@@ -1264,7 +1264,7 @@ const repeatSlots = (a) => {
   const list = Array.isArray(a?.repeat?.slots) ? a.repeat.slots : (a?.repeat?.slot ? [a.repeat.slot] : []);
   return SLOT_ORDER.filter((id) => list.includes(id));
 };
-const repeatOn = (a) => Boolean(a && !a.archived && a.repeat?.days?.length && repeatSlots(a).length);
+const repeatOn = (a) => Boolean(a && !a.archived && !a.hold && a.repeat?.days?.length && repeatSlots(a).length);
 /** Кілька вікон на день — у ключі й вікно; старий розклад (без slots) — колишній ключ, щоб не задублювати. */
 const repeatId = (a, date, slot) => (Array.isArray(a.repeat.slots)
   ? `r${a.repeat.v}-${date.replaceAll('-', '')}-${slot}-${a.id}`
@@ -1605,7 +1605,8 @@ async function sendWeek(env, chatId, now, { offerNext = false } = {}) {
   const { date } = local(now, tz);
   const start = weekStart(date);
   const end = addDays(start, 6);
-  const acts = [...(await actsMap(env)).values()].filter((a) => !a.archived).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  // «Не на часі» — без цілі, у підсумку тижня його немає
+  const acts = [...(await actsMap(env)).values()].filter((a) => !a.archived && !a.hold).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
   const { results } = await env.DB.prepare("SELECT data FROM items WHERE date >= ? AND date <= ? AND deleted = 0 AND status IN ('done', 'min')")
     .bind(start, end).all();
   const items = results.map((r) => JSON.parse(r.data));
@@ -1679,7 +1680,7 @@ async function nextWeekPut(env, now, next) {
   for (const x of await read(start)) {
     const a = acts.get(x.activityId);
     const date = addDays(x.date, 7);
-    if (!a || a.archived || x.rep != null || pauseOn(date, pauses)) continue;
+    if (!a || a.archived || a.hold || x.rep != null || pauseOn(date, pauses)) continue;
     const slot = slotsFor(date, cfg).find((s) => s.id === x.slot);
     if (!slot || zoned(date, slot.to, tz) <= now) continue;
     if ([...have, ...put].some((p) => p.date === date && p.slot === x.slot && p.activityId === x.activityId)) continue;
@@ -2035,7 +2036,7 @@ async function quickIdeas(env, now, min) {
   const counted = new Map(results.map((r) => [r.act, r.n]));
   const ideas = [];
   for (const a of activeActs(acts)) {
-    if (done.has(a.id)) continue;
+    if (a.hold || done.has(a.id)) continue;
     const item = todays.find((p) => p.activityId === a.id && p.status === 'planned' && !closedStatus(p, cfg, tz, now));
     const cnt = counted.get(a.id) ?? 0;
     const goal = weekTarget(a, wk, pauses);
@@ -2184,7 +2185,7 @@ async function tomorrowOptions(env, now) {
     const put = [];
     for (const x of src) {
       const a = acts.get(x.activityId);
-      if (!a || a.archived || !slots.some((s) => s.id === x.slot)) continue;
+      if (!a || a.archived || a.hold || !slots.some((s) => s.id === x.slot)) continue;
       if ([...have, ...put].some((p) => p.slot === x.slot && p.activityId === x.activityId)) continue;
       put.push({ slot: x.slot, activityId: x.activityId });
     }
@@ -2209,6 +2210,7 @@ async function tomorrowOptions(env, now) {
   const pauses = await pausesOf(env);
   const again = [];
   for (const a of activeActs(acts)) {
+    if (a.hold) continue;
     const [last, prev] = await closedRuns(env, a.id, today, cfg, tz, now, pauses);
     if (!last || last.it.date !== today || !isMiss(last.st) || !prev || !isMiss(prev.st)) continue;
     const slot = preferredSlot(slots, a, await slotAdviceOf(env, a.id, cfg, tz, now, pauses), last.it.slot);

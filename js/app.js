@@ -33,6 +33,10 @@ function recall(key) {
 
 const act = (id) => state.activities.find((a) => a.id === id);
 const activeActs = () => state.activities.filter((a) => !a.archived).sort((a, b) => a.order - b.order);
+// «Не на часі» (a.hold): заняття лишається в списку, але без цілі тижня й не пропонується у вікна
+const liveActs = () => activeActs().filter((a) => !a.hold);
+/** Заняття для вибору у вікно: «не на часі» — лише якщо вже стоїть у цьому вікні, щоб його можна було зняти. */
+const pickActs = (date, slotId) => activeActs().filter((a) => !a.hold || itemsAt(date, slotId).some((p) => p.activityId === a.id));
 // Групи занять — у meta, як шаблони дня: [{ id, name, icon }]; заняття знає свою за a.group
 const actGroups = () => state.meta.find((m) => m.id === 'groups')?.list ?? [];
 const saveGroups = (list) => save({ meta: { put: [{ id: 'groups', list }] } });
@@ -816,7 +820,7 @@ function moveSheet(item) {
 const secOf = (p) => M.itemSeconds(p, act(p.activityId)?.minutes);
 
 function weekTotals(start) {
-  const acts = activeActs();
+  const acts = liveActs();
   const done = acts.reduce((s, a) => s + Math.min(M.weekCount(state.plan, a.id, start), target(a, start)), 0);
   return { done, target: acts.reduce((s, a) => s + target(a, start), 0) };
 }
@@ -886,7 +890,7 @@ function slotTitle(slot, ...meta) {
 function slotSuggest(date, slot) {
   const busy = new Set(state.plan.filter((p) => p.date === date && p.status !== 'moved').map((p) => p.activityId));
   const wk = M.weekStart(date);
-  const ideas = activeActs()
+  const ideas = liveActs()
     .filter((a) => a.slots?.includes(slot.id) && !busy.has(a.id))
     .sort((x, y) => (M.weekCount(state.plan, x.id, wk) / Math.max(1, target(x, wk)))
       - (M.weekCount(state.plan, y.id, wk) / Math.max(1, target(y, wk))) || x.order - y.order)
@@ -1193,7 +1197,7 @@ function quickIdeas(min) {
   const todays = state.plan.filter((p) => p.date === today && p.status !== 'moved');
   const done = new Set(todays.filter((p) => M.counts(p.status)).map((p) => p.activityId));
   const ideas = [];
-  for (const a of activeActs()) {
+  for (const a of liveActs()) {
     if (done.has(a.id)) continue;
     const item = todays.find((p) => p.activityId === a.id && p.status === 'planned' && now < (slotOf(p)?.to ?? ''));
     const cnt = M.weekCount(state.plan, a.id, wk);
@@ -1544,7 +1548,7 @@ const PICK_SEARCH_FROM = 8;
 
 /** Шторка вікна з «Тижня»: заняття тапом у вікно й назад, не переходячи в «План». */
 function slotPickSheet(date, slot) {
-  const acts = activeActs();
+  const acts = pickActs(date, slot.id);
   const draw = ({ a }) => {
     const b = h('button', {
       type: 'button', class: 'pick', 'data-id': a.id, style: actStyle(a),
@@ -1645,7 +1649,7 @@ function planSlot(date, slot, wk, today, now) {
   const head = slotHead(h('span', { class: 'slot-head' }, slotName(slot), dots(items),
     badge(items.length ? 'planned' : 'free', items.length ? loadText(items) : 'Вільно')), slot, date, today, now);
   // Першими — де за історією виходить; де майже не виходить — нижче за звичайні
-  const ranked = activeActs()
+  const ranked = pickActs(date, slot.id)
     .map((a) => {
       const adv = slotAdvice(a.id, today, now);
       const best = adv?.best?.slot === slot.id ? adv.best : null;
@@ -1696,7 +1700,7 @@ function planSlot(date, slot, wk, today, now) {
 function copyPlan(pairs) {
   const today = M.ymd();
   const now = M.nowHm();
-  const active = new Set(activeActs().map((a) => a.id));
+  const active = new Set(liveActs().map((a) => a.id));
   const put = [];
   const has = (date, slot, id) => itemsAt(date, slot).some((x) => x.activityId === id)
     || put.some((x) => x.date === date && x.slot === slot && x.activityId === id);
@@ -2017,7 +2021,7 @@ function viewWeek() {
 
   const goals = h('div', { class: 'fold-body' },
     off ? h('p', { class: 'pause-note' }, icon('moon'), `Пауза ${off} ${plural(off, 'день', 'дні', 'днів')} — цілі тижня менші`) : null);
-  for (const a of activeActs()) {
+  for (const a of liveActs()) {
     const cnt = M.weekCount(state.plan, a.id, start);
     const sec = M.weekSeconds(state.plan, a.id, start, a.minutes);
     const goal = target(a, start);
@@ -2064,7 +2068,7 @@ function viewWeek() {
 /** «Не пропускай двічі» поточного тижня: що минулого разу пропущено — наступного разу хоча б мінімум. */
 function missedCard(shift, today, now) {
   if (shift !== 0) return null;
-  const missed = activeActs().filter((a) => missedLast(a.id, M.addDays(today, 1), today, now));
+  const missed = liveActs().filter((a) => missedLast(a.id, M.addDays(today, 1), today, now));
   return missed.length ? h('section', { class: 'card warn-card' },
     h('h2', {}, 'Не пропускай двічі'),
     ...missed.map((a) => h('p', {}, `${a.name}: минулого разу пропущено. Наступного разу — хоча б мінімум${a.minVersion ? ` (${a.minVersion})` : ''}.`))) : null;
@@ -2667,9 +2671,10 @@ function editActivity(orig) {
   sheet(orig ? 'Змінити заняття' : 'Нове заняття', form);
 }
 
-/** В архів чи назад — з «Скасувати»; на шторці заняття окремо й нижче за інші кнопки, щоб не влучити випадково. */
+/** «Не на часі» й архів — з «Скасувати»; на шторці заняття окремо й нижче за інші кнопки, щоб не влучити випадково. */
 function archiveZone(a) {
   return h('div', { class: 'archive-zone' },
+    a.archived ? null : holdButton(a),
     button('undo', a.archived ? 'Повернути з архіву' : 'В архів', 'ghost', async () => {
       closeSheet();
       await save({ activities: { put: [{ ...a, archived: !a.archived }] } });
@@ -2677,6 +2682,21 @@ function archiveZone(a) {
       toast(a.archived ? `${a.name} — знову в заняттях` : `${a.name} — в архіві`,
         { label: 'Скасувати', run: async () => { await save({ activities: { put: [{ ...a }] } }); await runRepeats({ render: true }); } });
     }));
+}
+
+/**
+ * «Не на часі» чи назад. Незачеплені справи розкладу прибирає runRepeats (repeatOn вимкнений); при поверненні розклад
+ * отримує новий ключ — інакше прибрані справи за старим ключем бот назад не поставить, а застосунок — до until.
+ */
+function holdButton(a) {
+  return button(a.hold ? 'refresh' : 'moon', a.hold ? 'Знову на часі' : 'Не на часі', 'ghost', async () => {
+    closeSheet();
+    const back = a.hold && a.repeat ? { repeat: { ...a.repeat, v: (a.repeat.v ?? 0) + 1, until: null } } : {};
+    await save({ activities: { put: [{ ...a, hold: !a.hold, ...back }] } });
+    await runRepeats({ render: true });
+    toast(a.hold ? `${a.name} — знову пропонується` : `${a.name} — не на часі: не пропонується у вікна`,
+      { label: 'Скасувати', run: async () => { await save({ activities: { put: [{ ...a }] } }); await runRepeats({ render: true }); } });
+  });
 }
 
 /** Нова шторка з відкритої — уже після history.back() старої, інакше він закрив би нову. */
@@ -2714,21 +2734,28 @@ function todayPlanButton(a) {
  * щоб подивитись прогрес і нічого не зачепити.
  */
 function activitySheet(a) {
-  const foot = a.archived ? [] : [weekStreakBadge(a), missedChip(a)].filter(Boolean);
+  const off = a.archived || a.hold;
+  const foot = off ? [holdChip(a)].filter(Boolean) : [weekStreakBadge(a), missedChip(a)].filter(Boolean);
   sheet('Заняття', h('div', { class: 'sheet-body act-sheet', style: actStyle(a) },
     h('div', { class: 'act-preview' }, tile(a),
       h('span', { class: 'act-text' }, h('span', { class: 'act-name' }, a.name), h('span', { class: 'act-sub' }, actMeta(a)))),
-    a.archived ? null : weekGoalLine(a),
+    off ? null : weekGoalLine(a),
     foot.length ? h('span', { class: 'act-foot' }, foot) : null,
     M.repeatOn(a) ? h('span', { class: 'repeat-line' }, icon('refresh'), repeatText(a)) : null,
     ...(a.careOn ? careLines(a) : []),
     heatPanel(a, heatIndex()),
     h('div', { class: 'btn-grid' },
-      a.archived ? null : todayPlanButton(a),
+      off ? null : todayPlanButton(a),
       a.watchList ? button('list', lessonMode(a) ? 'Уроки' : 'Список', '', () => swapSheet(() => watchSheet(act(a.id) ?? a))) : null,
       a.careOn ? button('tool', 'Догляд', '', () => swapSheet(() => careSheet(act(a.id) ?? a))) : null,
       button('pen', 'Змінити', '', () => swapSheet(() => editActivity(act(a.id) ?? a)))),
     archiveZone(a)));
+}
+
+/** «Не на часі» — на картці й у шторці: чому заняття без цілі й не пропонується. */
+function holdChip(a) {
+  return a.hold && !a.archived ? h('span', { class: 'hold-chip', title: 'Не пропонується у вікна, ціль тижня не рахується' },
+    icon('moon'), 'Не на часі') : null;
 }
 
 // Серію показуємо з двох: «1 поспіль» нічого не каже
@@ -2784,7 +2811,7 @@ function fitLine(a) {
 function actMeta(a) {
   const where = (a.slots ?? []).map((id) => slotsCfg.weekday.find((s) => s.id === id)?.label).filter(Boolean).join(', ');
   const course = lessonMode(a) && a.watch?.length ? `уроки ${a.watch.filter((w) => w.done).length}/${a.watch.length}` : '';
-  return [a.archived ? `${a.weeklyTarget}×/тиж` : '', a.minutes ? `~${a.minutes} хв` : '', where, course].filter(Boolean).join(' · ');
+  return [a.archived || a.hold ? `${a.weeklyTarget}×/тиж` : '', a.minutes ? `~${a.minutes} хв` : '', where, course].filter(Boolean).join(' · ');
 }
 
 /** Минулого разу пропущено — як у «Не пропускай двічі» на «Тижні»: наступного разу хоча б мінімум. */
@@ -2801,11 +2828,13 @@ function missedChip(a) {
  */
 function actCard(a) {
   const meta = actMeta(a);
-  const foot = [a.archived ? null : weekStreakBadge(a), a.archived ? null : missedChip(a), levelChip(a)].filter(Boolean);
-  return h('button', { type: 'button', class: `card act-card act-tidy${a.archived ? ' archived' : ''}`, style: actStyle(a), onClick: () => activitySheet(a) },
+  const off = a.archived || a.hold;
+  const foot = [holdChip(a), off ? null : weekStreakBadge(a), off ? null : missedChip(a), levelChip(a)].filter(Boolean);
+  const cls = a.archived ? ' archived' : a.hold ? ' held' : '';
+  return h('button', { type: 'button', class: `card act-card act-tidy${cls}`, style: actStyle(a), onClick: () => activitySheet(a) },
     h('span', { class: 'act-head' }, tile(a), h('span', { class: 'act-name' }, a.name)),
     meta ? h('span', { class: 'act-sub' }, meta) : null,
-    a.archived ? null : weekGoalLine(a),
+    off ? null : weekGoalLine(a),
     M.repeatOn(a) ? h('span', { class: 'repeat-line' }, icon('refresh'), repeatText(a)) : null,
     ...(a.careOn ? careLines(a) : []),
     foot.length ? h('span', { class: 'act-foot' }, foot) : null);

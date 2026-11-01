@@ -573,6 +573,8 @@ button.link-btn { padding: 0; border: 0; background: none; color: var(--accent);
 /* Минулого разу пропущено — як «Не пропускай двічі» на «Тижні» */
 .miss-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; font-weight: 700; color: var(--min-fg); }
 .miss-chip .ico svg { width: 15px; height: 15px; }
+.hold-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; font-weight: 700; color: var(--muted); }
+.hold-chip .ico svg { width: 15px; height: 15px; }
 .act-wrap.dragging { transition: none; z-index: 5; }
 .act-wrap.dragging .act-card { box-shadow: 0 10px 28px rgb(0 0 0 / .35); }
 .act-side { position: absolute; top: 4px; right: 4px; height: 48px; display: flex; }
@@ -827,7 +829,7 @@ input[type="text"], input[type="search"], input[type="number"], input[type="time
 .btn.danger { background: transparent; border: 1.5px solid var(--bad-fg); color: var(--bad-fg); }
 .btn.ghost { background: transparent; color: var(--muted); }
 /* рідкісна дія — відступ і розділювач від «Зберегти» */
-.archive-zone { margin-top: 20px; padding-top: 12px; border-top: 1px solid var(--line); display: flex; justify-content: center; }
+.archive-zone { margin-top: 20px; padding-top: 12px; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
 .archive-zone .btn { width: auto; min-height: 40px; padding: 0 16px; font-size: 14px; }
 .btn-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; margin-top: 4px; }
 
@@ -971,6 +973,7 @@ input[type="text"], input[type="search"], input[type="number"], input[type="time
 /* ---------- заняття ---------- */
 .act-card { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; }
 .act-card.archived { opacity: .6; }
+.act-card.held { opacity: .75; }
 .section-title { margin: 12px 0 0; font-size: 13px; font-weight: 800; color: var(--muted); }
 
 .form { display: grid; gap: 8px; }

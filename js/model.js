@@ -291,7 +291,7 @@ export const repeatSlots = (a) => {
   const list = Array.isArray(a.repeat?.slots) ? a.repeat.slots : (a.repeat?.slot ? [a.repeat.slot] : []);
   return SLOT_IDS.filter((id) => list.includes(id));
 };
-export const repeatOn = (a) => Boolean(!a.archived && a.repeat?.days?.length && repeatSlots(a).length);
+export const repeatOn = (a) => Boolean(!a.archived && !a.hold && a.repeat?.days?.length && repeatSlots(a).length);
 /**
  * Сталий ключ: той самий у застосунку й боті, тож дубля не буде, а прибрану справу видно за ключем.
  * Кілька вікон на день — у ключі й вікно; старий розклад (без slots) — колишній ключ, щоб його справи не задублювались.
