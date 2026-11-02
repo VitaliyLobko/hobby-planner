@@ -744,6 +744,12 @@ button.link-btn { padding: 0; border: 0; background: none; color: var(--accent);
 .remind-card { display: flex; flex-direction: column; gap: 8px; }
 .remind-title { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 15px; }
 .remind-title .ico svg { width: 18px; height: 18px; }
+.remind-card.fold[open] > summary { margin-bottom: 0; }
+/* Скільки всередині — лише в згорнутій групі: розгорнуту й так видно */
+.fold-count { margin-left: 8px; font-size: 13px; font-weight: 700; color: var(--muted); }
+.fold[open] .fold-count { display: none; }
+.warn-card .fold-chev, .warn-card .fold-count { color: inherit; }
+.warn-card.fold[open] > summary { margin-bottom: 4px; }
 .remind-row { display: flex; align-items: center; gap: 10px; }
 .remind-check {
   width: 32px; height: 32px; flex: none; border-radius: 50%; border: 2px solid var(--line-strong);
@@ -973,7 +979,7 @@ input[type="text"], input[type="search"], input[type="number"], input[type="time
 /* ---------- заняття ---------- */
 .act-card { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; }
 .act-card.archived { opacity: .6; }
-.act-card.held { opacity: .75; }
+.act-card.held { opacity: .55; filter: grayscale(.7); }
 .section-title { margin: 12px 0 0; font-size: 13px; font-weight: 800; color: var(--muted); }
 
 .form { display: grid; gap: 8px; }

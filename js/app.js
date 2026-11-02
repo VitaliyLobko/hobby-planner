@@ -194,6 +194,15 @@ function folded(key, head, body, { def = true, persist = false, cls = '' } = {})
   });
 }
 
+/** Група, згорнута лише для sign (дня, набору занять): зміниться sign — знову розгорнута. */
+function signFold(key, sign, head, body, cls) {
+  return fold(head, body, {
+    open: recall(key) !== sign,
+    cls,
+    onToggle: (v) => remember(key, v ? '' : sign),
+  });
+}
+
 function plural(n, one, few, many) {
   const m10 = n % 10;
   const m100 = n % 100;
@@ -1067,7 +1076,15 @@ function remindersToday(today, now) {
     ...careDue(today).map((x) => careDueRow(x, today)),
   ];
   if (!rows.length) return null;
-  return h('section', { class: 'card remind-card' }, h('h2', { class: 'remind-title' }, icon('bell'), 'Не забудь'), rows);
+  // «+» поруч зі стрілкою, як у вікнах дня: тап не згортає картку, а відкриває нове нагадування
+  const add = h('button', {
+    type: 'button', class: 'slot-add', 'aria-label': 'Нове нагадування',
+    onClick: (e) => { e.preventDefault(); e.stopPropagation(); editReminder(); },
+  }, icon('plus'));
+  const head = h('span', { class: 'slot-head' },
+    h('h2', { class: 'remind-title' }, icon('bell'), 'Не забудь', h('span', { class: 'fold-count' }, String(rows.length))), add);
+  // Згорнута — до завтра: нові нагадування наступного дня не сховаються
+  return signFold('remind-folded', today, head, rows, 'card remind-card');
 }
 
 function editReminder(orig) {
@@ -2069,9 +2086,12 @@ function viewWeek() {
 function missedCard(shift, today, now) {
   if (shift !== 0) return null;
   const missed = liveActs().filter((a) => missedLast(a.id, M.addDays(today, 1), today, now));
-  return missed.length ? h('section', { class: 'card warn-card' },
-    h('h2', {}, 'Не пропускай двічі'),
-    ...missed.map((a) => h('p', {}, `${a.name}: минулого разу пропущено. Наступного разу — хоча б мінімум${a.minVersion ? ` (${a.minVersion})` : ''}.`))) : null;
+  if (!missed.length) return null;
+  const head = h('h2', {}, 'Не пропускай двічі', h('span', { class: 'fold-count' }, String(missed.length)));
+  // Згорнута, доки той самий набір занять: новий пропуск розгорне картку сам
+  return signFold('missed-folded', missed.map((a) => a.id).sort().join(','), head,
+    missed.map((a) => h('p', {}, `${a.name}: минулого разу пропущено. Наступного разу — хоча б мінімум${a.minVersion ? ` (${a.minVersion})` : ''}.`)),
+    'card warn-card');
 }
 
 // ---------- «Місяць» ----------
@@ -3080,7 +3100,9 @@ let reordering = false;
 
 function viewActs() {
   const archived = state.activities.filter((a) => a.archived).sort((a, b) => a.order - b.order);
-  const active = activeActs();
+  // «Не на часі» — окремою секцією під списком: у ньому лише те, чим займаєшся зараз
+  const held = activeActs().filter((a) => a.hold);
+  const active = liveActs();
   const mode = active.length >= ACTS_TOOLS_FROM ? actSort() : 'own';
   const sorted = sortActs(active, mode);
   // ⋮⋮ лише в режимі «Змінити порядок»: у звичайному списку ручка не заважає й не плутає з іншими кнопками
@@ -3110,6 +3132,10 @@ function viewActs() {
     tools ? actsTools(list, mode, reorderIcon) : null,
     drag ? h('div', { class: 'reorder-bar' }, button('check', 'Готово', 'primary', flip)) : null,
     list,
+    held.length
+      ? folded('acts-held', h('h2', { class: 'section-title' }, `Не на часі · ${held.length}`),
+        h('div', { class: 'stack' }, held.map(actCard)), { def: false, persist: true, cls: 'plain-fold' })
+      : null,
     archived.length
       ? folded('acts-archive', h('h2', { class: 'section-title' }, `Архів · ${archived.length}`),
         h('div', { class: 'stack' }, archived.map(actCard)), { def: false, persist: true, cls: 'plain-fold' })
