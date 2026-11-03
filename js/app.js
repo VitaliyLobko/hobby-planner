@@ -3795,6 +3795,23 @@ function avatarHi(e) {
 }
 
 /** «Про застосунок» однією карткою: автор кліпає, версія й оновлення, що це, де дані, з чого почати, що пише бот. */
+const CUP_SVG = '<svg viewBox="0 0 16 20" aria-hidden="true">'
+  + '<path class="st" d="M6 8.5c-2-2 2-3 0-6"/><path class="st" d="M10 8.5c-2-2 2-3 0-6"/>'
+  + '<path d="M3 10h9v6a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3z" fill="#f4f1ea" stroke="#3a2a1c"/>'
+  + '<path d="M12 11.5h1.2a2 2 0 0 1 0 4H12" fill="none" stroke="#3a2a1c"/><ellipse cx="7.5" cy="10.4" rx="4" ry=".9" fill="#6b3f1f"/></svg>';
+
+/** «На каву автору», як у Shooter’s Log: банка Монобанку звичайним посиланням, без сторонніх скриптів. */
+function donateCard() {
+  return h('a', { class: 'donate-card', href: 'https://send.monobank.ua/jar/XJKDMyVfW', target: '_blank', rel: 'noopener' },
+    h('span', { class: 'donate-art' },
+      h('span', { class: 'donate-cat' }, h('img', { src: './icons/cat-portrait.png', alt: '', width: 50, height: 50 }),
+        Object.assign(h('span', { class: 'donate-cup' }), { innerHTML: CUP_SVG })),
+      // табличка під рамою, як підпис під картиною: чий це котик — банка monobank
+      h('span', { class: 'donate-plate', 'aria-hidden': 'true' }, 'mono')),
+    h('span', { class: 'donate-text' }, h('b', {}, 'На каву автору'), h('small', {}, 'Безкоштовно й без реклами — тримається на вашій підтримці')),
+    h('span', { class: 'donate-go', 'aria-hidden': 'true' }, '→'));
+}
+
 function aboutSection() {
   const link = (href, text) => h('a', { href, target: '_blank', rel: 'noopener' }, text);
   const more = (title, node) => h('details', { class: 'about-more' }, h('summary', {}, title), node);
@@ -3818,6 +3835,7 @@ function aboutSection() {
         ? button('refresh', next ? `Оновити до ${next}` : 'Оновити', 'primary', () => upd.worker.postMessage('skipWaiting'))
         : button('refresh', 'Перевірити оновлення', '', () => checkUpdate(status)),
       button('star', 'Що нового', '', () => changesSheet(CHANGES.slice(0, 6), 'Що нового'))),
+    donateCard(),
     more('Де мої дані', h('div', { class: 'muted small' },
       h('p', {}, 'План, заняття й нагадування лежать у браузері на цьому пристрої. Сервера в застосунку немає, автор не отримує ні даних, ні статистики.'),
       h('p', {}, 'Синхронізація — за бажанням: план лягає в базу на твоєму власному Cloudflare Worker, щоб Telegram-бот нагадував, а телефон і комп’ютер бачили те саме.'),
