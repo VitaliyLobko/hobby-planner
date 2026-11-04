@@ -3390,6 +3390,12 @@ const W_PLAN_BACKLOG = 10;
 const W_TOMB_TTL = 180 * W_DAY;
 const W_MONTHS = ['Січень', 'Лютий', 'Березень', 'Квітень', 'Травень', 'Червень', 'Липень', 'Серпень', 'Вересень', 'Жовтень', 'Листопад', 'Грудень'];
 const W_MISSING = { name: 'Видалено', kind: 'expense', currency: 'UAH' };
+// Версія складу шапки: нове поле — нове число, інакше збережена шапка без нього жила б до нового дня чи запису
+const W_HEAD_V = 2;
+// Колір монети витрати за темпом — як budgetState у marnotrat/js/model.js
+const W_PACE_WARN = 1;
+const W_PACE_OVER = 1.3;
+const W_CALM_OPS = 4;
 
 const wPad = (n) => String(n).padStart(2, '0');
 const wParse = (s) => Date.UTC(Number(s.slice(0, 4)), Number(s.slice(5, 7)) - 1, Number(s.slice(8, 10)));
@@ -3434,7 +3440,7 @@ async function marnotratState(env, now) {
   return { coins: [...out.coins.values()], ops: [...out.ops.values()].filter((o) => /^\d{4}-\d{2}-\d{2}$/.test(o.date ?? '')), meta: [...out.meta.values()] };
 }
 
-/** Шапка для віджета на дату today: період, витрати, баланс, бюджет, гроші на день, заплановане, тиждень. */
+/** Шапка для віджета на дату today: період, витрати, баланс, бюджет, гроші на день, заплановане, тиждень, монети витрат. */
 function marnotratHead({ coins, ops, meta }, today) {
   const round2 = (v) => Math.round(v * 100) / 100;
   const byId = new Map();
@@ -3456,12 +3462,18 @@ function marnotratHead({ coins, ops, meta }, today) {
   let expense = 0;
   const spent = new Map();
   const delta = new Map();
+  // Витрати монет за період — у валюті монети, як її бюджет; n — скільки операцій (мало — монета ще не червона)
+  const catSpent = new Map();
   for (const op of ops) {
     delta.set(op.to, (delta.get(op.to) ?? 0) + amountIn(op));
     delta.set(op.from, (delta.get(op.from) ?? 0) - op.amount);
     if (opType(op) !== 'expense') continue;
     const v = expenseUah(op);
-    if (periodOf(op.date) === cur) expense += v;
+    if (periodOf(op.date) === cur) {
+      expense += v;
+      const x = catSpent.get(op.to) ?? { v: 0, n: 0 };
+      catSpent.set(op.to, { v: x.v + amountIn(op), n: x.n + 1 });
+    }
     spent.set(op.date, (spent.get(op.date) ?? 0) + v);
   }
   const inBalance = (c) => c.kind === 'account' || (c.kind === 'debt' && Boolean(c.inBalance));
@@ -3494,6 +3506,28 @@ function marnotratHead({ coins, ops, meta }, today) {
     }
   }
 
+  // Монети витрат для віджета 1×1: колір — від темпу, а не від відсотка (85 % на 28-ме — норма, 50 % на 5-те — ні)
+  const elapsed = Math.min(1, dayNo(today) / dayNo(to));
+  const catState = (v, budget, n) => {
+    if (!v) return { st: 'zero', fill: 0 };
+    if (!budget) return { st: 'free', fill: 0 };
+    const share = v / budget;
+    if (share > 1) return { st: 'over', fill: 1 };
+    const pace = share / Math.max(elapsed, 1 / 31);
+    if (pace > W_PACE_OVER && n > W_CALM_OPS) return { st: 'over', fill: round2(share) };
+    return { st: pace > W_PACE_WARN ? 'warn' : 'ok', fill: round2(share) };
+  };
+  const cats = coins.filter((c) => c.kind === 'expense' && !c.archived)
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+    .map((c) => {
+      const x = catSpent.get(c.id) ?? { v: 0, n: 0 };
+      const budget = c.budget > 0 ? c.budget : 0;
+      return {
+        id: c.id, name: String(c.name ?? '').slice(0, 40), icon: String(c.icon ?? ''), cur: c.currency || 'UAH',
+        spent: round2(x.v), budget, ...catState(x.v, budget, x.n),
+      };
+    });
+
   let at = 0;
   for (const list of [ops, coins, meta]) for (const x of list) at = Math.max(at, Number(x.updated) || 0);
   const f = (x) => `${x.slice(8, 10)}.${x.slice(5, 7)}`;
@@ -3509,6 +3543,7 @@ function marnotratHead({ coins, ops, meta }, today) {
       const date = wAddDays(today, i - 6);
       return { date, v: round2(spent.get(date) ?? 0) };
     }),
+    cats,
   };
 }
 
@@ -3523,8 +3558,8 @@ async function onWidgetGet(request, env) {
   const srv = Number(await env.DB.prepare("SELECT MAX(srv) AS s FROM records WHERE app = 'marnotrat'").first('s')) || 0;
   if (!srv) return json({ now, head: null });
   let head = parseJson(await getMeta(env, 'widget'), null);
-  if (!head || head.date !== today || !(head.srv >= srv)) {
-    head = { ...marnotratHead(await marnotratState(env, now), today), date: today, srv };
+  if (!head || head.v !== W_HEAD_V || head.date !== today || !(head.srv >= srv)) {
+    head = { ...marnotratHead(await marnotratState(env, now), today), date: today, srv, v: W_HEAD_V };
     await setMeta(env, 'widget', JSON.stringify(head));
   }
   return json({ now, head: { ...head, sent: now } });
