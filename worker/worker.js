@@ -3391,7 +3391,7 @@ const W_TOMB_TTL = 180 * W_DAY;
 const W_MONTHS = ['Січень', 'Лютий', 'Березень', 'Квітень', 'Травень', 'Червень', 'Липень', 'Серпень', 'Вересень', 'Жовтень', 'Листопад', 'Грудень'];
 const W_MISSING = { name: 'Видалено', kind: 'expense', currency: 'UAH' };
 // Версія складу шапки: нове поле — нове число, інакше збережена шапка без нього жила б до нового дня чи запису
-const W_HEAD_V = 2;
+const W_HEAD_V = 3;
 // Колір монети витрати за темпом — як budgetState у marnotrat/js/model.js
 const W_PACE_WARN = 1;
 const W_PACE_OVER = 1.3;
@@ -3517,6 +3517,23 @@ function marnotratHead({ coins, ops, meta }, today) {
     if (pace > W_PACE_OVER && n > W_CALM_OPS) return { st: 'over', fill: round2(share) };
     return { st: pace > W_PACE_WARN ? 'warn' : 'ok', fill: round2(share) };
   };
+  // Рахунок для швидкої витрати з віджета — як pairInto у Марнотраті: з якого платили в монету найчастіше
+  // за 90 днів, інакше перший живий рахунок (за order)
+  const liveAccount = (id) => { const a = byId.get(id); return a && a.kind === 'account' && !a.archived ? a : null; };
+  const firstAccount = coins.filter((c) => c.kind === 'account' && !c.archived).sort((a, b) => (a.order ?? 0) - (b.order ?? 0))[0];
+  const since90 = wAddDays(today, -90);
+  const paidFrom = new Map();
+  for (const op of ops) {
+    if (op.date < since90 || !liveAccount(op.from)) continue;
+    const m = paidFrom.get(op.to) ?? new Map();
+    m.set(op.from, (m.get(op.from) ?? 0) + 1);
+    paidFrom.set(op.to, m);
+  }
+  const accFor = (id) => {
+    const top = [...(paidFrom.get(id) ?? [])].sort((a, b) => b[1] - a[1])[0]?.[0];
+    const a = (top && liveAccount(top)) || firstAccount;
+    return a ? { id: a.id, name: String(a.name ?? '').slice(0, 40), cur: a.currency || 'UAH' } : null;
+  };
   const cats = coins.filter((c) => c.kind === 'expense' && !c.archived)
     .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
     .map((c) => {
@@ -3524,7 +3541,7 @@ function marnotratHead({ coins, ops, meta }, today) {
       const budget = c.budget > 0 ? c.budget : 0;
       return {
         id: c.id, name: String(c.name ?? '').slice(0, 40), icon: String(c.icon ?? ''), cur: c.currency || 'UAH',
-        spent: round2(x.v), budget, ...catState(x.v, budget, x.n),
+        spent: round2(x.v), budget, ...catState(x.v, budget, x.n), acc: accFor(c.id),
       };
     });
 
