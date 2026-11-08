@@ -3391,7 +3391,9 @@ const W_TOMB_TTL = 180 * W_DAY;
 const W_MONTHS = ['Січень', 'Лютий', 'Березень', 'Квітень', 'Травень', 'Червень', 'Липень', 'Серпень', 'Вересень', 'Жовтень', 'Листопад', 'Грудень'];
 const W_MISSING = { name: 'Видалено', kind: 'expense', currency: 'UAH' };
 // Версія складу шапки: нове поле — нове число, інакше збережена шапка без нього жила б до нового дня чи запису
-const W_HEAD_V = 3;
+const W_HEAD_V = 4;
+// Скільки частих тегів монети шле віджету — як підказки над клавіатурою в Марнотраті (tagsFor(...).slice(0, 8))
+const W_CAT_TAGS = 8;
 // Колір монети витрати за темпом — як budgetState у marnotrat/js/model.js
 const W_PACE_WARN = 1;
 const W_PACE_OVER = 1.3;
@@ -3534,6 +3536,15 @@ function marnotratHead({ coins, ops, meta }, today) {
     const a = (top && liveAccount(top)) || firstAccount;
     return a ? { id: a.id, name: String(a.name ?? '').slice(0, 40), cur: a.currency || 'UAH' } : null;
   };
+  // Часті теги монети за весь час — як tagsFor у Марнотраті: шторка швидкого запису показує їх чипами
+  const tagCount = new Map();
+  for (const op of ops) {
+    if (!Array.isArray(op.tags) || !op.tags.length) continue;
+    const m = tagCount.get(op.to) ?? new Map();
+    for (const t of op.tags) if (typeof t === 'string' && t) m.set(t, (m.get(t) ?? 0) + 1);
+    tagCount.set(op.to, m);
+  }
+  const tagsFor = (id) => [...(tagCount.get(id) ?? [])].sort((a, b) => b[1] - a[1]).slice(0, W_CAT_TAGS).map(([t]) => t.slice(0, 40));
   const cats = coins.filter((c) => c.kind === 'expense' && !c.archived)
     .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
     .map((c) => {
@@ -3541,7 +3552,7 @@ function marnotratHead({ coins, ops, meta }, today) {
       const budget = c.budget > 0 ? c.budget : 0;
       return {
         id: c.id, name: String(c.name ?? '').slice(0, 40), icon: String(c.icon ?? ''), cur: c.currency || 'UAH',
-        spent: round2(x.v), budget, ...catState(x.v, budget, x.n), acc: accFor(c.id),
+        spent: round2(x.v), budget, ...catState(x.v, budget, x.n), acc: accFor(c.id), tags: tagsFor(c.id),
       };
     });
 
