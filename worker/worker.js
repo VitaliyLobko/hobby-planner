@@ -3391,7 +3391,7 @@ const W_TOMB_TTL = 180 * W_DAY;
 const W_MONTHS = ['Січень', 'Лютий', 'Березень', 'Квітень', 'Травень', 'Червень', 'Липень', 'Серпень', 'Вересень', 'Жовтень', 'Листопад', 'Грудень'];
 const W_MISSING = { name: 'Видалено', kind: 'expense', currency: 'UAH' };
 // Версія складу шапки: нове поле — нове число, інакше збережена шапка без нього жила б до нового дня чи запису
-const W_HEAD_V = 4;
+const W_HEAD_V = 5;
 // Скільки частих тегів монети шле віджету — як підказки над клавіатурою в Марнотраті (tagsFor(...).slice(0, 8))
 const W_CAT_TAGS = 8;
 // Колір монети витрати за темпом — як budgetState у marnotrat/js/model.js
@@ -3555,6 +3555,10 @@ function marnotratHead({ coins, ops, meta }, today) {
         spent: round2(x.v), budget, ...catState(x.v, budget, x.n), acc: accFor(c.id), tags: tagsFor(c.id),
       };
     });
+  // Живі рахунки за порядком на головній, із залишком у своїй валюті — шторка швидкого запису дає вибрати інший
+  const accs = coins.filter((c) => c.kind === 'account' && !c.archived)
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+    .map((c) => ({ id: c.id, name: String(c.name ?? '').slice(0, 40), cur: c.currency || 'UAH', bal: round2((c.start || 0) + (delta.get(c.id) ?? 0)) }));
 
   let at = 0;
   for (const list of [ops, coins, meta]) for (const x of list) at = Math.max(at, Number(x.updated) || 0);
@@ -3572,6 +3576,7 @@ function marnotratHead({ coins, ops, meta }, today) {
       return { date, v: round2(spent.get(date) ?? 0) };
     }),
     cats,
+    accs,
   };
 }
 
