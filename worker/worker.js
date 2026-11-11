@@ -86,6 +86,7 @@ export default {
       if (url.pathname === '/api/restore' && request.method === 'POST') return cors(request, await onRestore(request, env));
       if (url.pathname === '/api/food' && request.method === 'POST') return cors(request, await onFood(request, env));
       if (url.pathname === '/api/food-label' && request.method === 'POST') return cors(request, await onFoodLabel(request, env));
+      if (url.pathname === '/api/ration' && request.method === 'POST') return cors(request, await onRation(request, env));
       if (url.pathname === '/' && request.method === 'GET') return await onSetup(url, env);
       return new Response('Not found', { status: 404 });
     } catch (err) {
@@ -2726,7 +2727,8 @@ function cleanFood(r) {
   return { items, note: String(r?.note ?? '').slice(0, 300) };
 }
 
-async function foodByClaude(env, text) {
+/** Claude з відповіддю за JSON-схемою → об'єкт; відмова моделі — null. */
+async function claudeJson(env, { system, text, schema, maxTokens, tag }) {
   const model = env.FOOD_MODEL || FOOD_CLAUDE_MODEL;
   // Серверний запасний варіант при відмові — лише для моделей, що його підтримують (не Haiku)
   const fallback = !model.includes('haiku');
@@ -2740,33 +2742,44 @@ async function foodByClaude(env, text) {
     },
     body: JSON.stringify({
       model,
-      max_tokens: 4000,
-      system: FOOD_PROMPT,
+      max_tokens: maxTokens,
+      system,
       messages: [{ role: 'user', content: text }],
-      output_config: { effort: 'low', format: { type: 'json_schema', schema: FOOD_SCHEMA } },
+      output_config: { effort: 'low', format: { type: 'json_schema', schema } },
       ...(fallback ? { fallbacks: 'default' } : {}),
     }),
   });
   if (!res.ok) {
-    console.log('food claude', res.status, (await res.text()).slice(0, 500));
+    console.log(`${tag} claude`, res.status, (await res.text()).slice(0, 500));
     throw new Error(res.status === 429 ? 'busy' : 'ai');
   }
   const out = await res.json();
-  if (out.stop_reason === 'refusal') return { items: [], note: 'Модель відмовилась відповідати на цей текст.' };
+  if (out.stop_reason === 'refusal') return null;
   if (out.stop_reason === 'max_tokens') throw new Error('ai');
   const block = (out.content ?? []).find((b) => b.type === 'text');
-  return { ...cleanFood(JSON.parse(block?.text ?? '{}')), source: 'claude' };
+  return JSON.parse(block?.text ?? '{}');
+}
+
+/** Workers AI (Llama) з відповіддю за JSON-схемою → об'єкт. */
+async function workersAiJson(env, { system, text, schema, maxTokens, temperature = 0 }) {
+  const out = await env.AI.run(NLU_MODEL, {
+    messages: [{ role: 'system', content: system }, { role: 'user', content: text }],
+    response_format: { type: 'json_schema', json_schema: schema },
+    max_tokens: maxTokens,
+    temperature,
+  });
+  const r = out?.response;
+  return typeof r === 'string' ? JSON.parse(r.replace(/^```(?:json)?\s*|\s*```$/g, '')) : r;
+}
+
+async function foodByClaude(env, text) {
+  const r = await claudeJson(env, { system: FOOD_PROMPT, text, schema: FOOD_SCHEMA, maxTokens: 4000, tag: 'food' });
+  if (!r) return { items: [], note: 'Модель відмовилась відповідати на цей текст.' };
+  return { ...cleanFood(r), source: 'claude' };
 }
 
 async function foodByWorkersAI(env, text) {
-  const out = await env.AI.run(NLU_MODEL, {
-    messages: [{ role: 'system', content: FOOD_PROMPT }, { role: 'user', content: text }],
-    response_format: { type: 'json_schema', json_schema: FOOD_SCHEMA },
-    max_tokens: 800,
-    temperature: 0,
-  });
-  let r = out?.response;
-  if (typeof r === 'string') r = JSON.parse(r);
+  const r = await workersAiJson(env, { system: FOOD_PROMPT, text, schema: FOOD_SCHEMA, maxTokens: 800 });
   return { ...cleanFood(r), source: 'workers-ai' };
 }
 
@@ -2786,15 +2799,122 @@ async function onFood(request, env) {
   }
 }
 
-/** Ліміт на день, спільний для тексту й фото: ключ застосунку не має стати безкоштовним доступом до моделі, якщо його вкрадуть. */
-async function foodQuota(env) {
+/** Ліміт запитів до моделі на день (лічильник у meta key): ключ застосунку не має стати безкоштовним доступом до моделі, якщо його вкрадуть. */
+async function aiQuota(env, key, limit) {
   const today = local(Date.now(), tzOf(env)).date;
   let calls = {};
-  try { calls = JSON.parse(await getMeta(env, 'food_calls') || '{}'); } catch { /* перший раз */ }
+  try { calls = JSON.parse(await getMeta(env, key) || '{}'); } catch { /* перший раз */ }
   const n = calls.date === today ? calls.n : 0;
-  if (n >= FOOD_DAY_LIMIT) return false;
-  await setMeta(env, 'food_calls', JSON.stringify({ date: today, n: n + 1 }));
+  if (n >= limit) return false;
+  await setMeta(env, key, JSON.stringify({ date: today, n: n + 1 }));
   return true;
+}
+
+/** Ліміт на день, спільний для тексту й фото. */
+const foodQuota = (env) => aiQuota(env, 'food_calls', FOOD_DAY_LIMIT);
+
+// ---------- раціон «Ваги» на день ----------
+// Застосунок рахує ціль (ккал на прийом, БЖВ) і сам підганяє порції; модель лише добирає страви
+
+const RATION_DAY_LIMIT = 40;
+const RATION_SCHEMA = {
+  type: 'object',
+  properties: {
+    meals: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { id: { type: 'string' }, items: FOOD_SCHEMA.properties.items },
+        required: ['id', 'items'],
+        additionalProperties: false,
+      },
+    },
+    note: { type: 'string' },
+  },
+  required: ['meals', 'note'],
+  additionalProperties: false,
+};
+const RATION_PROMPT = [
+  'Ти — дієтолог. Склади раціон на один день для людини в Україні зі звичайних продуктів, які легко купити й приготувати вдома.',
+  'Прийоми їжі — у запиті (meals: id, name, time, kcal): розклади страви саме по цих id, у кожному прийомі 1–4 страви чи продукти, разом близько його kcal (±5 %).',
+  'Білки p, жири f, вуглеводи c за день (у грамах) — близько цілі із запиту; білок розподіли по всіх прийомах.',
+  'goal «loss» — схуднення: ситне й небагато калорій — більше білка, овочів, клітковини; без солодкого, випічки й смаженого у фритюрі. goal «hold» — утримання ваги, звичайне здорове меню.',
+  'diet «diabetes» — низький глікемічний індекс: без цукру, меду, солодощів, соків, білого хліба, білого рису, картоплі, манки, кукурудзяних пластівців; фрукти — яблуко, ягоди чи слива невеликою порцією.',
+  'foods — що людина звичайно їсть: віддавай цьому перевагу, де доречно, але не обов\'язково все. wishes — побажання людини: дотримуйся їх.',
+  'Для кожної страви: name — коротка назва українською; qty — порція по-людськи («2 яйця», «150 г», «склянка»); grams — вага порції в грамах;',
+  'base — та сама їжа простою назвою російською без кількості й марки («гречка вареная», «куриная грудка»); k100, p100, f100, c100 — на 100 г у готовому вигляді за таблицями калорійності;',
+  'ккал мають сходитися з 4·білки + 9·жири + 4·вуглеводи. Порцію не перемножуй — це зробить застосунок.',
+  'swap — заміна однієї страви: поверни лише прийом swap.meal з ОДНІЄЮ стравою приблизно на swap.kcal ккал, що за роллю схожа на ту, яку замінюємо (основне — на основне, гарнір — на гарнір, напій — на напій), але не з keep (решта цього прийому) і не з reject (те, що людина вже відкинула).',
+  'note — одна коротка порада до цього дня, або порожньо.',
+].join('\n');
+
+const clip = (v, n) => String(v ?? '').trim().slice(0, n);
+const numIn = (v, min, max) => (Number.isFinite(Number(v)) && Number(v) >= min && Number(v) <= max ? Math.round(Number(v)) : null);
+const strList = (v, count, n) => (Array.isArray(v) ? v.map((x) => clip(x, n)).filter(Boolean).slice(0, count) : []);
+
+/** Запит застосунку → перевірене завдання для моделі; щось не так — null. */
+function rationAsk(body) {
+  const meals = (Array.isArray(body?.meals) ? body.meals : []).slice(0, 8)
+    .map((m) => ({ id: clip(m?.id, 40), name: clip(m?.name, 40), time: clip(m?.time, 20), kcal: numIn(m?.kcal, 0, 3000) }))
+    .filter((m) => m.id && m.name && m.kcal !== null);
+  const kcal = numIn(body?.kcal, 800, 6000);
+  if (!meals.length || kcal === null) return null;
+  const ask = {
+    goal: body?.goal === 'hold' ? 'hold' : 'loss',
+    kcal, p: numIn(body?.p, 0, 500) ?? 0, f: numIn(body?.f, 0, 400) ?? 0, c: numIn(body?.c, 0, 900) ?? 0,
+    diet: body?.diet === 'diabetes' ? 'diabetes' : '',
+    wishes: clip(body?.wishes, 300),
+    foods: strList(body?.foods, 80, 60),
+    meals,
+  };
+  if (body?.swap) {
+    const meal = meals.find((m) => m.id === clip(body.swap.meal, 40));
+    const k = numIn(body.swap.kcal, 10, 2000);
+    if (!meal || k === null) return null;
+    ask.swap = { meal: meal.id, kcal: k, keep: strList(body.swap.keep, 10, 80), reject: strList(body.swap.reject, 30, 80) };
+  }
+  return ask;
+}
+
+/** Відповідь моделі → лише прийоми із запиту; заміна — одна страва, не з відкинутих. */
+function cleanRation(r, ask) {
+  const ids = new Set((ask.swap ? [ask.swap.meal] : ask.meals.map((m) => m.id)));
+  const no = new Set([...(ask.swap?.reject ?? []), ...(ask.swap?.keep ?? [])].map((x) => x.toLowerCase()));
+  const meals = (Array.isArray(r?.meals) ? r.meals : [])
+    .filter((m) => ids.has(String(m?.id ?? '')))
+    .map((m) => {
+      let items = cleanFood({ items: m.items }).items;
+      if (ask.swap) items = items.filter((x) => !no.has(x.name.toLowerCase())).slice(0, 1);
+      return { id: String(m.id), items };
+    })
+    .filter((m) => m.items.length);
+  return { meals, note: clip(r?.note, 300) };
+}
+
+/**
+ * POST /api/ration { goal, kcal, p, f, c, diet, wishes, foods, meals: [{ id, name, time, kcal }], swap? }
+ * → { meals: [{ id, items: [{ name, base, qty, grams, k100…c100, kcal, p, f, c }] }], note, source }; тим самим ключем.
+ */
+async function onRation(request, env) {
+  if (!await authorized(request, env)) return json({ error: 'unauthorized' }, 401);
+  const ask = rationAsk(await request.json().catch(() => null));
+  if (!ask) return json({ error: 'bad request' }, 400);
+  if (!env.ANTHROPIC_API_KEY && !env.AI) return json({ error: 'no-ai' }, 503);
+  if (!await aiQuota(env, 'ration_calls', RATION_DAY_LIMIT)) return json({ error: 'limit' }, 429);
+  const text = JSON.stringify(ask);
+  try {
+    if (env.ANTHROPIC_API_KEY) {
+      const r = await claudeJson(env, { system: RATION_PROMPT, text, schema: RATION_SCHEMA, maxTokens: 8000, tag: 'ration' });
+      if (!r) return json({ meals: [], note: 'Модель відмовилась скласти раціон.', source: 'claude' });
+      return json({ ...cleanRation(r, ask), source: 'claude' });
+    }
+    // Заміна з температурою, інакше модель знову дає ту саму страву
+    const r = await workersAiJson(env, { system: RATION_PROMPT, text, schema: RATION_SCHEMA, maxTokens: 3000, temperature: ask.swap ? 0.9 : 0.6 });
+    return json({ ...cleanRation(r, ask), source: 'workers-ai' });
+  } catch (err) {
+    console.log('ration error', err.stack || err);
+    return json({ error: err.message === 'busy' ? 'busy' : 'ai' }, 502);
+  }
 }
 
 // Фото етикетки → значення на 100 г. Картинку застосунок зменшує до ~1024 px JPEG
