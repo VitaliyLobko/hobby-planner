@@ -2816,7 +2816,7 @@ const foodQuota = (env) => aiQuota(env, 'food_calls', FOOD_DAY_LIMIT);
 // ---------- раціон «Ваги» на день ----------
 // Застосунок рахує ціль (ккал на прийом, БЖВ) і сам підганяє порції; модель лише добирає страви
 
-const RATION_DAY_LIMIT = 40;
+const RATION_DAY_LIMIT = 100;
 const RATION_SCHEMA = {
   type: 'object',
   properties: {
