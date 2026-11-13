@@ -86,6 +86,8 @@ export default {
       if (url.pathname === '/api/restore' && request.method === 'POST') return cors(request, await onRestore(request, env));
       if (url.pathname === '/api/food' && request.method === 'POST') return cors(request, await onFood(request, env));
       if (url.pathname === '/api/food-label' && request.method === 'POST') return cors(request, await onFoodLabel(request, env));
+      if (url.pathname === '/api/gear-from-url' && request.method === 'POST') return cors(request, await onGearFromUrl(request, env));
+      if (url.pathname === '/api/gear-image' && request.method === 'POST') return cors(request, await onGearImage(request, env));
       if (url.pathname === '/api/ration' && request.method === 'POST') return cors(request, await onRation(request, env));
       if (url.pathname === '/' && request.method === 'GET') return await onSetup(url, env);
       return new Response('Not found', { status: 404 });
@@ -2999,6 +3001,302 @@ async function onFoodLabel(request, env) {
     console.log('label error', err.stack || err);
     return json({ error: err.message === 'busy' ? 'busy' : 'ai' }, 502);
   }
+}
+
+// ---------- Fishing Log: річ зі сторінки магазину ----------
+// Застосунок шле посилання (або вставлений текст сторінки, якщо сайт не віддає її серверу) і свої категорії;
+// бот бере сторінку, витягує розмітку товару (JSON-LD, og:) і текст, а модель розкладає характеристики по полях.
+// Claude — якщо задано ANTHROPIC_API_KEY, інакше безкоштовний Workers AI. Людина все перевіряє у формі перед збереженням.
+
+const GEAR_DAY_LIMIT = 150;
+const GEAR_PAGE_MAX = 3_000_000;
+const GEAR_IMAGE_MAX = 4_000_000;
+const GEAR_TEXT_MAX = 20_000;
+// Скільки тексту сторінки віддати моделі: Llama має менше контексту
+const GEAR_TEXT_CLAUDE = 12_000;
+const GEAR_TEXT_LLAMA = 6_000;
+const GEAR_UA = 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Mobile Safari/537.36';
+const gearQuota = (env) => aiQuota(env, 'gear_calls', GEAR_DAY_LIMIT);
+
+const GEAR_ENT = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', laquo: '«', raquo: '»', ndash: '–', mdash: '—', deg: '°', times: '×', hellip: '…', rsquo: '’', lsquo: '‘', rdquo: '”', ldquo: '“' };
+function unent(s) {
+  return String(s).replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e) => {
+    if (e[0] === '#') {
+      const n = e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : Number(e.slice(1));
+      return Number.isFinite(n) && n > 0 && n < 0x110000 ? String.fromCodePoint(n) : m;
+    }
+    return GEAR_ENT[e.toLowerCase()] ?? m;
+  });
+}
+
+const stripTags = (s) => unent(String(s).replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+
+/** <meta property|name|itemprop=… content=…> → { ключ: значення }; перше значення перемагає. */
+function metaTags(html) {
+  const out = {};
+  for (const m of html.matchAll(/<meta\b[^>]*>/gi)) {
+    const k = /(?:property|name|itemprop)\s*=\s*["']([^"']+)["']/i.exec(m[0])?.[1]?.toLowerCase();
+    const v = /content\s*=\s*"([^"]*)"|content\s*=\s*'([^']*)'/i.exec(m[0]);
+    if (k && v && !(k in out)) out[k] = unent(v[1] ?? v[2] ?? '').trim();
+  }
+  return out;
+}
+
+/** Перший Product із JSON-LD: назва, бренд, ціна з валютою, фото, опис, додаткові властивості. */
+function ldProduct(html) {
+  const found = [];
+  const walk = (x, depth = 0) => {
+    if (!x || typeof x !== 'object' || depth > 6) return;
+    if (Array.isArray(x)) { x.forEach((y) => walk(y, depth + 1)); return; }
+    if ([].concat(x['@type'] ?? []).some((t) => /product/i.test(String(t)))) found.push(x);
+    if (x['@graph']) walk(x['@graph'], depth + 1);
+  };
+  for (const m of html.matchAll(/<script\b[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
+    try { walk(JSON.parse(m[1].trim())); } catch { /* битий JSON-LD — пропускаємо */ }
+  }
+  const p = found[0];
+  if (!p) return null;
+  const offer = [].concat(p.offers ?? [])[0] ?? {};
+  const inner = [].concat(offer.offers ?? [])[0] ?? {};
+  const img = [].concat(p.image ?? [])[0];
+  const brand = typeof p.brand === 'string' ? p.brand : p.brand?.name;
+  return {
+    name: p.name ? stripTags(p.name) : '',
+    brand: brand ? stripTags(brand) : '',
+    price: Number(offer.price ?? offer.lowPrice ?? inner.price) || 0,
+    currency: String(offer.priceCurrency ?? inner.priceCurrency ?? '').toUpperCase(),
+    image: typeof img === 'string' ? img : String(img?.url ?? img?.contentUrl ?? ''),
+    description: p.description ? stripTags(p.description).slice(0, 1500) : '',
+    props: [].concat(p.additionalProperty ?? []).filter((x) => x?.name && x?.value != null).slice(0, 60)
+      .map((x) => `${stripTags(x.name)}: ${stripTags(x.value)}`),
+  };
+}
+
+/** Видимий текст сторінки рядками: без скриптів, стилів і розмітки; комірки таблиць — «ключ: значення». */
+function pageText(html) {
+  const s = html.replace(/<(script|style|noscript|svg|template|iframe|head)\b[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<\/(td|th|dt)>/gi, ': ')
+    .replace(/<(br|\/p|\/div|\/li|\/tr|\/h\d|\/dd|\/section|\/article)\b[^>]*>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ');
+  return unent(s).replace(/[ \t ]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n{2,}/g, '\n').trim();
+}
+
+/** Найсуттєвіше для моделі: картка товару від назви й рядки з характеристиками, без меню й підвалу. */
+function focusText(text, name, max) {
+  if (text.length <= max) return text;
+  const lines = text.split('\n').filter((l) => l.length > 1 && l.length < 400);
+  const keys = /характеристик|specification|довжин|длина|тест|вага|вес|розмір|размер|стрій|строй|заглибл|заглубл|глибин|глубин|плавуч|передаточ|передавальн|діаметр|диаметр|колін|секц|шпул|підшипник|подшипник|матеріал|материал|виробник|производитель|бренд|модель|колір|цвет|розривн|разрывн|навантаж|нагруз/i;
+  const words = name.toLowerCase().split(/\s+/).filter((x) => x.length > 3).slice(0, 3);
+  const start = Math.max(0, lines.findIndex((l) => words.length && words.every((x) => l.toLowerCase().includes(x))));
+  const pick = new Set();
+  for (let i = start; i < Math.min(lines.length, start + 60); i++) pick.add(i);
+  lines.forEach((l, i) => { if (keys.test(l)) for (let j = i - 1; j <= i + 2; j++) if (j >= 0 && j < lines.length) pick.add(j); });
+  let out = '';
+  for (const i of [...pick].sort((a, b) => a - b)) {
+    if (out.length + lines[i].length + 1 > max) break;
+    out += `${lines[i]}\n`;
+  }
+  return out.trim();
+}
+
+/** Лише http(s) з нормальним хостом: адресу дає людина, але бот не має ходити куди завгодно. */
+function publicUrl(raw) {
+  let u;
+  try { u = new URL(String(raw ?? '').trim()); } catch { return null; }
+  if (!['http:', 'https:'].includes(u.protocol) || u.username || u.password) return null;
+  const host = u.hostname.toLowerCase();
+  if (!host.includes('.') || host === 'localhost' || host.endsWith('.local') || /^[\d.]+$/.test(host) || host.includes(':')) return null;
+  return u;
+}
+
+/** Тіло відповіді не більше max байт — велику сторінку чи фото обрізаємо, а не тримаємо в пам'яті цілком. */
+async function readCapped(res, max) {
+  const reader = res.body?.getReader();
+  if (!reader) return new Uint8Array();
+  const parts = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) { await reader.cancel(); return null; }
+    parts.push(value);
+  }
+  const out = new Uint8Array(size);
+  let at = 0;
+  for (const p of parts) { out.set(p, at); at += p.byteLength; }
+  return out;
+}
+
+async function fetchPage(u) {
+  let res;
+  try {
+    res = await fetch(u.href, {
+      headers: { 'user-agent': GEAR_UA, accept: 'text/html,application/xhtml+xml', 'accept-language': 'uk,ru;q=0.8,en;q=0.5' },
+      redirect: 'follow', signal: AbortSignal.timeout(15000),
+    });
+  } catch (err) {
+    console.log('gear fetch', u.host, err.message);
+    throw new Error('fetch');
+  }
+  if (!res.ok) { console.log('gear fetch', u.host, res.status); throw new Error('fetch'); }
+  if (!/html|xml|text/i.test(res.headers.get('content-type') || '')) throw new Error('fetch');
+  const bytes = await readCapped(res, GEAR_PAGE_MAX);
+  if (!bytes) throw new Error('fetch');
+  // Кодування: з заголовка чи <meta charset>, інакше utf-8 (старі магазини бувають у windows-1251)
+  const head = new TextDecoder('latin1').decode(bytes.subarray(0, 4096));
+  const cs = (/charset=([\w-]+)/i.exec(res.headers.get('content-type') || '')?.[1] || /<meta[^>]+charset\s*=\s*["']?([\w-]+)/i.exec(head)?.[1] || 'utf-8').toLowerCase();
+  try { return new TextDecoder(cs).decode(bytes); } catch { return new TextDecoder('utf-8').decode(bytes); }
+}
+
+const GEAR_ACTIONS = ['', 'xfast', 'fast', 'mod', 'slow'];
+const GEAR_ROD_TYPES = ['', 'spin', 'feeder', 'float', 'fly', 'other'];
+const GEAR_BUOYS = ['', 'F', 'SP', 'S', 'SS'];
+const GEAR_SIZE_UNITS = ['mm', 'cm', 'in'];
+
+/** Категорії від застосунку (вбудовані й свої): id, назва, розділ — щоб модель вибирала з того, що є в людини. */
+function gearCats(list) {
+  const cats = (Array.isArray(list) ? list : []).slice(0, 200)
+    .map((c) => ({ id: String(c?.id ?? ''), name: String(c?.name ?? '').slice(0, 60), group: String(c?.group ?? '').slice(0, 40) }))
+    .filter((c) => /^[\w-]{1,40}$/.test(c.id));
+  return cats.some((c) => c.id === 'other') ? cats : [...cats, { id: 'other', name: 'Інше', group: 'other' }];
+}
+
+function gearSchema(cats) {
+  const str = { type: 'string' };
+  const num = { type: 'number' };
+  const props = {
+    name: str, cat: { type: 'string', enum: cats.map((c) => c.id) }, brand: str, model: str, color: str,
+    weight: num, lureSize: num, sizeUnit: { type: 'string', enum: GEAR_SIZE_UNITS }, buoy: { type: 'string', enum: GEAR_BUOYS }, depth: str,
+    length: num, test: str, action: { type: 'string', enum: GEAR_ACTIONS }, pieces: num, rodType: { type: 'string', enum: GEAR_ROD_TYPES },
+    size: str, ratio: str, spools: num, pe: str, mm: num, specs: str, note: str,
+  };
+  return { type: 'object', properties: props, required: Object.keys(props), additionalProperties: false };
+}
+
+function gearPrompt(cats) {
+  return [
+    'Ти заповнюєш картку рибальської снасті чи спорядження в застосунку обліку за текстом сторінки інтернет-магазину.',
+    'Бери лише те, що написано на сторінці. Не знаєш — порожній рядок або 0. Нічого не вигадуй.',
+    `cat — одна з категорій (id: назва / розділ): ${cats.map((c) => `${c.id}: ${c.name} / ${c.group}`).join('; ')}.`,
+    'name — коротка назва українською, як людина впише в облік: тип + бренд + модель + головний розмір чи колір («Воблер Jackall Squad Minnow 95SP»), без «купити», ціни й назви магазину.',
+    'brand — виробник; model — модель без бренду; color — назва кольору чи забарвлення, як на сторінці.',
+    'Приманки й оснастка: weight — вага однієї штуки в грамах; lureSize — довжина приманки числом, sizeUnit — mm, cm або in',
+    '(у назві «95мм» чи «95SP» — це 95 mm; якщо в характеристиках «95 см» для воблера — це помилка магазину, бери мм з назви).',
+    'Воблер: buoy — F плаває, SP суспендер, S тоне, SS повільно тоне (за літерами в назві чи словом «Плавучість»); depth — заглиблення в метрах текстом, напр. «0.8–1.5».',
+    'Вудилище: length — довжина в метрах числом (240 см → 2.4); test — тест у грамах текстом, напр. «5–25»; action — xfast екстрашвидкий, fast швидкий, mod середній, slow повільний;',
+    'pieces — кількість колін; rodType — spin спінінг, feeder фідер, float поплавок (болонка, матч, маховик), fly нахлист, other.',
+    'Котушка: size — розмір текстом («2500»); ratio — передавальне число текстом («6.2:1»); spools — кількість ЗАПАСНИХ шпуль.',
+    'Шнур чи волосінь: pe — номер PE текстом («0.8»); mm — діаметр у мм числом; length — довжина намотки в метрах.',
+    'Поля, що не стосуються категорії, — порожні або 0.',
+    'specs — головні характеристики зі сторінки рядками «Назва: значення» українською (до 15 рядків), без доставки, оплати, гарантії й відгуків.',
+    'note — одне коротке речення: що неоднозначне чи припущене, або порожньо. Сторінка не про товар — note про це, решта порожня.',
+  ].join('\n');
+}
+
+const gearNum = (v, max) => {
+  const n = Number(String(v ?? '').replace(',', '.'));
+  return Number.isFinite(n) && n > 0 && n <= max ? Math.round(n * 1000) / 1000 : null;
+};
+const gearStr = (v, max) => String(v ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
+const gearPick = (v, list, def = '') => (list.includes(v) ? v : def);
+
+/** Відповідь моделі → поля форми: лише відомі ключі, числа в розумних межах, порожнє не передаємо. */
+function cleanGear(r, cats) {
+  const out = {
+    name: gearStr(r?.name, 120), cat: cats.some((c) => c.id === r?.cat) ? r.cat : 'other',
+    brand: gearStr(r?.brand, 60), model: gearStr(r?.model, 80), color: gearStr(r?.color, 60),
+    weight: gearNum(r?.weight, 50_000), lureSize: gearNum(r?.lureSize, 2000), sizeUnit: gearPick(r?.sizeUnit, GEAR_SIZE_UNITS, 'mm'),
+    buoy: gearPick(r?.buoy, GEAR_BUOYS), depth: gearStr(r?.depth, 20),
+    length: gearNum(r?.length, 5000), test: gearStr(r?.test, 20), action: gearPick(r?.action, GEAR_ACTIONS),
+    pieces: gearNum(r?.pieces, 20), rodType: gearPick(r?.rodType, GEAR_ROD_TYPES),
+    size: gearStr(r?.size, 20), ratio: gearStr(r?.ratio, 20), spools: gearNum(r?.spools, 10),
+    pe: gearStr(r?.pe, 10), mm: gearNum(r?.mm, 5), specs: String(r?.specs ?? '').trim().slice(0, 2000),
+  };
+  for (const k of Object.keys(out)) if (out[k] === '' || out[k] == null) delete out[k];
+  if (!out.lureSize) delete out.sizeUnit;
+  return { item: out, note: gearStr(r?.note, 300) };
+}
+
+/** Текст для моделі: розмітка товару зверху (надійніша), далі вибране зі сторінки. */
+function gearSource(html, url, max) {
+  const meta = metaTags(html);
+  const ld = ldProduct(html);
+  const name = ld?.name || meta['og:title'] || '';
+  const parts = [
+    url ? `Адреса: ${url}` : '',
+    name ? `Назва товару: ${name}` : '',
+    ld?.brand || meta['og:product:brand'] || meta['product:brand'] ? `Бренд: ${ld?.brand || meta['og:product:brand'] || meta['product:brand']}` : '',
+    ld?.props?.length ? `Властивості:\n${ld.props.join('\n')}` : '',
+    ld?.description ? `Опис: ${ld.description}` : '',
+  ].filter(Boolean).join('\n');
+  const text = focusText(pageText(html), name, Math.max(1000, max - parts.length));
+  return { ld, meta, text: `${parts}\n\nТекст сторінки:\n${text}`.slice(0, max), bare: text.length < 200 && !ld };
+}
+
+/**
+ * POST /api/gear-from-url { url } або { text, url? } і { cats: [{ id, name, group }] } →
+ * { item: { name, cat, brand, …, price, specs }, image, note, source }. Помилки: fetch — сайт не віддав сторінку
+ * (застосунок просить вставити текст), empty — на сторінці немає тексту товару, limit, ai, busy.
+ */
+async function onGearFromUrl(request, env) {
+  if (!await authorized(request, env)) return json({ error: 'unauthorized' }, 401);
+  const body = await request.json().catch(() => null);
+  const pasted = String(body?.text ?? '').trim();
+  const u = body?.url ? publicUrl(body.url) : null;
+  if ((!u && !pasted) || pasted.length > GEAR_TEXT_MAX || (body?.url && !u)) return json({ error: 'bad request' }, 400);
+  if (!env.ANTHROPIC_API_KEY && !env.AI) return json({ error: 'no-ai' }, 503);
+  if (!await gearQuota(env)) return json({ error: 'limit' }, 429);
+  const cats = gearCats(body?.cats);
+  const max = env.ANTHROPIC_API_KEY ? GEAR_TEXT_CLAUDE : GEAR_TEXT_LLAMA;
+  let src;
+  if (pasted) {
+    src = { ld: null, meta: {}, text: `${u ? `Адреса: ${u.href}\n` : ''}Текст сторінки (вставила людина):\n${pasted}`.slice(0, max), bare: false };
+  } else {
+    let html;
+    try { html = await fetchPage(u); } catch { return json({ error: 'fetch' }, 502); }
+    src = gearSource(html, u.href, max);
+    if (src.bare) return json({ error: 'empty' }, 422);
+  }
+  const ask = { system: gearPrompt(cats), text: src.text, schema: gearSchema(cats) };
+  let r;
+  try {
+    r = env.ANTHROPIC_API_KEY
+      ? await claudeJson(env, { ...ask, maxTokens: 3000, tag: 'gear' })
+      : await workersAiJson(env, { ...ask, maxTokens: 1200 });
+  } catch (err) {
+    console.log('gear error', err.stack || err);
+    return json({ error: err.message === 'busy' ? 'busy' : 'ai' }, 502);
+  }
+  if (!r) return json({ error: 'ai' }, 502);
+  const { item, note } = cleanGear(r, cats);
+  // Назва, бренд і ціна з розмітки товару надійніші за модель; ціна — лише в гривнях
+  if (src.ld?.brand && !item.brand) item.brand = src.ld.brand;
+  const price = src.ld?.price && (!src.ld.currency || src.ld.currency === 'UAH') ? src.ld.price : 0;
+  if (price > 0 && price < 10_000_000) item.price = Math.round(price * 100) / 100;
+  if (!item.name && src.ld?.name) item.name = src.ld.name.slice(0, 120);
+  const rawImage = src.ld?.image || src.meta?.['og:image'] || '';
+  let image = '';
+  try { if (rawImage) image = publicUrl(new URL(rawImage, u?.href).href)?.href ?? ''; } catch { /* битa адреса фото */ }
+  return json({ item, image, note, source: env.ANTHROPIC_API_KEY ? 'claude' : 'workers-ai' });
+}
+
+/** POST /api/gear-image { url } → саме зображення (jpeg/png/webp, до 4 МБ): застосунку його не дадуть узяти з магазину напряму. */
+async function onGearImage(request, env) {
+  if (!await authorized(request, env)) return json({ error: 'unauthorized' }, 401);
+  const body = await request.json().catch(() => null);
+  const u = publicUrl(body?.url);
+  if (!u) return json({ error: 'bad request' }, 400);
+  let res;
+  try {
+    res = await fetch(u.href, { headers: { 'user-agent': GEAR_UA, accept: 'image/avif,image/webp,image/*' }, signal: AbortSignal.timeout(15000) });
+  } catch { return json({ error: 'fetch' }, 502); }
+  const type = (res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  if (!res.ok || !/^image\/(jpeg|png|webp|gif|avif)$/.test(type)) return json({ error: 'fetch' }, 502);
+  const bytes = await readCapped(res, GEAR_IMAGE_MAX);
+  if (!bytes) return json({ error: 'too-big' }, 413);
+  return new Response(bytes, { headers: { 'content-type': type } });
 }
 
 // ---------- вага й гроші в підсумках ----------
