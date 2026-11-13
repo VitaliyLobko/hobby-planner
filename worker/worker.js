@@ -88,6 +88,7 @@ export default {
       if (url.pathname === '/api/food-label' && request.method === 'POST') return cors(request, await onFoodLabel(request, env));
       if (url.pathname === '/api/gear-from-url' && request.method === 'POST') return cors(request, await onGearFromUrl(request, env));
       if (url.pathname === '/api/gear-image' && request.method === 'POST') return cors(request, await onGearImage(request, env));
+      if (url.pathname === '/api/arsenal-from-url' && request.method === 'POST') return cors(request, await onArsenalFromUrl(request, env));
       if (url.pathname === '/api/ration' && request.method === 'POST') return cors(request, await onRation(request, env));
       if (url.pathname === '/' && request.method === 'GET') return await onSetup(url, env);
       return new Response('Not found', { status: 404 });
@@ -3082,11 +3083,13 @@ function pageText(html) {
   return unent(s).replace(/[ \t ]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n{2,}/g, '\n').trim();
 }
 
-/** Найсуттєвіше для моделі: картка товару від назви й рядки з характеристиками, без меню й підвалу. */
-function focusText(text, name, max) {
+/** Слова рядків з характеристиками снастей — їх focusText тримає, навіть коли сторінка довга. */
+const GEAR_KEYS = /характеристик|specification|довжин|длина|тест|вага|вес|розмір|размер|стрій|строй|заглибл|заглубл|глибин|глубин|плавуч|передаточ|передавальн|діаметр|диаметр|колін|секц|шпул|підшипник|подшипник|матеріал|материал|виробник|производитель|бренд|модель|колір|цвет|розривн|разрывн|навантаж|нагруз/i;
+
+/** Найсуттєвіше для моделі: картка товару від назви й рядки з характеристиками (keys), без меню й підвалу. */
+function focusText(text, name, max, keys = GEAR_KEYS) {
   if (text.length <= max) return text;
   const lines = text.split('\n').filter((l) => l.length > 1 && l.length < 400);
-  const keys = /характеристик|specification|довжин|длина|тест|вага|вес|розмір|размер|стрій|строй|заглибл|заглубл|глибин|глубин|плавуч|передаточ|передавальн|діаметр|диаметр|колін|секц|шпул|підшипник|подшипник|матеріал|материал|виробник|производитель|бренд|модель|колір|цвет|розривн|разрывн|навантаж|нагруз/i;
   const words = name.toLowerCase().split(/\s+/).filter((x) => x.length > 3).slice(0, 3);
   const start = Math.max(0, lines.findIndex((l) => words.length && words.every((x) => l.toLowerCase().includes(x))));
   const pick = new Set();
@@ -3297,6 +3300,208 @@ async function onGearImage(request, env) {
   const bytes = await readCapped(res, GEAR_IMAGE_MAX);
   if (!bytes) return json({ error: 'too-big' }, 413);
   return new Response(bytes, { headers: { 'content-type': type } });
+}
+
+// ---------- Shooter's Log: ствол, набій, приціл чи річ зі сторінки магазину ----------
+// Те саме, що для Fishing Log (сторінка, розмітка товару, фото через /api/gear-image), але свої поля.
+// Модель віддає числа з одиницями як на сторінці, а переводимо в одиниці застосунку ми — модель у цьому помиляється.
+
+const ARSENAL_DAY_LIMIT = 150;
+const arsenalQuota = (env) => aiQuota(env, 'arsenal_calls', ARSENAL_DAY_LIMIT);
+const ARSENAL_KINDS = ['weapon', 'cartridge', 'scope', 'item'];
+const ARSENAL_KEYS = /характеристик|specification|калібр|калибр|caliber|calibre|ствол|barrel|твіст|твист|twist|нариз|rifling|довжин|длина|length|вага|вес|weight|куля|кул[іь]|пул[яи]|bullet|grain|гран|швидк|скорост|velocity|fps|балістич|баллистич|ballistic|\bBC\b|G1|G7|кільк|количеств|rounds|в упаковці|в пачці|сітк|сетк|reticle|клік|клик|click|MRAD|MOA|кратн|збільш|увелич|magnif|об.єктив|objective|фокальн|focal|FFP|SFP|кріплен|креплен|mount|матеріал|материал|виробник|производитель|бренд|модель/i;
+const SCOPE_KIND_KEYS = ['', 'optic', 'red', 'holo', 'thermal', 'night', 'other'];
+
+const arsenalStr = { type: 'string' };
+const arsenalNum = { type: 'number' };
+const arsenalUnit = (list) => ({ type: 'string', enum: ['', ...list] });
+const LEN_UNITS = ['mm', 'cm', 'in', 'm'];
+const MASS_UNITS = ['g', 'kg', 'lb', 'oz'];
+
+/** Поля, які модель заповнює для кожного виду; спільні — назва, бренд, характеристики, примітка. */
+function arsenalFields(kind, cats) {
+  const common = { name: arsenalStr, brand: arsenalStr, weight: arsenalNum, weightUnit: arsenalUnit(MASS_UNITS), specs: arsenalStr, note: arsenalStr };
+  if (kind === 'weapon') {
+    return { ...common, caliber: arsenalStr, barrel: arsenalNum, barrelUnit: arsenalUnit(LEN_UNITS), twist: arsenalNum, twistUnit: arsenalUnit(['in', 'mm']),
+      length: arsenalNum, lengthUnit: arsenalUnit(LEN_UNITS) };
+  }
+  if (kind === 'cartridge') {
+    return { ...common, caliber: arsenalStr, bullet: arsenalNum, bulletUnit: arsenalUnit(['gr', 'g']), bc: arsenalNum, bcModel: arsenalUnit(['G1', 'G7']),
+      mv: arsenalNum, mvUnit: arsenalUnit(['m/s', 'fps']), testBarrel: arsenalNum, testBarrelUnit: arsenalUnit(LEN_UNITS),
+      bulletLength: arsenalNum, bulletLengthUnit: arsenalUnit(LEN_UNITS), packQty: arsenalNum };
+  }
+  if (kind === 'scope') {
+    return { ...common, scopeKind: { type: 'string', enum: SCOPE_KIND_KEYS }, reticle: arsenalUnit(['mil', 'moa', 'dot']),
+      click: arsenalNum, clickUnit: arsenalUnit(['mil', 'moa']) };
+  }
+  return { ...common, cat: { type: 'string', enum: ['', ...cats.map((c) => c.id)] } };
+}
+
+function arsenalSchema(kind, cats) {
+  const props = arsenalFields(kind, cats);
+  return { type: 'object', properties: props, required: Object.keys(props), additionalProperties: false };
+}
+
+const ARSENAL_WHAT = {
+  weapon: 'вогнепальну зброю (гвинтівку, карабін, рушницю, пістолет)',
+  cartridge: 'набої (заводські патрони)',
+  scope: 'приціл (оптичний, коліматорний, голографічний, тепловізійний, нічний)',
+  item: 'спорядження, тюнінг чи аксесуар до зброї',
+};
+
+function arsenalPrompt(kind, cats) {
+  const lines = [
+    `Ти заповнюєш картку в застосунку обліку стрільця за текстом сторінки інтернет-магазину чи виробника. Людина додає ${ARSENAL_WHAT[kind]}.`,
+    'Бери лише те, що написано на сторінці. Не знаєш — порожній рядок або 0. Нічого не вигадуй і не підставляй «типові» значення.',
+    'Числа — як на сторінці, а одиницю пиши в окреме поле *Unit (одиниці не переводь). Десятковий роздільник — крапка.',
+    'name — коротка назва, як людина впише в облік: бренд + модель + головне (калібр, кратність, вага кулі), без «купити», артикулів магазину, ціни й назви магазину.',
+    'brand — виробник. weight — вага самого товару, weightUnit — g, kg, lb чи oz.',
+    'specs — головні характеристики зі сторінки рядками «Назва: значення» українською (до 15 рядків), без доставки, оплати, гарантії, відгуків і дозволів.',
+    'note — одне коротке речення: що неоднозначне чи припущене, або порожньо. Сторінка не про такий товар — note про це, решта порожня.',
+  ];
+  if (kind === 'weapon') {
+    lines.push('caliber — калібр як пишуть стрільці: «.308 Win», «.223 Rem», «5.56x45», «6.5 Creedmoor», «12/76».',
+      'barrel — довжина ствола (24″ → 24 і in; 610 мм → 610 і mm). length — загальна довжина зброї.',
+      'twist — крок нарізів: «1:10″» → 10 і in; «1:254 мм» → 254 і mm. Немає — 0.');
+  } else if (kind === 'cartridge') {
+    lines.push('caliber — калібр («.308 Win», «.223 Rem», «5.45x39»). bullet — вага кулі, bulletUnit — gr (гран) чи g (грам).',
+      'bc — балістичний коефіцієнт; bcModel — G1 чи G7, лише якщо на сторінці так і написано; не написано — порожньо (BC тоді все одно впиши).',
+      'mv — початкова швидкість, mvUnit — m/s чи fps. testBarrel — довжина ствола, на якому міряли швидкість (Test Barrel 24″ → 24 і in).',
+      'bulletLength — довжина кулі (не набою). packQty — скільки набоїв в упаковці, яку продають на сторінці.');
+  } else if (kind === 'scope') {
+    lines.push('scopeKind — optic оптичний, red коліматор (red dot), holo голографічний, thermal тепловізор, night нічний, other інше.',
+      'reticle — mil, якщо сітка в MRAD/MIL; moa, якщо в MOA; dot — коліматор без сітки. Не зрозуміло — порожньо.',
+      'click — ціна одного кліку барабана числом (0.1 MRAD → 0.1 і mil; 1/4 MOA → 0.25 і moa). Не написано — 0.');
+  } else {
+    lines.push(cats.length ? `cat — одна з категорій (id: назва): ${cats.map((c) => `${c.id}: ${c.name}`).join('; ')}. Не підходить жодна — порожньо.` : 'cat — порожньо.');
+  }
+  return lines.join('\n');
+}
+
+const toMm = (v, u) => (v > 0 ? v * ({ mm: 1, cm: 10, in: 25.4, m: 1000 }[u] ?? NaN) : NaN);
+const toGrams = (v, u) => (v > 0 ? v * ({ g: 1, kg: 1000, lb: 453.592, oz: 28.3495 }[u] ?? NaN) : NaN);
+const rnd = (n, step) => Math.round(n / step) * step;
+/** Число в межах або null: модель могла поставити не ту одиницю — дике значення краще не вписувати. */
+const within = (n, min, max, step) => (Number.isFinite(n) && n >= min && n <= max ? +rnd(n, step).toFixed(4) : null);
+const SPECS_MAX = 2000;
+
+/** Відповідь моделі → поля застосунку в його одиницях; порожнє не передаємо. */
+function cleanArsenal(kind, r, cats) {
+  const num = (k) => Number(String(r?.[k] ?? '').replace(',', '.')) || 0;
+  const notes = [gearStr(r?.note, 300)];
+  const out = { name: gearStr(r?.name, 120), brand: gearStr(r?.brand, 60), specs: String(r?.specs ?? '').trim().slice(0, SPECS_MAX) };
+  const weight = within(toGrams(num('weight'), r?.weightUnit), 1, 30_000, 1);
+  if (kind === 'weapon') {
+    Object.assign(out, {
+      caliber: gearStr(r?.caliber, 30), weight,
+      barrel: within(toMm(num('barrel'), r?.barrelUnit), 50, 1500, 1),
+      length: within(toMm(num('length'), r?.lengthUnit) / 10, 20, 200, 0.1),
+      // Крок нарізів у застосунку — дюйми на оберт
+      twist: within(r?.twistUnit === 'mm' ? num('twist') / 25.4 : num('twist'), 3, 40, 0.1),
+    });
+  } else if (kind === 'cartridge') {
+    const unit = r?.bulletUnit === 'g' ? 'г' : 'gr';
+    const bullet = within(num('bullet'), 0.1, unit === 'г' ? 60 : 900, 0.01);
+    const bc = within(num('bc'), 0.05, 1.5, 0.001);
+    const model = ['G1', 'G7'].includes(r?.bcModel) ? r.bcModel : '';
+    // BC без позначки моделі не вписуємо: у формі за замовчуванням G7, а G1-число там зіпсує поправки
+    if (bc && !model) notes.push(`На сторінці BC ${bc} без позначки G1 чи G7 — не вписав, перевірте у виробника.`);
+    Object.assign(out, {
+      caliber: gearStr(r?.caliber, 30), bulletWeight: bullet, weightUnit: bullet ? unit : null,
+      bc: model ? bc : null, dragModel: model && bc ? model : null,
+      mv: within(r?.mvUnit === 'fps' ? num('mv') * 0.3048 : r?.mvUnit === 'm/s' ? num('mv') : NaN, 100, 1700, 1),
+      testBarrel: within(toMm(num('testBarrel'), r?.testBarrelUnit) / 25.4, 2, 40, 0.1),
+      bulletLength: within(toMm(num('bulletLength'), r?.bulletLengthUnit), 3, 80, 0.1),
+      packQty: within(num('packQty'), 1, 2000, 1),
+    });
+  } else if (kind === 'scope') {
+    const unit = ['mil', 'moa'].includes(r?.clickUnit) ? r.clickUnit : '';
+    const click = unit ? within(num('click'), 0.01, 2, 0.0001) : null;
+    Object.assign(out, {
+      weight, kind: SCOPE_KIND_KEYS.includes(r?.scopeKind) && r.scopeKind ? r.scopeKind : null,
+      reticle: ['mil', 'moa', 'dot'].includes(r?.reticle) ? r.reticle : null,
+      // Ключ ціни кліку застосунку: 'mil0.1', 'moa0.25'
+      click: click ? `${unit}${click}` : null,
+    });
+  } else {
+    Object.assign(out, { weight, cat: cats.some((c) => c.id === r?.cat) ? r.cat : null });
+  }
+  for (const k of Object.keys(out)) if (out[k] === '' || out[k] == null) delete out[k];
+  return { item: out, note: notes.filter(Boolean).join(' ') };
+}
+
+/** Текст для моделі: розмітка товару зверху; підписи з data-label (таблиці балістики виробників) — у текст. */
+function arsenalSource(html, url, max) {
+  const labeled = html.replace(/<([a-z][\w-]*)\b[^>]*\bdata-label\s*=\s*"([^"]{1,60})"[^>]*>/gi, (m, tag, label) => `${m}${label}: `);
+  const meta = metaTags(labeled);
+  const ld = ldProduct(labeled);
+  const name = ld?.name || meta['og:title'] || '';
+  const brand = ld?.brand || meta['og:product:brand'] || meta['product:brand'] || '';
+  const parts = [
+    url ? `Адреса: ${url}` : '',
+    name ? `Назва товару: ${name}` : '',
+    brand ? `Бренд: ${brand}` : '',
+    ld?.props?.length ? `Властивості:\n${ld.props.join('\n')}` : '',
+  ].filter(Boolean).join('\n');
+  const text = focusText(pageText(labeled), name, Math.max(1000, max - parts.length), ARSENAL_KEYS);
+  return { ld, meta, text: `${parts}\n\nТекст сторінки:\n${text}`.slice(0, max), bare: text.length < 200 && !ld };
+}
+
+/** Ціна в гривнях з розмітки товару (JSON-LD, інакше product:price): модель цін не читає. */
+function arsenalPrice(ld, meta) {
+  const ldOk = ld?.price && (!ld.currency || ld.currency === 'UAH');
+  const metaCur = String(meta?.['product:price:currency'] ?? meta?.['og:price:currency'] ?? '').toUpperCase();
+  const metaPrice = Number(meta?.['product:price:amount'] ?? meta?.['og:price:amount']) || 0;
+  const p = ldOk ? ld.price : metaCur === 'UAH' ? metaPrice : 0;
+  return p > 0 && p < 10_000_000 ? Math.round(p * 100) / 100 : null;
+}
+
+/**
+ * POST /api/arsenal-from-url { kind: weapon|cartridge|scope|item, url } або { kind, text, url? }, для item ще cats: [{ id, name }] →
+ * { item: {…у одиницях застосунку}, image, note, source }. Помилки ті самі, що в /api/gear-from-url: fetch, empty, limit, ai, busy.
+ */
+async function onArsenalFromUrl(request, env) {
+  if (!await authorized(request, env)) return json({ error: 'unauthorized' }, 401);
+  const body = await request.json().catch(() => null);
+  const kind = ARSENAL_KINDS.includes(body?.kind) ? body.kind : null;
+  const pasted = String(body?.text ?? '').trim();
+  const u = body?.url ? publicUrl(body.url) : null;
+  if (!kind || (!u && !pasted) || pasted.length > GEAR_TEXT_MAX || (body?.url && !u)) return json({ error: 'bad request' }, 400);
+  if (!env.ANTHROPIC_API_KEY && !env.AI) return json({ error: 'no-ai' }, 503);
+  if (!await arsenalQuota(env)) return json({ error: 'limit' }, 429);
+  const cats = kind !== 'item' || !Array.isArray(body?.cats) ? [] : body.cats.slice(0, 100)
+    .map((c) => ({ id: String(c?.id ?? ''), name: String(c?.name ?? '').slice(0, 60) }))
+    .filter((c) => /^[\w-]{1,40}$/.test(c.id));
+  const max = env.ANTHROPIC_API_KEY ? GEAR_TEXT_CLAUDE : GEAR_TEXT_LLAMA;
+  let src;
+  if (pasted) {
+    src = { ld: null, meta: {}, text: `${u ? `Адреса: ${u.href}\n` : ''}Текст сторінки (вставила людина):\n${pasted}`.slice(0, max), bare: false };
+  } else {
+    let html;
+    try { html = await fetchPage(u); } catch { return json({ error: 'fetch' }, 502); }
+    src = arsenalSource(html, u.href, max);
+    if (src.bare) return json({ error: 'empty' }, 422);
+  }
+  const ask = { system: arsenalPrompt(kind, cats), text: src.text, schema: arsenalSchema(kind, cats) };
+  let r;
+  try {
+    r = env.ANTHROPIC_API_KEY
+      ? await claudeJson(env, { ...ask, maxTokens: 3000, tag: 'arsenal' })
+      : await workersAiJson(env, { ...ask, maxTokens: 1200 });
+  } catch (err) {
+    console.log('arsenal error', err.stack || err);
+    return json({ error: err.message === 'busy' ? 'busy' : 'ai' }, 502);
+  }
+  if (!r) return json({ error: 'ai' }, 502);
+  const { item, note } = cleanArsenal(kind, r, cats);
+  if (src.ld?.brand && !item.brand) item.brand = src.ld.brand.slice(0, 60);
+  if (!item.name && src.ld?.name) item.name = src.ld.name.slice(0, 120);
+  const price = arsenalPrice(src.ld, src.meta);
+  if (price) item.price = price;
+  const rawImage = src.ld?.image || src.meta?.['og:image'] || '';
+  let image = '';
+  try { if (rawImage) image = publicUrl(new URL(rawImage, u?.href).href)?.href ?? ''; } catch { /* бита адреса фото */ }
+  return json({ item, image, note, source: env.ANTHROPIC_API_KEY ? 'claude' : 'workers-ai' });
 }
 
 // ---------- вага й гроші в підсумках ----------
